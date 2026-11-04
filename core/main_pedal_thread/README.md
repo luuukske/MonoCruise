@@ -14,6 +14,23 @@
 
 Does not send to the game, hazard/horn, cruise logic, AEB, or keyboard hook lifecycle.
 
+## Video init
+
+`pygame.init()` does not raise when the video subsystem fails. It returns a
+failure count, `pygame.get_init()` stays true, and `pygame.event.get()` then
+raises `video system not initialized`. That killed this thread on machines
+where the display driver will not start (a remote session, a broken GPU
+driver, a bad `SDL_VIDEODRIVER`), and the watchdog retried the same init until
+it gave up. Joystick events are pumped through that call, and this process
+never opens a window, so a failed display init is retried once with the dummy
+SDL video driver. The log line records the init counts, the driver name, and
+the SDL error from the direct retry.
+
+If the dummy driver is still down, the thread stays up instead of crashing.
+The next loop closes the joysticks (so they are not held open while unread)
+and publishes released pedals and button holds, with one popup. It does not
+call `pygame.quit()`: the mixer is shared with the AEB warning sounds.
+
 ## Pedal axes come from their own events
 
 `gasval` and `brakeval` move only on a `JOYAXISMOTION` event of that exact axis
@@ -43,6 +60,13 @@ The brake's first report after a reset jumps from 0 to wherever the foot is.
 or a brake held through a reconnect at speed would trip `em_stop`. A real
 stomp is caught a tick later, and `brakeval >= 0.8` is never skipped.
 
+`shared_pedal_axis` is one axis for both pedals, resting in the middle.
+`inverted` then means that pedal is the negative half: the middle and the
+other half read 0, and full travel on its own half reads 1. One motion event
+updates both. Separate pedals still use `normalise_axis`. The flag does
+nothing unless gas and brake are that same index, so a stale flag cannot
+remap a normal pedal set.
+
 ## Pedal configuration
 
 `start_pedal_config()` opens every joystick (vJoy excluded) and logs what it
@@ -55,17 +79,32 @@ Taps are measured by `pedal_axes.TapDetector` from motion events, never from
 device: a pedal resting at -1.0 then looked pressed and inverted the moment it
 reported.
 
-- An axis that has sat within 0.2 of -1 or +1 rests at that end (sticky: a full
-  stomp reaching the other end does not move it). Its tap is 0.15 from that
-  end, and the end decides inversion (resting at +1 means inverted). The low
-  threshold is for load-cell brakes, where a tap moves the output little.
-- Any other axis (steering, odd calibration) keeps the old rule: 0.3 from its
-  first event, inverted when it moved down.
-- Within a tick a pedal-like axis beats any other, then the larger move wins.
-  The gas stage only accepts the brake's device and never the brake axis.
+- An axis whose first report sits within 0.2 of -1 or +1 rests at that end
+  (sticky: a full stomp reaching the other end does not move it). Its tap is
+  0.15 from that end, and the end decides inversion (resting at +1 means
+  inverted). The low threshold is for load-cell brakes, where a tap moves the
+  output little.
+- An axis whose first report sits within 0.1 of 0 rests in the middle. That
+  rest is sticky, so a press to either stop does not turn it into an end-rest
+  pedal. Brake is the direction of the tap and gas is the other direction of
+  the same axis. The tap stays 0.3, so a small drift is not a pedal, and an
+  end-rest pedal still outranks it. The other direction, once it has passed
+  0.3, counts as the gas tap on the next tick, including when one sweep
+  crossed both ways before the brake tap was taken.
+- An axis whose first report is away from both the ends and the middle keeps
+  the old rule: 0.3 from its first event, inverted when it moved down, and a
+  later arrival at an end becomes its rest.
+- Within a tick an end-rest pedal beats any other axis, then the other half
+  of a middle-rest brake beats a steering move, then the larger move wins.
+- The gas stage stays on the brake's device. An end-rest brake never accepts
+  its own axis. A middle-rest brake also accepts the opposite half of that
+  axis.
 
 Known limit: a pedal already pressed when the flow starts has its first event
-mid-travel, so its release can still read as an inverted tap.
+mid-travel, so its release can still read as an inverted tap. A stick axis is
+only treated as shared when that first report is in the middle, so it has to
+be resting there when the flow starts hearing it. Joysticks report that rest
+while the flow is waiting.
 
 A cancel logs, per device, how many axis events arrived and the largest move,
 so a "pedals not detected" report says whether pygame saw the device at all,

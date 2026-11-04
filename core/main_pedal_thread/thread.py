@@ -22,6 +22,7 @@ from core.input_bindings import (
 )
 from core.main_pedal_thread.joystick_pool import JoystickPool, pick_joystick
 from core.main_pedal_thread.pedal_axes import PedalAxes, TapDetector
+from core.main_pedal_thread.pygame_video import PygameVideo, publish_released
 
 logger = logging.getLogger(__name__)
 
@@ -170,7 +171,7 @@ class MainPedalThreadData(ThreadData):
     pedal_config_active: bool = False
     pedal_config_stage: str = ""    # "brake" or "gas" while active
     # dict(device_guid, device_name, gasaxis, brakeaxis, gas_inverted,
-    # brake_inverted) once the flow finishes; consumed by the UI.
+    # brake_inverted, shared_pedal_axis) once the flow finishes; consumed by the UI.
     pedal_config_result: object = None
 
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False, compare=False)
@@ -183,6 +184,7 @@ class MainPedalThread(BaseThread):
     def __init__(self) -> None:
         super().__init__(name="main_pedal_thread")
         self.data = MainPedalThreadData()
+        self._video = PygameVideo()
 
         self._device: pygame.joystick.JoystickType | None = None
         self._device_instance_id: int | None = None
@@ -238,6 +240,8 @@ class MainPedalThread(BaseThread):
         self._pconf_device_guid: str | None = None
         self._pconf_brake_axis: int | None = None
         self._pconf_brake_inverted: bool = False
+        # Set when the brake rests in the middle: which half that tap was.
+        self._pconf_brake_negative: bool | None = None
 
         self._prev_brakeval: float = 0.0
         self._prev_speed: float = 0.0
@@ -245,8 +249,9 @@ class MainPedalThread(BaseThread):
 
 
     def setup(self) -> None:
-        pygame.init()
-        pygame.joystick.init()
+        self._video.start(pygame)
+        if self._video.failed:
+            return
 
         # Pedal device (critical).
         pedal_guid = Settings.device
@@ -276,6 +281,16 @@ class MainPedalThread(BaseThread):
 
     def loop(self) -> None:
         if not self.running:
+            return
+        # event.get() raises if video never came up, which used to kill this thread.
+        if self._video.failed:
+            if self._video.take_failure():
+                logger.warning(
+                    "Joystick input cannot be read. Restart MonoCruise.",
+                    extra={"popup": True},
+                )
+            self._video.release(pygame)
+            publish_released(self.data)
             return
 
         polling_rate = max(Settings.polling_rate, 10)
@@ -597,6 +612,7 @@ class MainPedalThread(BaseThread):
         self._pconf_device_guid = None
         self._pconf_brake_axis = None
         self._pconf_brake_inverted = False
+        self._pconf_brake_negative = None
         # Configuration supersedes any in-flight pedal reconnect attempt.
         self._reconnect_state = None
         self._reconnect_js = None
@@ -644,15 +660,32 @@ class MainPedalThread(BaseThread):
             self._pconf_device_guid = hit.guid
             self._pconf_brake_axis = hit.axis
             self._pconf_brake_inverted = hit.inverted
-            self._pconf_taps.restrict(hit.guid, hit.axis)
-            logger.info(
-                "pedal config: brake axis %d on %r (inverted=%s)",
-                hit.axis, self._pconf_names.get(hit.guid, ""), hit.inverted,
-            )
+            self._pconf_brake_negative = hit.negative_half if hit.combined else None
+            if hit.combined:
+                self._pconf_taps.restrict(
+                    hit.guid, hit.axis, gas_negative=not hit.negative_half,
+                )
+            else:
+                self._pconf_taps.restrict(hit.guid, hit.axis)
+            if hit.combined:
+                logger.info(
+                    "pedal config: brake axis %d on %r rests in the middle (negative=%s)",
+                    hit.axis, self._pconf_names.get(hit.guid, ""), hit.negative_half,
+                )
+            else:
+                logger.info(
+                    "pedal config: brake axis %d on %r (inverted=%s)",
+                    hit.axis, self._pconf_names.get(hit.guid, ""), hit.inverted,
+                )
             with self.data._lock:
                 self.data.pedal_config_stage = "gas"
         elif stage == "gas":
-            self._finish_pedal_config(hit.guid, hit.axis, hit.inverted)
+            shared = (
+                self._pconf_brake_negative is not None
+                and hit.shared_gas
+                and hit.axis == self._pconf_brake_axis
+            )
+            self._finish_pedal_config(hit.guid, hit.axis, hit.inverted, shared)
 
     def _sync_pconf_devices(self) -> None:
         """Open every connected joystick and log what pygame can see. See `core/main_pedal_thread/README.md`."""
@@ -692,10 +725,17 @@ class MainPedalThread(BaseThread):
         if guid is not None:
             self._pconf_taps.on_motion(guid, axis, value)
 
-    def _finish_pedal_config(self, guid: str, gas_axis: int, gas_inverted: bool) -> None:
+    def _finish_pedal_config(
+        self, guid: str, gas_axis: int, gas_inverted: bool, shared: bool = False,
+    ) -> None:
         """Persist the detected configuration and adopt the device immediately."""
         brake_axis = self._pconf_brake_axis
         brake_inverted = self._pconf_brake_inverted
+        if shared and brake_axis == gas_axis and self._pconf_brake_negative is not None:
+            brake_inverted = self._pconf_brake_negative
+            gas_inverted = not brake_inverted
+        else:
+            shared = False
         js = self._pconf_devices.get(guid)
 
         Settings.save(values={
@@ -704,6 +744,7 @@ class MainPedalThread(BaseThread):
             "brakeaxis": brake_axis,
             "gas_inverted": gas_inverted,
             "brake_inverted": brake_inverted,
+            "shared_pedal_axis": shared,
         })
 
         device_name = ""
@@ -723,8 +764,8 @@ class MainPedalThread(BaseThread):
         self._axes.reset()
 
         logger.info(
-            "pedal config: gas axis %d (inverted=%s); pedals connected",
-            gas_axis, gas_inverted,
+            "pedal config: gas axis %d (inverted=%s, shared=%s); pedals connected",
+            gas_axis, gas_inverted, shared,
         )
 
         result = {
@@ -734,6 +775,7 @@ class MainPedalThread(BaseThread):
             "brakeaxis": brake_axis,
             "gas_inverted": gas_inverted,
             "brake_inverted": brake_inverted,
+            "shared_pedal_axis": shared,
         }
         with self.data._lock:
             self.data.device_lost = js is None
@@ -1001,13 +1043,9 @@ class MainPedalThread(BaseThread):
 
     def _process_pygame_events(self, speed: float) -> tuple[float, float]:
         """Handle all pending pygame events and return the current (gasval, brakeval)."""
-        if not pygame.get_init():
-            pygame.init()
-            pygame.joystick.init()
-            return self._axes.gas, self._axes.brake
-
+        events = self._video.read(pygame)
         configuring = self.data.pedal_config_active
-        for event in pygame.event.get():
+        for event in events:
             if event.type == pygame.JOYDEVICEREMOVED:
                 self._handle_device_removed(event.instance_id)
 
@@ -1027,6 +1065,7 @@ class MainPedalThread(BaseThread):
                         brake_axis=Settings.brakeaxis,
                         gas_inverted=Settings.gas_inverted,
                         brake_inverted=Settings.brake_inverted,
+                        shared=Settings.shared_pedal_axis,
                     )
 
         if self._device is not None:
@@ -1037,6 +1076,7 @@ class MainPedalThread(BaseThread):
                     brake_axis=Settings.brakeaxis,
                     gas_inverted=Settings.gas_inverted,
                     brake_inverted=Settings.brake_inverted,
+                    shared=Settings.shared_pedal_axis,
                 )
             except Exception:
                 logger.debug("pedal axis refresh failed", exc_info=True)

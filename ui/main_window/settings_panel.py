@@ -346,6 +346,17 @@ class SettingsPanel(QWidget):
 
     # Section 1 – Inputs
 
+    def _pedals_share_an_axis(self) -> bool:
+        s = self._settings
+        return bool(s.shared_pedal_axis) and s.gasaxis is not None and s.gasaxis == s.brakeaxis
+
+    def _pedal_axis_text(self, axis: object) -> str:
+        if axis is None:
+            return "-"
+        if self._pedals_share_an_axis():
+            return f"{axis} (shared)"
+        return str(axis)
+
     def _build_inputs(self) -> None:
         s = self._settings
         p = self._inner
@@ -360,13 +371,13 @@ class SettingsPanel(QWidget):
 
         new_label(p, self._r(0), 0, "Gas axis:")
         self.lbl_gas = new_label(
-            p, self._r(), 1, str(s.gasaxis) if s.gasaxis is not None else "—",
+            p, self._r(), 1, self._pedal_axis_text(s.gasaxis),
             alignment=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
         )
 
         new_label(p, self._r(0), 0, "Brake axis:")
         self.lbl_brake = new_label(
-            p, self._r(), 1, str(s.brakeaxis) if s.brakeaxis is not None else "—",
+            p, self._r(), 1, self._pedal_axis_text(s.brakeaxis),
             alignment=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
         )
 
@@ -474,8 +485,8 @@ class SettingsPanel(QWidget):
     def _refresh_pedal_widgets(self) -> None:
         """Sync the axis labels and connect-button text with settings."""
         s = self._settings
-        self.lbl_gas.setText(str(s.gasaxis) if s.gasaxis is not None else "—")
-        self.lbl_brake.setText(str(s.brakeaxis) if s.brakeaxis is not None else "—")
+        self.lbl_gas.setText(self._pedal_axis_text(s.gasaxis))
+        self.lbl_brake.setText(self._pedal_axis_text(s.brakeaxis))
         self.btn_connect.setText(
             "Reconnect to pedals" if s.device else "Connect to pedals"
         )

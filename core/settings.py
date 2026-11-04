@@ -99,6 +99,8 @@ class Settings(metaclass=_SingletonMeta):
     brakeaxis: int = None
     brake_inverted: bool = False
     gas_inverted: bool = False
+    # Both pedals on one axis that rests in the middle. inverted selects its negative half.
+    shared_pedal_axis: bool = False
 
     # Pedal configuration
     gas_exponent_variable: float = None

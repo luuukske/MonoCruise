@@ -14,6 +14,7 @@ from core.main_pedal_thread.pedal_axes import (
     PedalAxes,
     TapDetector,
     normalise_axis,
+    split_pedal,
 )
 
 AXES = dict(gas_axis=1, brake_axis=2, gas_inverted=False, brake_inverted=False)
@@ -148,3 +149,181 @@ def test_summary_says_which_devices_never_reported():
     text = det.summary({"wheel": "Wheel", "pedals": "Pedals"})
     assert "'Pedals': no axis events" in text
     assert "'Wheel': 7 events, max 0.10 on axis 0" in text
+
+
+def test_separate_pedals_keep_the_end_to_end_map():
+    """Shared-axis support must not move the map every other pedal uses."""
+    assert normalise_axis(-1.0, False) == 0.0
+    assert normalise_axis(0.0, False) == 0.5
+    assert normalise_axis(1.0, False) == 1.0
+    assert normalise_axis(-1.0, True) == 1.0
+    assert normalise_axis(1.0, True) == 0.0
+    assert normalise_axis(0.25, False) == 0.625
+
+
+def test_split_pedal_is_one_half_and_the_halves_never_overlap():
+    assert split_pedal(0.0, False) == 0.0
+    assert split_pedal(1.0, False) == 1.0
+    assert split_pedal(-1.0, False) == 0.0
+    assert split_pedal(0.5, False) == 0.5
+    assert split_pedal(-0.5, True) == 0.5
+    assert split_pedal(-1.0, True) == 1.0
+    assert split_pedal(1.2, False) == 1.0
+    for step in range(-10, 11):
+        raw = step / 10
+        gas = split_pedal(raw, True)
+        brake = split_pedal(raw, False)
+        assert gas == 0.0 or brake == 0.0
+        assert 0.0 <= gas <= 1.0 and 0.0 <= brake <= 1.0
+
+
+def test_the_shared_flag_does_not_remap_separate_axes():
+    """A stale flag, or the same axis without the flag, keeps the old map."""
+    separate = PedalAxes()
+    separate.on_motion(
+        1, 0.0, gas_axis=1, brake_axis=2, gas_inverted=False, brake_inverted=False, shared=True,
+    )
+    assert separate.gas == 0.5
+
+    same_axis = PedalAxes()
+    same_axis.on_motion(
+        1, 0.0, gas_axis=1, brake_axis=1, gas_inverted=False, brake_inverted=False, shared=False,
+    )
+    assert (same_axis.gas, same_axis.brake) == (0.5, 0.5)
+
+
+def test_a_shared_axis_splits_around_the_middle():
+    axes = PedalAxes()
+    kw = dict(gas_axis=1, brake_axis=1, gas_inverted=True, brake_inverted=False, shared=True)
+    axes.on_motion(0, 0.8, **kw)  # steering on the same stick
+    assert (axes.gas, axes.brake) == (0.0, 0.0)
+    assert axes.take_brake_went_live() is False
+
+    axes.on_motion(1, 0.0, **kw)
+    assert (axes.gas, axes.brake) == (0.0, 0.0)
+    assert axes.take_brake_went_live() is True
+    axes.on_motion(1, 1.0, **kw)
+    assert (axes.gas, axes.brake) == (0.0, 1.0)
+    assert axes.take_brake_went_live() is False
+    axes.on_motion(1, -0.5, **kw)
+    assert (axes.gas, axes.brake) == (0.5, 0.0)
+
+    reads = []
+
+    def read(axis):
+        reads.append(axis)
+        return -1.0
+
+    axes.refresh(read, **kw)
+    assert reads == [1]
+    assert (axes.gas, axes.brake) == (1.0, 0.0)
+
+
+def test_a_shared_axis_is_not_re_read_before_it_has_reported():
+    axes = PedalAxes()
+    kw = dict(gas_axis=1, brake_axis=1, gas_inverted=True, brake_inverted=False, shared=True)
+    reads = []
+    axes.refresh(lambda axis: reads.append(axis) or 0.4, **kw)
+    assert reads == []
+    assert (axes.gas, axes.brake) == (0.0, 0.0)
+
+
+def test_an_end_rest_pedal_is_not_shared_when_it_crosses_the_middle():
+    det = TapDetector()
+    _press(det, "pedals", 2, -1.0, 1.0)
+    hit = det.take_hit()
+    assert hit is not None and hit.pedal_like and not hit.combined and hit.inverted is False
+    det.restrict("pedals", skip_axis=2)
+    _press(det, "pedals", 2, 1.0, -1.0)
+    assert det.take_hit() is None
+
+
+def test_steering_across_both_stops_does_not_steal_a_pedal_tap():
+    """A wheel that rests in the middle used to become an inverted pedal at full lock."""
+    det = TapDetector()
+    _press(det, "wheel", 0, 0.0, 1.0)
+    _press(det, "wheel", 0, 1.0, -1.0)
+    _press(det, "pedals", 2, -1.0, -0.8)
+    hit = det.take_hit()
+    assert hit is not None and hit.axis == 2 and hit.pedal_like and not hit.combined
+
+
+def test_middle_rest_survives_a_press_to_the_stop():
+    det = TapDetector()
+    det.on_motion("joy", 1, 0.1)
+    assert det.take_hit() is None
+    _press(det, "joy", 1, 0.1, 1.0)
+    _press(det, "joy", 1, 1.0, 0.1)
+    hit = det.take_hit()
+    assert hit is not None and hit.combined and not hit.pedal_like
+    assert hit.inverted is False and hit.negative_half is False
+
+
+def test_just_outside_the_middle_can_still_adopt_an_end():
+    det = TapDetector()
+    _press(det, "joy", 1, 0.11, 1.0)
+    _press(det, "joy", 1, 1.0, 0.2)
+    hit = det.take_hit()
+    assert hit is not None and hit.pedal_like and hit.inverted is True and not hit.combined
+
+
+def test_a_clear_press_of_a_middle_rest_axis_is_a_tap_and_a_small_one_is_not():
+    det = TapDetector()
+    _press(det, "joy", 1, 0.0, TAP_THRESHOLD)
+    assert det.take_hit() is None
+    _press(det, "joy", 1, 0.0, TAP_THRESHOLD + 0.01)
+    hit = det.take_hit()
+    assert hit is not None and hit.combined and hit.axis == 1 and hit.negative_half is False
+
+
+def test_the_first_direction_of_a_shared_axis_stays_the_brake():
+    det = TapDetector()
+    _press(det, "joy", 1, 0.0, 0.5)
+    _press(det, "joy", 1, 0.5, -0.9)
+    hit = det.take_hit()
+    assert hit is not None and hit.combined and hit.negative_half is False
+    assert hit.magnitude == 0.5
+
+
+def test_one_sweep_already_holds_the_gas_half():
+    det = TapDetector()
+    _press(det, "joy", 1, 0.0, -0.6)
+    _press(det, "joy", 1, -0.6, 0.6)
+    brake = det.take_hit()
+    assert brake is not None and brake.negative_half is True
+    det.restrict("joy", 1, gas_negative=False)
+    gas = det.take_hit()
+    assert gas is not None and gas.shared_gas and gas.axis == 1 and gas.negative_half is False
+
+
+def test_a_small_swing_past_the_middle_is_not_the_gas():
+    det = TapDetector()
+    _press(det, "joy", 1, 0.0, 0.6)
+    _press(det, "joy", 1, 0.6, -0.2)
+    assert det.take_hit() is not None
+    det.restrict("joy", 1, gas_negative=True)
+    assert det.take_hit() is None
+    _press(det, "joy", 1, -0.2, -0.45)
+    gas = det.take_hit()
+    assert gas is not None and gas.shared_gas and gas.negative_half is True
+
+
+def test_the_gas_half_beats_steering_and_loses_to_a_real_pedal():
+    det = TapDetector()
+    _press(det, "joy", 1, 0.0, 0.6)
+    assert det.take_hit() is not None
+    det.restrict("joy", 1, gas_negative=True)
+    _press(det, "joy", 0, 0.0, 0.95)
+    _press(det, "joy", 1, 0.0, -0.4)
+    _press(det, "joy", 2, -1.0, -0.6)
+    hit = det.take_hit()
+    assert hit is not None and hit.pedal_like and hit.axis == 2 and not hit.shared_gas
+
+    det = TapDetector()
+    _press(det, "joy", 1, 0.0, 0.6)
+    det.take_hit()
+    det.restrict("joy", 1, gas_negative=True)
+    _press(det, "joy", 0, 0.0, 0.95)
+    _press(det, "joy", 1, 0.0, -0.4)
+    hit = det.take_hit()
+    assert hit is not None and hit.shared_gas and hit.axis == 1 and hit.guid == "joy"
