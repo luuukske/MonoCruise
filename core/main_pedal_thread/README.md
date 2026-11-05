@@ -7,6 +7,7 @@
 
 - Pygame pedal device (critical) plus extra joysticks for bindings.
 - Raw axes each tick; One-Pedal Drive when cruise is not commanding.
+- One-pedal mapping (pure function, no pygame): `one_pedal.py`.
 - Weight-based brake adjustment; legacy hold-brake / park detection.
 - Emergency stop on sudden brake / crash until user releases (`em_stop`).
 - Button bindings → `cc_*_held` for cruise; `joystick_button_states` for `input_bindings`.
