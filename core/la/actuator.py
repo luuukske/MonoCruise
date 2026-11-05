@@ -44,6 +44,7 @@ class WheelTuning:
     hold_rate: float = 0.05
     hold_s: float = 0.3
     release_s: float = 1.0
+    damping_first: bool = False
 
 
 @dataclass(frozen=True)
@@ -220,4 +221,5 @@ class WheelActuator:
         return ServoCommand(
             target=target, rate=rate, kp=kp, kd=kd, ki=ki, cap=round(self.cap(authority)),
             direction=1 if gains.force_per_ms2 > 0.0 else -1, cancel=self.tune.cancel_share * ease(authority), only=only,
+            damping_first=self.tune.damping_first,
         )

@@ -35,6 +35,10 @@ patches the `SetParameters` slot of its constant-force effect. Each call it read
   output the other way, damping included, is clipped to nothing and its integral never builds that way, at
   the FFB rate. The lane keeping assist's pulses use it so they never push the wheel back toward the line
   (Lukas, 2026-11-02). A plugin that knows it sets status bit 128; MonoCruise keeps LKA off without it;
+- damping first, if asked (`servo_flags` bit 0 at offset 90, status bit 256 says the plugin knows it): P and I get only
+  the room the cap leaves after D, so a servo pinned at its cap still brakes a wheel swinging through the target.
+  The caps are the same (the total 3000, D 1500). Off, D is added to a pinned P and hidden behind it. Off by default:
+  MonoCruise does not set it yet, `tools/la_servo_bench.py --law` does (`core/la/README.md`, Bench);
 - the cancel, only if asked (`servo_cancel`, 0 by default): that share of the game's steady force (its
   magnitude low-passed at 1.5 s, so turn-in, corrections and bumps still pass) is subtracted while the
   servo holds, faded with the servo and capped at 6000.
@@ -61,7 +65,7 @@ Steering values are `truck.input.steering` units: -1 to 1 of lock, counterclockw
 | 12 | event counter | MonoCruise |
 | 16 | torque (i16, out of 10000, signed like the game's magnitude) | MonoCruise |
 | 18 | game force (i16, the game's magnitude low-passed at 0.1 s) | plugin |
-| 20 | status bits: hooked, force seen, rumbling, dead, torque, servo, steering channel, one-sided servo (128) | plugin |
+| 20 | status bits: hooked, force seen, rumbling, dead, torque, servo, steering channel, one-sided servo (128), damping first (256) | plugin |
 | 24 | count of constant-force updates seen | plugin |
 | 28 | assist applied now, torque plus servo (i16) | plugin |
 | 30 | servo part applied now (i16) | plugin |
@@ -72,6 +76,7 @@ Steering values are `truck.input.steering` units: -1 to 1 of lock, counterclockw
 | 76 | servo stamp (u32, bumped with each new request) | MonoCruise |
 | 80 | servo integral now (f32), the game's FFB update rate (f32, Hz) | plugin |
 | 88 | game force cancelled now (i16) | plugin |
+| 90 | servo flags (u8): bit 0 damping first | MonoCruise |
 
 MonoCruise still rumbles through a version 1, 2 or 3 plugin (it falls back to the smaller block), and
 steers only through version 4.

@@ -37,6 +37,7 @@ _U32 = struct.Struct("=I")
 _CMD = struct.Struct("=BBH")
 _I16 = struct.Struct("=h")
 _F32 = struct.Struct("=f")
+_U8 = struct.Struct("=B")
 _SERVO = struct.Struct("=fffHbb")
 _SERVO4 = struct.Struct("=fff")
 _OFF_VERSION = 0
@@ -59,6 +60,7 @@ _OFF_STAMP = 76
 _OFF_INTEG = 80
 _OFF_FRAME_HZ = 84
 _OFF_CANCEL_APPLIED = 88
+_OFF_SERVO_FLAGS = 90
 
 STATUS_HOOKED = 1
 STATUS_FORCE_SEEN = 2
@@ -68,6 +70,8 @@ STATUS_TORQUE = 16
 STATUS_SERVO = 32
 STATUS_STEER = 64
 STATUS_ONE_SIDED = 128
+STATUS_DAMP_FIRST = 256
+SERVO_DAMP_FIRST = 1
 
 
 @dataclass(frozen=True)
@@ -76,9 +80,9 @@ class ServoCommand:
     error and ``ki`` per unit of error and second, capped. ``cancel`` is the share of the game's slow force replaced.
 
     ``direction`` is the torque sign that turns the wheel counterclockwise; 0 is off. ``only`` +1 or -1: the servo
-    pushes only that way (counterclockwise positive), never back; 0 both ways.
+    pushes only that way (counterclockwise positive), never back; 0 both ways. ``damping_first`` gives the damping its
+    room under the cap before P and I get theirs, so a servo pinned at its cap still brakes a swinging wheel.
     """
-
     target: float = 0.0
     kp: float = 0.0
     ki: float = 0.0
@@ -88,6 +92,7 @@ class ServoCommand:
     kd: float = 0.0
     cancel: float = 0.0
     only: int = 0
+    damping_first: bool = False
 
 
 SERVO_OFF = ServoCommand()
@@ -114,6 +119,7 @@ class PluginStatus:
     servoing: bool = False
     steer_ok: bool = False
     one_sided: bool = False
+    damping_first: bool = False
     steer: float = 0.0
     steer_rate: float = 0.0
     steer_frames: int = 0
@@ -169,6 +175,7 @@ def decode_status(raw: bytes) -> PluginStatus:
             servo_integ=_F32.unpack_from(raw, _OFF_INTEG)[0],
             frame_hz=_F32.unpack_from(raw, _OFF_FRAME_HZ)[0],
             cancel_applied=_I16.unpack_from(raw, _OFF_CANCEL_APPLIED)[0],
+            damping_first=bool(bits & STATUS_DAMP_FIRST),
         )
     return PluginStatus(**base)
 
@@ -198,6 +205,11 @@ def servo_fields(cmd: ServoCommand) -> tuple:
     cap = max(0, min(SERVO_CAP_UNITS, int(cmd.cap)))
     only = (cmd.only > 0) - (cmd.only < 0)
     return (target, cmd.kp, cmd.ki, cap, cmd.direction, cmd.rate, cmd.kd, max(0.0, min(1.0, cmd.cancel)), only)
+
+
+def servo_flags(cmd: ServoCommand, fields: tuple) -> int:
+    """The flag byte at offset 90: damping first, only while the servo is on."""
+    return SERVO_DAMP_FIRST if cmd.damping_first and fields[4] else 0
 
 
 class RumbleChannel:
@@ -254,8 +266,11 @@ class RumbleChannel:
             if status.version >= TORQUE_VERSION and torque_units(torque) != self._sent_torque:
                 self._sent_torque = torque_units(torque)
                 _I16.pack_into(self._buf, _OFF_TORQUE, self._sent_torque)
-            if status.version >= VERSION and servo_fields(servo) != self._sent_servo:
-                fields = self._sent_servo = servo_fields(servo)
+            fields = servo_fields(servo)
+            wanted = (fields, servo_flags(servo, fields))
+            if status.version >= VERSION and wanted != self._sent_servo:
+                self._sent_servo = wanted
+                _U8.pack_into(self._buf, _OFF_SERVO_FLAGS, wanted[1])
                 _SERVO4.pack_into(self._buf, _OFF_SERVO4, *fields[5:8])
                 _SERVO.pack_into(self._buf, _OFF_SERVO, *fields[:5], fields[8])
                 self._stamp = (self._stamp + 1) & 0xFFFFFFFF

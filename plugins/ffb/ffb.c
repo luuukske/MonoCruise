@@ -303,6 +303,7 @@ static double servo_delta(int live, double dt) {
         in.cap = (double)g_map->servo_cap;
         in.dir = (int)g_map->servo_dir;
         in.only = g_map->servo_only > 0 ? 1 : (g_map->servo_only < 0 ? -1 : 0);
+        in.damp_first = (g_map->servo_flags & FFB_SF_DAMP_FIRST) != 0;
         target = ffb_servo_target(in.target, in.rate, target_age(g_map->servo_stamp));
         raw = ffb_servo_pid(&g_servo, &in, target, (double)g_steer, (double)g_steer_rate_fast, dt);
     }
@@ -648,6 +649,7 @@ static void open_map(void) {
         g_map->servo_applied = 0;
         g_map->servo_dir = 0;
         g_map->servo_only = 0;
+        g_map->servo_flags = 0;
         g_map->servo_kp = 0.0f;
         g_map->servo_ki = 0.0f;
         g_map->servo_scale = 1.0f;
@@ -693,7 +695,7 @@ static void publish_status(void) {
     if (g_dead) {
         bits |= FFB_ST_DEAD;
     }
-    g_map->status = bits | FFB_ST_ONE_SIDED;
+    g_map->status = bits | FFB_ST_ONE_SIDED | FFB_ST_DAMP_FIRST;
 }
 
 static void WINAPI on_frame(unsigned int event, const void *info, void *ctx) {

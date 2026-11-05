@@ -41,7 +41,7 @@ def test_python_layout_matches_the_plugin_header():
         "applied": 28, "servo_applied": 30, "servo_target": 32, "servo_kp": 36, "servo_ki": 40, "servo_cap": 44,
         "servo_dir": 46, "servo_only": 47, "steer": 48, "steer_rate": 52, "steer_frames": 56, "servo_scale": 60, "servo_rate": 64,
         "servo_kd": 68, "servo_cancel": 72, "servo_stamp": 76, "servo_integ": 80, "frame_hz": 84,
-        "cancel_applied": 88,
+        "cancel_applied": 88, "servo_flags": 90,
     }
     assert (cmd._OFF_HEARTBEAT, cmd._OFF_CMD, cmd._OFF_SEQ, cmd._OFF_TORQUE, cmd._OFF_GAME_FORCE, cmd._OFF_STATUS,
             cmd._OFF_FRAMES, cmd._OFF_APPLIED) == (4, 8, 12, 16, 18, 20, 24, 28)
@@ -54,7 +54,7 @@ def test_python_layout_matches_the_plugin_header():
     for name, value in (("HOOKED", cmd.STATUS_HOOKED), ("FORCE_SEEN", cmd.STATUS_FORCE_SEEN),
                         ("RUMBLING", cmd.STATUS_RUMBLING), ("DEAD", cmd.STATUS_DEAD), ("TORQUE", cmd.STATUS_TORQUE),
                         ("SERVO", cmd.STATUS_SERVO), ("STEER", cmd.STATUS_STEER),
-                        ("ONE_SIDED", cmd.STATUS_ONE_SIDED)):
+                        ("ONE_SIDED", cmd.STATUS_ONE_SIDED), ("DAMP_FIRST", cmd.STATUS_DAMP_FIRST)):
         assert int(_define(text, "FFB_ST_" + name)) == value
     assert int(_define(text, "FFB_CMD_RUMBLE")) == cmd.CMD_RUMBLE
 
@@ -265,3 +265,24 @@ def test_each_servo_request_bumps_the_stamp_the_plugin_moves_the_target_on_from(
     ch.publish(False, 0, 0, servo=cmd.ServoCommand(0.011, 1000.0, 10.0, 800, 1, rate=0.02, kd=50.0, cancel=1.0))
     ch.publish(False, 0, 0, servo=cmd.ServoCommand(0.011, 1000.0, 10.0, 800, 1, rate=0.02, kd=50.0, cancel=1.0))
     assert struct.unpack_from("=I", buf, 76)[0] == first + 1, "a new target bumps it, a repeat does not"
+
+
+def test_damping_first_reaches_the_flag_byte_only_while_the_servo_is_on():
+    buf = stamped()
+    ch = channel(buf)
+    on = cmd.ServoCommand(0.01, 1000.0, 10.0, 800, 1, damping_first=True)
+    ch.publish(False, 0, 0, servo=on)
+    assert buf[90] == cmd.SERVO_DAMP_FIRST
+    first = struct.unpack_from("=I", buf, 76)[0]
+    ch.publish(False, 0, 0, servo=cmd.ServoCommand(0.01, 1000.0, 10.0, 800, 1))
+    assert buf[90] == 0 and struct.unpack_from("=I", buf, 76)[0] == first + 1, "a changed law is a new request"
+    ch.publish(False, 0, 0, servo=cmd.ServoCommand(0.0, 0.0, 0.0, 0, 0, damping_first=True))
+    assert buf[90] == 0, "off is all zero, the flag included"
+
+
+def test_the_plugin_reports_it_can_damp_first():
+    buf = stamped()
+    struct.pack_into("=I", buf, 20, cmd.STATUS_HOOKED | cmd.STATUS_STEER)
+    assert not cmd.decode_status(bytes(buf)).damping_first
+    struct.pack_into("=I", buf, 20, cmd.STATUS_HOOKED | cmd.STATUS_STEER | cmd.STATUS_DAMP_FIRST)
+    assert cmd.decode_status(bytes(buf)).damping_first

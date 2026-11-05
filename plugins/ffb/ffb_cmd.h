@@ -21,6 +21,9 @@
 #define FFB_ST_SERVO 32
 #define FFB_ST_STEER 64
 #define FFB_ST_ONE_SIDED 128
+#define FFB_ST_DAMP_FIRST 256
+
+#define FFB_SF_DAMP_FIRST 1
 
 typedef struct FfbCmd {
     volatile uint32_t version;
@@ -52,7 +55,8 @@ typedef struct FfbCmd {
     volatile float servo_integ;
     volatile float frame_hz;
     volatile int16_t cancel_applied;
-    volatile int16_t reserved1;
+    volatile uint8_t servo_flags;
+    volatile uint8_t reserved1;
     volatile uint32_t reserved2;
 } FfbCmd;
 
@@ -83,5 +87,6 @@ _Static_assert(offsetof(FfbCmd, servo_stamp) == 76, "servo_stamp offset");
 _Static_assert(offsetof(FfbCmd, servo_integ) == 80, "servo_integ offset");
 _Static_assert(offsetof(FfbCmd, frame_hz) == 84, "frame_hz offset");
 _Static_assert(offsetof(FfbCmd, cancel_applied) == 88, "cancel_applied offset");
+_Static_assert(offsetof(FfbCmd, servo_flags) == 90, "servo_flags offset");
 
 #endif

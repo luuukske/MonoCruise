@@ -50,6 +50,14 @@ def _clamp(x: float, cap: float) -> float:
     return max(-cap, min(cap, x))
 
 
+def _sum(p: float, d: float, integ: float, cap: float, damp_first: bool) -> float:
+    """Mirror of ffb_servo_sum: with ``damp_first`` P and I get only the room the cap leaves after D."""
+    pi = p + integ
+    if damp_first:
+        pi = _clamp(pi, max(cap - abs(d), 0.0))
+    return _clamp(pi + d, cap)
+
+
 @dataclass
 class Plugin:
     """Mirror of plugins/ffb/ffb_signal.h (layout 4): hold low-pass, damped PID with the target moved on at its
@@ -127,12 +135,15 @@ class Plugin:
             err = aim - steer
             p = kp * err
             d = _clamp(kd * (rate - self.rate), D_CAP)
-            if abs(p + d + self.integ) < cap or (p + d + self.integ) * err < 0.0:
+            first = bool(servo.damping_first)
+            room = cap - abs(d) if first else cap
+            pi = p + self.integ if first else p + d + self.integ
+            if abs(pi) < room or pi * err < 0.0:
                 self.integ = _clamp(self.integ + ki * err * dt, I_SHARE * cap)
             if only and self.integ * only < 0.0:
                 self.integ = 0.0
-            u = p + d + self.integ
-            want = 0.0 if only and u * only < 0.0 else direction * _clamp(u, cap)
+            u = _sum(p, d, self.integ, cap, first)
+            want = 0.0 if only and u * only < 0.0 else direction * u
             self._buzz(want, steer)
         else:
             self.integ = 0.0

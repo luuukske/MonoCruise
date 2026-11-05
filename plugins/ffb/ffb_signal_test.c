@@ -171,6 +171,7 @@ static FfbServoIn servo_in(double target, double rate, int dir) {
     in.cap = 2500.0;
     in.dir = dir;
     in.only = 0;
+    in.damp_first = 0;
     return in;
 }
 
@@ -227,6 +228,42 @@ static void test_the_damping_resists_the_wheel_moving_off_the_target_rate(void) 
     in.rate = 0.0;
     ffb_servo_init(&s);
     expect(ffb_servo_pid(&s, &in, 0.0, 0.0, 5.0, DT) >= -FFB_D_CAP - 1e-9, "the damping is capped");
+}
+
+static void test_damping_first_keeps_the_damping_room_under_the_cap(void) {
+    FfbServo s;
+    FfbServoIn in = servo_in(1.0, 0.0, 1);
+    double t;
+    ffb_servo_init(&s);
+    expect(ffb_servo_pid(&s, &in, 1.0, 0.0, 0.0, DT) == 2500.0, "off by default: pinned at the cap");
+    in.damp_first = 1;
+    ffb_servo_init(&s);
+    expect(ffb_servo_pid(&s, &in, 1.0, 0.0, 0.0, DT) == 2500.0, "a pinned wheel that stands still still gets the whole cap");
+    ffb_servo_init(&s);
+    in.damp_first = 0;
+    expect(ffb_servo_pid(&s, &in, 1.0, 0.0, 0.1, DT) > 1500.0, "plain: the damping of a fast wheel is hidden behind the pinned P");
+    in.damp_first = 1;
+    ffb_servo_init(&s);
+    expect(ffb_servo_pid(&s, &in, 1.0, 0.0, 0.1, DT) < 1000.0, "damping first: it brakes the pinned servo");
+    ffb_servo_init(&s);
+    expect(ffb_servo_pid(&s, &in, 1.0, 0.0, 5.0, DT) >= -FFB_D_CAP - 1e-9, "a wheel flung through brakes at most by the damping's own cap");
+    in.rate = 5.0;
+    ffb_servo_init(&s);
+    expect(fabs(ffb_servo_pid(&s, &in, 1.0, 0.0, 0.0, DT)) <= 2500.0 + 1e-9, "never above the cap, whatever D asks");
+    in = servo_in(1.0, 0.0, 1);
+    in.damp_first = 1;
+    ffb_servo_init(&s);
+    for (t = 0.0; t < 5.0; t += DT) {
+        ffb_servo_pid(&s, &in, 1.0, 0.0, 0.0, DT);
+    }
+    expect(fabs(s.integ) < 1e-9, "pinned, the integral does not grow");
+    in.only = 1;
+    ffb_servo_init(&s);
+    expect(ffb_servo_pid(&s, &in, 0.01, 0.03, 0.5, DT) == 0.0, "one-sided, it still never pushes the other way");
+    in.dir = -1;
+    in.damp_first = 0;
+    ffb_servo_init(&s);
+    expect(ffb_servo_pid(&s, &in, 1.0, 0.0, 0.0, DT) == -2500.0, "the wheel's torque sign follows dir as before");
 }
 
 static void test_the_integral_takes_out_friction_and_does_not_wind_up(void) {
@@ -333,6 +370,7 @@ int main(void) {
     test_the_pid_pushes_toward_the_target_in_the_wheel_sign();
     test_one_sided_it_never_pushes_the_other_way();
     test_the_damping_resists_the_wheel_moving_off_the_target_rate();
+    test_damping_first_keeps_the_damping_room_under_the_cap();
     test_the_integral_takes_out_friction_and_does_not_wind_up();
     test_the_target_moves_on_between_updates_for_a_while();
     test_the_cancel_removes_the_slow_game_force_and_fades();

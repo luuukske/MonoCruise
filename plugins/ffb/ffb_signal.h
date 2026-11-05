@@ -161,7 +161,8 @@ typedef struct FfbServo {
 } FfbServo;
 
 /* What MonoCruise asks for: ``target`` and ``rate`` in counterclockwise lock, gains per lock, ``dir`` the torque sign
-   that turns the wheel counterclockwise (0 is off), ``only`` +1 or -1 the one way it may push (0 both). */
+   that turns the wheel counterclockwise (0 is off), ``only`` +1 or -1 the one way it may push (0 both),
+   ``damp_first`` 1 gives the damping its room under the cap before P and I get theirs. */
 typedef struct FfbServoIn {
     double target;
     double rate;
@@ -171,6 +172,7 @@ typedef struct FfbServoIn {
     double cap;
     int dir;
     int only;
+    int damp_first;
 } FfbServoIn;
 
 static void ffb_servo_init(FfbServo *s) {
@@ -213,6 +215,18 @@ static double ffb_servo_target(double target, double rate, double age) {
     return target + rate * (age < FFB_EXTRAP_S ? age : FFB_EXTRAP_S);
 }
 
+/* The three terms summed in the counterclockwise axis and held to ``cap``. With ``damp_first`` P and I get only the room
+   the cap leaves after D, so a servo pinned at its cap still brakes a wheel that swings through the target. */
+static double ffb_servo_sum(double p, double d, double integ, double cap, int damp_first) {
+    double pi = p + integ;
+    double room;
+    if (damp_first) {
+        room = cap - fabs(d);
+        pi = ffb_clamp(pi, room > 0.0 ? room : 0.0);
+    }
+    return ffb_clamp(pi + d, cap);
+}
+
 /* One tick of the PID in the counterclockwise axis, turned into a torque sign by ``dir``. The integral grows only while
    the output is not pinned the same way, and stays within the cap. With ``only`` nothing pushes the other way at all. */
 static double ffb_servo_pid(FfbServo *s, const FfbServoIn *in, double target, double angle, double rate, double dt) {
@@ -221,6 +235,7 @@ static double ffb_servo_pid(FfbServo *s, const FfbServoIn *in, double target, do
     double p;
     double d;
     double u;
+    double room;
     dt = ffb_dt_clamp(dt);
     if (!in->dir || !(in->kp >= 0.0) || !(in->kd >= 0.0) || !(in->ki >= 0.0)) {
         s->integ = 0.0;
@@ -229,16 +244,18 @@ static double ffb_servo_pid(FfbServo *s, const FfbServoIn *in, double target, do
     e = target - angle;
     p = in->kp * e;
     d = ffb_clamp(in->kd * (in->rate - rate), FFB_D_CAP);
-    u = p + d + s->integ;
-    if (fabs(u) < cap || u * e < 0.0) {
+    room = in->damp_first ? cap - fabs(d) : cap;
+    u = in->damp_first ? p + s->integ : p + d + s->integ;
+    if (fabs(u) < room || u * e < 0.0) {
         s->integ = ffb_clamp(s->integ + in->ki * e * dt, FFB_I_SHARE * cap);
     }
+    u = ffb_servo_sum(p, d, s->integ, cap, in->damp_first);
     if (in->only) {
         s->integ = s->integ * in->only < 0.0 ? 0.0 : s->integ;
-        u = p + d + s->integ;
-        return u * in->only < 0.0 ? 0.0 : (double)in->dir * ffb_clamp(u, cap);
+        u = ffb_servo_sum(p, d, s->integ, cap, in->damp_first);
+        return u * in->only < 0.0 ? 0.0 : (double)in->dir * u;
     }
-    return (double)in->dir * ffb_clamp(p + d + s->integ, cap);
+    return (double)in->dir * u;
 }
 
 /* A share of the game's steady force (low-passed at 1.5 s, so turn-in and road feel pass) removed while the servo
