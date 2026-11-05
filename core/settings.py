@@ -149,6 +149,11 @@ class Settings(metaclass=_SingletonMeta):
     la_force_per_ms2: float = 0.0
     # The rim with hands, force units per lock per s^2; the servo is designed on it. 0 is the default (650).
     la_wheel_inertia: float = 0.0
+    # The servo's design on that rim, from the wheel check (tools/la_servo_bench.py check): bandwidth in Hz and damping
+    # ratio (0 is the default, 2 Hz and 0.7), and damping first under the cap. Used by LA and the lane keeping assist.
+    la_bandwidth_hz: float = 0.0
+    la_damping: float = 0.0
+    la_damping_first: bool = False
     # Share of the game's steady FFB force removed while the assist steers, 0 to 1; 0 keeps the game's feel.
     la_cancel_share: float = 0.0
     la_kappa_per_steer: float = 0.0

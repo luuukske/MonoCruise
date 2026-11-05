@@ -19,6 +19,7 @@ from core.sending_thread.debug_csv import TickDebugLog
 from core.settings import Settings
 
 from .calibration import Calibration, ForceCalibration
+from .actuator import design_overrides
 from .controller import STRENGTH_MAX, AssistOutput, AssistTuning, Gains, LaneAssist, Wheel, WheelTuning
 from .hand_push import HandPush, HandPushEstimator, PushTuning
 
@@ -206,14 +207,17 @@ class AssistRunner:
         strength = max(0.0, min(STRENGTH_MAX, _setting("la_strength", 1.0)))
         inertia = _setting("la_wheel_inertia", 0.0) or WheelTuning().inertia
         cancel = max(0.0, min(1.0, _setting("la_cancel_share", 0.0)))
+        design = (_setting("la_bandwidth_hz", 0.0), _setting("la_damping", 0.0),
+                  bool(getattr(Settings, "la_damping_first", False)))
         key = (arm, strength, bool(getattr(Settings, "la_tmp_enabled", False)),
                bool(getattr(Settings, "la_follow_all", False)), max(50.0, min(20000.0, inertia)), cancel,
-               bool(getattr(Settings, "la_always_on", False)))
+               bool(getattr(Settings, "la_always_on", False)), *design)
         line = ("LA settings: from %.0f km/h, strength %.2f, TruckersMP %s, follow everywhere %s, wheel inertia %.0f, "
-                "game force cancelled %.2f, always on (test, no hand-backs) %s", *key)
+                "game force cancelled %.2f, always on (test, no hand-backs) %s, servo design %.2f Hz, damping %.2f, "
+                "damping first %s", *key)
         return key, AssistTuning(
             arm_kmh=arm, disarm_kmh=max(0.0, arm - _ARM_MARGIN_KMH),
-            wheel=WheelTuning(strength=strength, inertia=key[4], cancel_share=key[5]),
+            wheel=WheelTuning(strength=strength, inertia=key[4], cancel_share=key[5], **design_overrides(*design)),
             allow_tmp=key[2], follow_all=key[3], always_on=key[6],
         ), line if key[3] or key[6] else ()
 

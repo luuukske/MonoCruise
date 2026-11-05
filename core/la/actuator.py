@@ -77,6 +77,16 @@ class Gains:
         return self.force_per_ms2 * self.kappa_per_steer * speed_ms * speed_ms
 
 
+def design_overrides(bandwidth_hz: float, damping: float, damping_first: bool) -> dict:
+    """``WheelTuning`` fields from the three design settings; 0 keeps the default, the rest is bounded."""
+    out: dict = {"damping_first": bool(damping_first)}
+    if bandwidth_hz > 0.0:
+        out["bandwidth_hz"] = max(0.3, min(3.0, bandwidth_hz))
+    if damping > 0.0:
+        out["damping"] = max(0.3, min(2.0, damping))
+    return out
+
+
 def ease(u: float) -> float:
     u = min(1.0, max(0.0, u))
     return u * u * (3.0 - 2.0 * u)

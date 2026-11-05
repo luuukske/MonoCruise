@@ -10,6 +10,7 @@ import logging
 import math
 from dataclasses import replace
 
+from core.la.actuator import design_overrides
 from core.la.controller import STRENGTH_MAX, AssistTuning, Wheel, WheelTuning
 from core.la.runner import _ARM_MARGIN_KMH, AssistRunner, Request, _setting
 from core.lane_departure.command import PluginStatus
@@ -101,9 +102,12 @@ class LkaRunner(AssistRunner):
         arm = _setting("ldw_min_speed_kmh", 60.0)
         strength = max(0.0, min(STRENGTH_MAX, _setting("lka_strength", 1.0)))
         inertia = max(50.0, min(20000.0, _setting("la_wheel_inertia", 0.0) or WheelTuning().inertia))
-        key = (arm, strength, bool(getattr(Settings, "lka_tmp_enabled", False)), inertia)
-        line = ("LKA settings: from %.0f km/h, strength %.2f, TruckersMP %s, wheel inertia %.0f", *key)
+        design = (_setting("la_bandwidth_hz", 0.0), _setting("la_damping", 0.0),
+                  bool(getattr(Settings, "la_damping_first", False)))
+        key = (arm, strength, bool(getattr(Settings, "lka_tmp_enabled", False)), inertia, *design)
+        line = ("LKA settings: from %.0f km/h, strength %.2f, TruckersMP %s, wheel inertia %.0f, servo design %.2f Hz, "
+                "damping %.2f, damping first %s", *key)
         return key, AssistTuning(
             pulse=True, settle_s=1.0, arm_kmh=arm, disarm_kmh=max(0.0, arm - _ARM_MARGIN_KMH),
-            wheel=WheelTuning(strength=strength, inertia=inertia), allow_tmp=key[2],
+            wheel=WheelTuning(strength=strength, inertia=inertia, **design_overrides(*design)), allow_tmp=key[2],
         ), line

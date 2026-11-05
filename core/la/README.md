@@ -370,6 +370,8 @@ line crossed keeps the lane it left as the reference (see the lane under the tru
 | `la_strength` | 1.0 | 0 to 2: scales the servo's stiffness (damping follows). 0 is no servo |
 | `la_wheel_inertia` | 0 (650) | the rim with hands the servo is designed on; lower for a light wheel that buzzes, higher for a heavy one that feels slow |
 | `la_cancel_share` | 0 | share of the game's steady FFB force removed while it steers, 0 to 1; 0 keeps the game's feel |
+| `la_bandwidth_hz`, `la_damping` | 0 (2 Hz, 0.7) | the servo's design on that rim, from the wheel check; bounded to 0.3 to 3 Hz and 0.3 to 2 |
+| `la_damping_first` | false | damping first under the cap (`plugins/ffb/README.md`); needs the plugin that knows it. LA and the lane keeping assist both read the three |
 | `la_min_speed_kmh` | 60 | arm speed |
 | `la_force_per_ms2`, `la_kappa_per_steer` | 0 | 0 learns them; any other value is used as is, sign included |
 | `la_saved_calibration` | {} | written by MonoCruise: the last live calibration, used at the next start once the drive confirms its sign (Calibration) |
@@ -419,7 +421,9 @@ wheel: past 0.4 lock the stage ends and the servo is asked off.
 - `report FILE` prints the same numbers again. `capture --simulate` is the whole flow on a model wheel, a rehearsal.
 - `fit FILE` fits the rim (inertia in `la_wheel_inertia` units, viscous damping, dry friction, spring, delay) to the
   recording with the plugin's servo mirrored from `tests/la/servo_sim.py`. Runs whose servo reached 90 % of its cap are
-  left out of the fit (a saturated servo with a delay is a relay, its limit cycle is chaotic) and only checked.
+  fitted on the size of their swing, not the wheel angle (a pinned servo with a delay is a relay, its limit cycle
+  chaotic in phase but not in size), and that is what pins the delay: the small runs fit 4 to 20 ms equally well.
+  The delay is scanned first. `--no-ring` leaves the pinned runs out.
   On a model rim the fit gave back inertia, damping, friction, spring and delay within 5 %; on the real wheel the
   numbers are the first measurement of what "What the model does not know" lists.
 - `predict FILE --bandwidth 1.5 2 2.5` runs other designs on the fitted rim, so a change is tried in the model first
@@ -440,6 +444,40 @@ an assumption: confirm on a drive.
 Recording notes: the wheel has no centring standing and rests where it was left, so the bench walks it back to its
 starting angle before each stage (`go_home`) and aborts only if that start is 0.25 lock off centre. `--note` keeps
 the game's steering settings in the file; take every run with the settings you drive with.
+
+### Wheel check
+
+`python tools/la_servo_bench.py check` (truck standing, hands off the rim, the same setup as `capture`; `--simulate
+r3|bare|geared` rehearses it on a model wheel) fits this wheel and writes the `la_*` design keys for it. About two
+minutes on the wheel:
+
+1. A ladder of damping-first designs at 0.7, 1.0, 1.4 and 2.0 Hz (cap 2000, designed on 650) runs a 0.01 and a 0.02
+   step each and stops at the first that rings (an abort, a buzz cut, 100 % overshoot, ripple, bad tracking). The
+   first rung also runs the slow ramp and sine. The wheel is never asked for more than the rung before it held.
+2. The rim is fitted on those runs (the swing size of a run that rang pins the delay).
+3. A design is chosen for it in the model: damping first, designed on the fitted inertia or up to 3 times it (a
+   stiffer, better damped servo: on the R3 a design on 650 was the fastest that held, one on the fitted 300 half as
+   stiff), the fastest bandwidth and damping ratio that holds up on the fitted rim (overshoot under 40 %) and four
+   neighbours (delay 1.3 and 0.8 times, inertia 0.75 times, inertia 1.6 times with hands) with no abort, no buzz cut and
+   overshoot under 60 %. `la_wheel_inertia` is then the design inertia, which is also the rim-with-hands the driver's
+   push is estimated on.
+4. That design is run on the wheel (step, slow ramp, slow sine, fast ramp, fast sine). If it rings or overshoots more
+   than 30 % up or 50 % on the swing, the bandwidth steps back 20 % and it runs again, twice; then the gentlest rung
+   is tried. If none holds, the check says so and writes no keys: leave the defaults. A wheel that cannot be walked back
+   to its start ends the check early; what was recorded is kept and reported.
+
+The output is responsiveness (the verified bandwidth and the rise of a 0.02 step), smoothness and the keys. Smoothness
+is steppy when the breakaway force is over 12 % of the servo's push, the wheel stands still over 25 % of the time
+the target moves slowly, the angle reads in steps over 0.0002 lock, or slow tracking is off by over 0.01 lock rms.
+The one real wheel so far, the R3 with its simulated inertia on, reads 6 %, 2.5 %, 0.00002 and 0.0026: smooth. The
+thresholds and the geared model wheel are guesses until a geared wheel has been through it. Designing on the bare
+rim's inertia is on purpose: hands only add inertia, so a design that holds on the bare rim holds with them, and the
+reverse is how the 2 Hz design rang. `la_wheel_inertia` also sizes the driver's push estimate, which this makes
+truer. Nothing leaves the machine; the recording goes to `tools/la_bench_out/` like the others.
+
+The wheel's own settings change the result a lot: on 2026-11-05 the same 1.25 and 1.5 Hz damping-first designs were
+clean with the Moza software's simulated inertia on and rang hard with it off. Run the check again after changing
+any wheel setting, and keep one set of keys per setting.
 
 What the bench cannot see is the game's own force at speed. The design counts the game's spring in (the servo adds
 only what is missing), which is the part to check on a drive with `la_debug.csv`. The plugin caps the damping force at

@@ -141,7 +141,7 @@ def test_the_fit_recovers_a_known_rim_from_noisy_runs_at_another_frame_rate():
     assert p.delay_s == pytest.approx(RIM.delay_s, abs=0.006)
 
 
-def test_saturated_runs_stay_out_of_the_fit_but_are_checked():
+def test_pinned_runs_are_fitted_on_their_swing_not_their_angle():
     data = bench_cli.capture(sim_bench(), [Design(bandwidth_hz=2.0)], [step(0.01), step(0.02), follow(0.03, 0.4)], 20.0)
     result = fit(data["runs"], 120.0, WheelParams(sign=1), max_evals=60)
     assert result.used < len(data["runs"])
@@ -166,7 +166,7 @@ def test_report_and_predict_run_from_a_saved_recording(tmp_path, capsys):
         game_spring=0.0, cap=3000, suite="step", hz=20.0, law="plain")) == 1
     assert "run fit first" in capsys.readouterr().out
     assert bench_cli.cmd_fit(Namespace(files=[str(path)], kind=["step", "follow"], evals=40, compare=False,
-                                       include_saturated=False, no_save=False)) == 0
+                                       no_ring=False, no_save=False)) == 0
     assert "fit" in json.loads(path.read_text(encoding="utf-8"))
     assert bench_cli.cmd_predict(Namespace(
         file=str(path), bandwidth=[1.0, 2.0], damping=0.7, inertia=650.0, strength=1.0, integral_share=0.3,
