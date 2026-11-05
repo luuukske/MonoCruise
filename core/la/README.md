@@ -405,7 +405,48 @@ FFB and steering frame counters. No coordinates, local only, rotated at 50 MB.
    A `ring cut` line or a buzzing wheel means the servo is too stiff for that wheel: lower
    `la_wheel_inertia` (or `la_strength`).
 
-Unit tests: `tests/la/` (closed loop, every gate and mute, calibration, the thread end to end),
+## Bench
+
+`python tools/la_servo_bench.py capture` tests the servo on the standing wheel, with no lane data and no game restart per
+change: gains, target and rate are runtime fields of the command block, so only a change to the plugin's C needs the
+game closed. Truck standing (driving, not paused), hands off the rim, LA, LKA and the rumble idle (they would
+overwrite the requests). It finds which torque sign turns the wheel left, then runs each design through steps
+(0.01 and 0.02 lock), two ramps and two sines, sent at 20 Hz with the target's rate as MonoCruise sends them, and
+prints rise time, overshoot, settling, ripple, tracking error and lag per run. The recording lands in
+`tools/la_bench_out/` (gitignored). Steps stay small because standing there is no game spring to catch a ringing
+wheel: past 0.4 lock the stage ends and the servo is asked off.
+
+- `report FILE` prints the same numbers again. `capture --simulate` is the whole flow on a model wheel, a rehearsal.
+- `fit FILE` fits the rim (inertia in `la_wheel_inertia` units, viscous damping, dry friction, spring, delay) to the
+  recording with the plugin's servo mirrored from `tests/la/servo_sim.py`. Runs whose servo reached 90 % of its cap are
+  left out of the fit (a saturated servo with a delay is a relay, its limit cycle is chaotic) and only checked.
+  On a model rim the fit gave back inertia, damping, friction, spring and delay within 5 %; on the real wheel the
+  numbers are the first measurement of what "What the model does not know" lists.
+- `predict FILE --bandwidth 1.5 2 2.5` runs other designs on the fitted rim, so a change is tried in the model first
+  and only then captured on the wheel.
+
+First capture on the Moza R3 (2026-11-05, three takes that agree): the rim is light, inertia about 290 against the 650
+the servo is designed on, damping 640 per lock/s, dry friction 180, the game's standing spring 1500, 9 to 20 ms of
+delay. The 1 Hz design is clean but slow (a 0.02 step takes 1.2 s: the friction holds the wheel until the integral
+builds). The 2 Hz design rings: from a 0.02 step the servo pins at 3000 and the wheel swings 0.3 lock either side
+at about 1 Hz; the model on the fitted rim does the same. Cause: the damping force is capped at 1500, reached at
+0.13 lock/s of rate error, and a pinned P hides it, so a light rim that overshoots is never braked. Two fixes in the
+model, both on the fitted rim: `la_wheel_inertia` near 300 (config only), and damping first (`--law
+damping-first`, the plugin's `servo_flags`): rise 0.075 s, overshoot 22 %, settled in 0.3 s at the 650 design. Damping
+first also cut the ripple of a servo pinned against 57000 per lock of game spring under force noise to a third; the
+inertia alone did not, and pinned servos are what LA's vibration in sharp bends at speed looks like. The noise is
+an assumption: confirm on a drive.
+
+Recording notes: the wheel has no centring standing and rests where it was left, so the bench walks it back to its
+starting angle before each stage (`go_home`) and aborts only if that start is 0.25 lock off centre. `--note` keeps
+the game's steering settings in the file; take every run with the settings you drive with.
+
+What the bench cannot see is the game's own force at speed. The design counts the game's spring in (the servo adds
+only what is missing), which is the part to check on a drive with `la_debug.csv`. The plugin caps the damping force at
+1500, reached at 0.13 lock per second of rate error, so damping is at full strength only for slow, small moves: look
+at the overshoot of the 0.02 step first.
+
+Unit tests: `tests/la/` (closed loop, every gate and mute, calibration, the thread end to end, the bench),
 `tests/lane_departure/test_command.py` (layout against `plugins/ffb/ffb_cmd.h`), and the plugin's
 `ffb_signal_test.c`.
 

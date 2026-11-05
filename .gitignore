@@ -58,3 +58,6 @@ release_notes.md
 
 # TMP SDK lag experiment recordings (tools/tmp_sdk_probe.py)
 tools/tmp_sdk_runs/
+
+# LA servo bench recordings (tools/la_servo_bench.py)
+tools/la_bench_out/
