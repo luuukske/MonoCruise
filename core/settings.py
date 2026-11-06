@@ -154,6 +154,17 @@ class Settings(metaclass=_SingletonMeta):
     la_bandwidth_hz: float = 0.0
     la_damping: float = 0.0
     la_damping_first: bool = False
+    # LA's servo cap out of 10000 (0 is the default 3000, bounded 1000 to 6000, the plugin's hard maximum). LA only: the
+    # lane keeping assist never reads it. Raise it to hold harder bends (about 560 units per m/s^2 of cornering).
+    la_servo_cap: float = 0.0
+    # The plugin's push ahead (layout 5): the rim's own inertia, damping and friction from the wheel check's fit, and
+    # its lead (the wheel's delay, s). 0 is none. Shared by LA and the lane keeping assist: they are the wheel's.
+    la_ff_inertia: float = 0.0
+    la_ff_damping: float = 0.0
+    la_ff_friction: float = 0.0
+    la_servo_lead_s: float = 0.0
+    # How far ahead of now the push ahead follows the target's planned motion (the wheel's delay, s); 0 is now.
+    la_ff_plan_s: float = 0.0
     # Share of the game's steady FFB force removed while the assist steers, 0 to 1; 0 keeps the game's feel.
     la_cancel_share: float = 0.0
     la_kappa_per_steer: float = 0.0

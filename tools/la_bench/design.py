@@ -14,7 +14,7 @@ from dataclasses import dataclass, replace
 from tools.la_bench.bench import sim_bench
 from tools.la_bench.metrics import aim_at, summarize
 from tools.la_bench.plant import WheelParams
-from tools.la_bench.protocol import Design, follow, step
+from tools.la_bench.protocol import Design, follow, ramp, step
 
 BANDWIDTHS = (0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.5)
 DAMPINGS = (0.7, 1.0, 1.4)
@@ -24,11 +24,13 @@ INERTIA_SCALES = (1.0, 1.5, 2.0, 3.0)
 INERTIA_MAX = 1000.0
 MIN_BUZZ = 0.6
 STAGES = (step(0.02), follow(0.03, 0.7))
+AHEAD_STAGES = (step(0.02), ramp(0.15, 0.4, 0.1), follow(0.03, 0.7))
 STUCK_MAX = 0.25
 RESOLUTION_MAX = 2e-4
 TRACK_MAX = 0.01
 FRICTION_MAX = 0.12
 SERVO_CAP = 3000.0
+RAMP_TRACK_MAX = 0.015
 STILL_RATE = 0.005
 MOVING_RATE = 0.03
 
@@ -44,17 +46,41 @@ class Choice:
     lag_s: float | None
     worst_overshoot: float
     limited: bool = False
+    ff_inertia: float = 0.0
+    ff_damping: float = 0.0
+    ff_friction: float = 0.0
+    plan_s: float = 0.0
+
+    def design(self) -> Design:
+        return Design(bandwidth_hz=self.bandwidth_hz, damping=self.damping, inertia=self.inertia, damping_first=True,
+                      ff_inertia=self.ff_inertia, ff_damping=self.ff_damping, ff_friction=self.ff_friction,
+                      plan_s=self.plan_s)
 
     def config(self) -> dict:
-        return {"la_wheel_inertia": round(self.inertia), "la_bandwidth_hz": round(self.bandwidth_hz, 2),
-                "la_damping": round(self.damping, 2), "la_damping_first": True}
+        out = {"la_wheel_inertia": round(self.inertia), "la_bandwidth_hz": round(self.bandwidth_hz, 2),
+               "la_damping": round(self.damping, 2), "la_damping_first": True}
+        if self.ff_inertia or self.ff_damping or self.ff_friction:
+            out.update({"la_ff_inertia": round(self.ff_inertia), "la_ff_damping": round(self.ff_damping),
+                        "la_ff_friction": round(self.ff_friction), "la_ff_plan_s": round(self.plan_s, 3)})
+        return out
 
 
-def neighbours(p: WheelParams) -> list[WheelParams]:
-    """The fitted rim first, then what a design must also hold up on."""
-    return [p, replace(p, delay_s=p.delay_s * 1.3), replace(p, delay_s=p.delay_s * 0.8),
-            replace(p, inertia=p.inertia * 0.75),
-            replace(p, inertia=p.inertia * 1.6, damping=p.damping * 1.3, stick=p.stick * 1.5)]
+def push_ahead_of(params: WheelParams, share: float = 1.0) -> dict:
+    """The push ahead for a fitted rim: its inertia, damping and dry friction (``share`` of it) on the plan its delay
+    early. Every wheel gets its own from the fit; nothing here is the R3's.
+    """
+    return {"ff_inertia": params.inertia, "ff_damping": params.damping, "ff_friction": share * params.stick,
+            "plan_s": params.delay_s}
+
+
+def neighbours(p: WheelParams, ahead: bool = False) -> list[WheelParams]:
+    """The fitted rim first, then what a design must also hold up on. With the push ahead also a rim with half the
+    friction: the push then over-pushes at every stop, which is where a friction push hunts.
+    """
+    out = [p, replace(p, delay_s=p.delay_s * 1.3), replace(p, delay_s=p.delay_s * 0.8),
+           replace(p, inertia=p.inertia * 0.75),
+           replace(p, inertia=p.inertia * 1.6, damping=p.damping * 1.3, stick=p.stick * 1.5)]
+    return out + [replace(p, stick=p.stick * 0.5, damping=p.damping * 0.8)] if ahead else out
 
 
 def evaluate(params: WheelParams, design: Design, frame_hz: float) -> dict:
@@ -62,7 +88,7 @@ def evaluate(params: WheelParams, design: Design, frame_hz: float) -> dict:
     bench.say = lambda _msg: None
     bench.ready()
     out = {"ok": True, "over": 0.0, "rise_s": None, "lag_s": None}
-    for stage in STAGES:
+    for stage in AHEAD_STAGES if design.pushes_ahead else STAGES:
         run = bench.run_stage(stage, design, params.sign)
         s = summarize(run)
         if run.get("aborted") or s["buzz_min"] < MIN_BUZZ:
@@ -70,8 +96,10 @@ def evaluate(params: WheelParams, design: Design, frame_hz: float) -> dict:
         if "up" in s:
             out["over"] = max(out["over"], s["up"]["overshoot"], s["swing"]["overshoot"])
             out["rise_s"] = s["up"]["rise_s"]
-        else:
+        elif stage.kind == "follow":
             out["lag_s"] = s["track"]["lag_s"]
+        elif (s["track"]["rms"] or 0.0) > RAMP_TRACK_MAX:
+            out["ok"] = False
     return out
 
 
@@ -87,16 +115,20 @@ def holds(plants: list[WheelParams], design: Design, frame_hz: float) -> tuple[b
 
 
 def choose_design(params: WheelParams, frame_hz: float = 120.0, bandwidths=BANDWIDTHS, dampings=DAMPINGS,
-                  scales=INERTIA_SCALES) -> Choice:
-    """The fastest design that holds up on the fitted rim and its neighbours, searched over the design inertia too."""
-    plants = neighbours(params)
+                  scales=INERTIA_SCALES, ahead: bool = False) -> Choice:
+    """The fastest design that holds up on the fitted rim and its neighbours, searched over the design inertia too.
+
+    ``ahead`` designs it with the push ahead on the plan (the plugin's layout 5 with status bit 1024), from the fit.
+    """
+    plants = neighbours(params, ahead)
+    push = push_ahead_of(params) if ahead else {}
     best = None
     for scale in scales:
         inertia = max(50.0, min(INERTIA_MAX if scale > 1.0 else 20000.0, params.inertia * scale))
         for bw in bandwidths:
             held = False
             for z in dampings:
-                design = Design(bandwidth_hz=bw, damping=z, inertia=inertia, damping_first=True)
+                design = Design(bandwidth_hz=bw, damping=z, inertia=inertia, damping_first=True, **push)
                 ok, res = holds(plants, design, frame_hz)
                 if not ok:
                     continue
@@ -104,7 +136,7 @@ def choose_design(params: WheelParams, frame_hz: float = 120.0, bandwidths=BANDW
                 score = (res[0]["rise_s"] or 1.0) + 2.0 * (res[0]["lag_s"] or 0.5)
                 if best is None or score < best[0]:
                     best = (score, Choice(inertia, bw, z, res[0]["rise_s"], res[0]["lag_s"],
-                                          max(r["over"] for r in res)))
+                                          max(r["over"] for r in res), **push))
             if best is not None and not held:
                 break
     if best is None:

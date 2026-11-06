@@ -54,7 +54,12 @@ bandwidth. The game's own centring answers the wheel angle almost at once (57000
 97 km/h on the third drive, close to the calibrated spring), so it counts toward that stiffness: the servo adds
 only what the game's spring at the current speed does not give, never less than a quarter, and damping and
 integral are sized on the total. That keeps the wheel equally stiff and damped at every speed. `la_strength`
-scales the total. Caps: the servo 3000 of 10000 (the plugin's own cap), its damping 1500, its integral the cap.
+scales the total. Caps: the servo 3000 of 10000 (up to the plugin's hard 6000 when `la_servo_cap` asks, LA only), its
+damping half that (1500 at 3000), its integral the cap. The plugin may also push the rim ahead from the target's rate
+and acceleration and read the wheel ahead by its delay (`la_ff_*`, `la_servo_lead_s`, off by default; Bench, Speed
+benchmark). LA's target itself still moves on at its rate only (moving it on with the follower's acceleration
+swung a slower truck's return further in the model); the push ahead moves on the follower's rate and acceleration
+`la_ff_plan_s` from now (`actuator.follower_ahead`), sent with plugin flag bit 1.
 
 `la_cancel_share` (0 by default) removes a share of the game's steady force while the servo holds: the
 magnitude low-passed at 1.5 s, so turn-in weight, corrections and bumps still come through, faded with the
@@ -300,7 +305,10 @@ lane).
 
 ## Caps
 
-The servo 3000 of 10000 (the plugin's cap, the whole assist 4000), its damping 1500, its integral its cap, any
+The servo 3000 of 10000 by default, and up to 6000 (the plugin's hard maximum, the whole assist 6500) only when
+`la_servo_cap` asks for it: config only, LA only, the lane keeping assist never reads it (Lukas, 2026-11-06, to hold
+corners past what 3000 can). Its damping half its cap (1500 at 3000) and its force slew 150000 per second (Lukas,
+2026-11-06, for fast moves; 1500 and 30000 before), its integral its cap, any push ahead within the cap, any
 cancelled game force 6000 and never more than the game's own, whatever MonoCruise sends. A stale heartbeat (0.25 s), a steering channel
 older than 0.15 s, or a game that is not driving fades everything out, the cancel included.
 
@@ -370,6 +378,10 @@ line crossed keeps the lane it left as the reference (see the lane under the tru
 | `la_strength` | 1.0 | 0 to 2: scales the servo's stiffness (damping follows). 0 is no servo |
 | `la_wheel_inertia` | 0 (650) | the rim with hands the servo is designed on; lower for a light wheel that buzzes, higher for a heavy one that feels slow |
 | `la_cancel_share` | 0 | share of the game's steady FFB force removed while it steers, 0 to 1; 0 keeps the game's feel |
+| `la_ff_inertia`, `la_ff_damping`, `la_ff_friction` | 0 | the plugin pushes the rim ahead: its inertia times the target's acceleration, its damping times its rate, its dry friction the way it moves. Take them from the wheel check's fit, then confirm with the speed benchmark (`speed --push-ahead`), which prints them when the run was clean. LA and the lane keeping assist both use them: they are the wheel's |
+| `la_servo_lead_s` | 0 | reads the wheel and the target that many seconds ahead (the wheel's delay), at most 0.08. Buzzed ramps in the model; leave it at 0 |
+| `la_ff_plan_s` | 0 | the push ahead moves the rim on the target's motion that many seconds from now (the follower's own, propagated), so it starts and stops on time; the wheel check's delay (26 ms on the R3). At most 0.08 |
+| `la_servo_cap` | 0 (3000) | LA's servo cap out of 10000, 1000 to 6000. The game pushes back about 560 units per m/s^2 of cornering, so 8 m/s^2 needs about 4500 plus friction. A hand overpowers it; with `la_always_on` nothing hands back |
 | `la_bandwidth_hz`, `la_damping` | 0 (2 Hz, 0.7) | the servo's design on that rim, from the wheel check; bounded to 0.3 to 3 Hz and 0.3 to 2 |
 | `la_damping_first` | false | damping first under the cap (`plugins/ffb/README.md`); needs the plugin that knows it. LA and the lane keeping assist both read the three |
 | `la_min_speed_kmh` | 60 | arm speed |
@@ -378,7 +390,7 @@ line crossed keeps the lane it left as the reference (see the lane under the tru
 | `la_tmp_enabled` | false | allow on TruckersMP |
 | `la_follow_all` | false | test: keep it on through junctions, forks, merges and lane switches |
 | `la_always_on` | false | test: never hand back to the driver and no bend limit; hands-on check off |
-| `debug` | false | also writes `la_debug.csv` (Logs) |
+| `debug` | false | also writes `la_debug.csv` and `la_ffb_debug.csv` (Logs) |
 
 ## Logs
 
@@ -396,9 +408,19 @@ rate, the plugin's wheel angle and speed, the game's force, the servo and the ca
 gains, cap, every guard's scale, the bend scale, the FFB rate, whether the lane fit was in use, and the plugin's
 FFB and steering frame counters. No coordinates, local only, rotated at 50 MB.
 
+`la_ffb_debug.csv` (`lka_ffb_debug.csv` for the lane keeping assist) gets every constant-force update of the
+plugin's trace block (`plugins/ffb/README.md`, Trace block) while the game drives, the assist idle or not: the
+game's own force before anything is added, what went to the wheel, the servo's part and the wheel angle it used,
+each with the 20 Hz tick's speed, reason, target, gains and the calibration, and the gain and spring and damper
+coefficients of any condition effect the game made. It is there to fit the game's own centring, as each user has it
+set up, at the rate the servo works at: the 20 Hz `game_force` is low-passed at 0.1 s and the calibration's spring
+(`Gains.spring`, cornering force only) read 25 times too low under 25 km/h on the 2026-11-06 drive. The log says
+once which effects the game made (`LA FFB trace: the game made ... effects`). Local only, rotated at 300 MB
+(a few hours of driving).
+
 ## Testing
 
-1. Build and install the version 4 plugin (`plugins/ffb/README.md`); the game must be closed to replace it.
+1. Build and install the version 5 plugin (`plugins/ffb/README.md`); the game must be closed to replace it.
 2. `python tools/la_torque_test.py` holds +800 then -800 with no lane data: note which way each pushes.
 3. `"la_enabled": true`, drive bends at 40 km/h or more until `LA calibration` shows the cornering
    and steering fits ready (about a minute). A positive spring must match "+800 pushed left".
@@ -462,9 +484,26 @@ minutes on the wheel:
    overshoot under 60 %. `la_wheel_inertia` is then the design inertia, which is also the rim-with-hands the driver's
    push is estimated on.
 4. That design is run on the wheel (step, slow ramp, slow sine, fast ramp, fast sine). If it rings or overshoots more
-   than 30 % up or 50 % on the swing, the bandwidth steps back 20 % and it runs again, twice; then the gentlest rung
-   is tried. If none holds, the check says so and writes no keys: leave the defaults. A wheel that cannot be walked back
-   to its start ends the check early; what was recorded is kept and reported.
+   than 20 % up or 35 % on the swing, that run goes back into the fit (a ring is what pins the delay) and a new design
+   is chosen, up to three rounds, never a design as fast as one that rang; then the gentlest rung is tried. If none
+   holds, the check says so and writes no keys: leave the defaults.
+5. A design that held is tried 15 % faster, up to four times, and the fastest the wheel accepts is kept. Without this
+   the bare R3 stopped at a model-cautious 1.5 Hz (56 ms of fitted delay): two steps up cut the 0.02 step's rise from
+   0.45 to 0.33 s and the follow-run lag from 180 to 80 ms with no overshoot. With simulated inertia on, 1.75 Hz held
+   (48 % swing under the earlier 50 % limit, hence the tighter one) and 2.0 Hz pinned the servo with 270 % overshoot:
+   the edge is a cliff, so the limits leave margin. A wheel that cannot be walked back to its start ends the check
+   early; what was recorded is kept and reported.
+
+With a plugin that pushes ahead on a plan (status bit 1024) the check designs with it, for whatever wheel it
+measures (2026-11-06): it counts how often the game reads the wheel (the steering frame count, 60 Hz on the R3) and
+fits the rim at that rate, designs with the push ahead from that fit (inertia, damping, friction, the plan its delay
+early) on the fitted rim and its neighbours, a rim with half the friction among them (where a friction push over-pushes
+and could hunt), and verifies on the wheel with a rounded 0.4 lock/s ramp added. When nothing holds in the model, as
+on a wheel the fit cannot describe (gear teeth, backlash, a coarse encoder: the geared model wheel fit inertia 159 and
+67 ms where it is 600 and 25), it tries push-ahead designs on the wheel itself, 0.5, 0.7, 1.0 and 1.4 Hz on 650 at 1.0
+of critical damping, and keeps the fastest that holds (the geared model wheel held to 1.4 Hz). It then writes the
+`la_ff_*` and `la_ff_plan_s` keys too. The model wheels on 2026-11-06, read at 60 Hz: the R3 1.2 Hz, the bare R3 1.25
+Hz, the geared wheel 1.4 Hz chosen on the wheel, all with the push ahead.
 
 The output is responsiveness (the verified bandwidth and the rise of a 0.02 step), smoothness and the keys. Smoothness
 is steppy when the breakaway force is over 12 % of the servo's push, the wheel stands still over 25 % of the time
@@ -479,10 +518,86 @@ The wheel's own settings change the result a lot: on 2026-11-05 the same 1.25 an
 clean with the Moza software's simulated inertia on and rang hard with it off. Run the check again after changing
 any wheel setting, and keep one set of keys per setting.
 
+### Speed benchmark
+
+`python tools/la_servo_bench.py speed --rim tools/la_bench_out/la_check_<stamp>.json` (same setup as `check`; the
+design comes from the `la_*` keys in config.json, read only, or `--bandwidth`, `--inertia`, `--cap`, `--law`) measures
+how fast the servo moves the standing wheel: ramps of 0.15 lock at 0.1 to 3.2 lock per second (followed while the
+wheel trails by at most 0.1 s and overshoots the end by at most 10 %), then steps of 0.02 to 0.2 lock (time to 90 %,
+the swing through zero, overshoot). Either ladder stops at the first run that rings. Beside each step it prints what
+the fitted rim allows at the same cap: the bang-bang move a perfect servo would make, with and without the plugin's
+force slew, and the rim's top rate. `--simulate rim` runs it on the fitted rim, `--simulate r3` on a model wheel.
+`--push-ahead` pushes the `--rim` fit ahead and leads by its delay (`--lead 0` drops the lead), and prints the `la_ff_*`
+keys when no step rang and it followed ramps of at least 0.4 lock/s (twice LA's own target limit; a step's overshoot is
+the feedback's, the push ahead does not act on a step). A ramp reaches its rate over 0.1 s (`--corner`), or half its move at the fastest, and
+is also sent where its acceleration changes: a commanding feature that smooths its target plans when it brakes, and
+one that changes its acceleration between 20 Hz ticks gets up to 50 ms of late braking (with the push ahead, 18 %
+overshoot at 0.8 lock/s in the model against 7 %). Standing only: at speed the game's centring and damping slow every number.
+
+On the R3's fit (simulated inertia on, model, design 1.75 Hz on 528, damping first, cap 5500), 2026-11-06:
+
+| plugin | ramps followed up to | 0.1 lock step to 90 % |
+|---|---|---|
+| slew 30000, damping 1500 | 0.2 lock/s (90 deg/s), the 0.4 ramp and the 0.02 step rang | rang |
+| slew 150000, damping half the cap | 0.4 lock/s | 0.23 s (small steps 25 % over) |
+| and the push ahead | 0.8 lock/s (360 deg/s) | 0.23 s |
+| and the lead (26 ms) | 0.2 lock/s (the 0.4 ramp's corners buzzed) | 0.24 s (small steps 16 to 18 % over) |
+
+The rim allows 0.18 s for that step at slew 150000. 2.0 and 2.5 Hz designs did no better on the new plugin.
+
+On the wheel (2026-11-06, same design, layout 5) it did worse than that model: ramps followed to 0.2 lock/s with or
+without the push ahead (which cut the 0.2 ramp's overshoot from 8 to 1 % and the 0.02 step's from 22 to 8 %), and a
+ring near 4.5 Hz after fast stops tripped the buzz guard on the 0.4 ramp (with the push ahead), the 0.8 ramp and the
+0.05 step. The model had read the wheel at every FFB tick; the game reads it at its frame rate, every 16.5 ms on the
+R3. With `WheelParams.reading_hz = 60` the model reproduces those runs (the 0.8 ramp: error rms 0.025 and a buzz cut,
+the wheel 0.026 and a buzz cut), and in it the 1.75 Hz design rings on the 0.1 step and the slowest half-lock ramp,
+while 1.25 to 1.5 Hz with the push ahead held everything up to a half lock at 0.5 lock/s. The lead cut small steps'
+overshoot there too but buzzed the 0.4 ramp at every value tried (4 to 20 ms).
+
+The bench centres the wheel: before the first stage and between stages it walks it to the centre on a rounded move
+(0.3 s corners, at most 0.3 lock/s, damping first and the run's push ahead, sent every 20 ms). Until then it walked
+back to wherever the wheel rested at the start, which on 2026-11-06 was 0.09 to 0.16 lock off centre. Last in the
+benchmark is half lock: out from the centre to 0.5 lock and back, then to the other side and back, on ramps at 0.5, 1
+and 2 lock/s that speed up and slow down at 70 % of what the fitted rim does at the cap (8 lock/s^2 without a fit,
+`--half-accel`), then at once. Its angle limit is the move plus 0.15. At once is slow on purpose: damping first gives
+the damping up to half the cap, which holds a wheel flung at a far target to about half the cap over kd (0.34 lock/s
+on the 1.75 Hz design); a feature that wants a fast big move sends it as a ramp. In the 60 Hz model half lock took
+0.54 s at 1 lock/s (10 to 12 % overshoot) and 0.36 s at 2 lock/s (about 20 %): the stop starts a delay late.
+
+On the wheel (2026-11-06, push ahead, cap 5500), 1.25 Hz was the first run with no buzz cut at all and Lukas's
+smoothest so far: ramps followed to 0.4 lock/s (0.8 at 11 % overshoot), the 0.02 step slow (0.62 s to 90 %, 5 %),
+half lock at 0.5, 1 and 2 lock/s done (7, 16 and 12 % overshoot, 0.96, 0.51 and 0.37 s). The same run at 1.75 Hz
+buzzed on the 0.4 ramp and the first half lock, as the 60 Hz model said. What was left was the wheel's delay: slow
+ramps trailed 25 to 30 ms and every stop started that late. The push ahead on the plan a wheel delay early
+(`--plan`, by default the `--rim` delay with `--push-ahead`; `la_ff_plan_s`) fixes that in the 60 Hz model: at 1.25
+Hz ramps followed to 0.8 lock/s (3 %) and half lock at 2 lock/s in 0.34 s with 4 % overshoot (0.36 s is the rim's
+own limit at 5500), with 1.5 Hz close behind. `--simulate rim` now reads at 60 Hz (`--reading-hz`).
+
+On the wheel with the plan (2026-11-06): ramps followed to 0.8 lock/s (1 %), half lock at 0.5, 1 and 2 lock/s with 2 %
+overshoot each (0.96, 0.51, 0.36 s). Lukas felt three things left: stopping short, stopping late, and a slow creep
+onto the target. The recording shows the wheel parking 3 to 15 mlock short of or past the target and taking 0.4 to 0.8 s
+(some holds never) to come within 3 mlock. Standing, the game's own force on the wheel is its steering friction, about
+550 while the wheel moves and about 200 held against the way it last moved once it stops (`c_ff_fricton` 0.4); P on
+the 1.25 Hz design only beats the rim's 164 at 5 mlock, and the integral is slow to make up the rest. The plugin's
+friction push now turns toward the target at rest (full from 2 mlock): in the 60 Hz model ramps came within 3 mlock in
+0.33 to 0.70 s instead of 0.72 to 0.81, small steps in 0.21 to 0.28 s instead of never, half lock at 0.5 lock/s in
+about 0.6 s instead of 0.75. Comparing the wheel with the target as it was when the reading was taken (the reading
+is up to 16 ms old) did not help in the model and was dropped. The model's rebound after a fast half lock (30 mlock)
+comes from the fit's standing spring, which on the wheel is the game's held friction: the wheel rebounded 10 to 27.
+
+With the rest push on the wheel (2026-11-06) moves settled in 0.01 to 0.34 s after slow ramps and 0.3 to 0.8 s after
+steps (from 0.4 to 0.8 s and never), but Lukas still found the endings slow and jittery. At the end of a 2 lock/s
+half lock the wheel stopped 3 mlock short, rebounded to 11 short, swung 9 past and sat 6 past for over a second: the
+damping braked again on the rate the reading showed late, after the plan had already braked on time, and the
+integral had wound up to about 650 on the reading's lag during the move and kept pushing past. With the plan the
+plugin now lags the damping's target rate by the reading's own lag and holds the integral while the target moves
+faster than 0.3 lock/s (Plugin README, the push ahead); in the 60 Hz model the swing after a stop went from 36 to 21
+mlock on the R3 and from 56 to 36 on the geared wheel.
+
 What the bench cannot see is the game's own force at speed. The design counts the game's spring in (the servo adds
 only what is missing), which is the part to check on a drive with `la_debug.csv`. The plugin caps the damping force at
-1500, reached at 0.13 lock per second of rate error, so damping is at full strength only for slow, small moves: look
-at the overshoot of the 0.02 step first.
+half the servo cap (1500 at 3000, reached at 0.18 lock per second of rate error on the 1.75 Hz design), so damping is
+at full strength only for slow, small moves: look at the overshoot of the 0.02 step first.
 
 Unit tests: `tests/la/` (closed loop, every gate and mute, calibration, the thread end to end, the bench),
 `tests/lane_departure/test_command.py` (layout against `plugins/ffb/ffb_cmd.h`), and the plugin's
@@ -490,6 +605,13 @@ Unit tests: `tests/la/` (closed loop, every gate and mute, calibration, the thre
 
 ## Not done
 
+Road test 2026-11-06 (`la_always_on`, design 1.75 Hz on 528, cap 3000): the servo sat on its cap 4 % of the time above
+40 km/h, but 21 % when the lane asked 5 to 6 m/s^2, 49 % for 6 to 8 and 57 % above 8, with the steering error
+growing from 0.02 to 0.08 lock. The shake was not at the cap: the steering ripple 1 s after the servo pinned (0.0017
+lock) was no higher than 1 s before (0.0020), long pinned stretches were slow (0.6 Hz), and the three ring cuts came
+on straights at 38, 85 and 91 km/h with the lane asking under 1 m/s^2. Above about 86 km/h the game's spring
+(50 to 114k per lock) is more than the design's total stiffness, so the loop is stiffer than the standing bench
+tested; the damping is sized on at most 1.25 times the total.
 The servo's cap against the game's centring: the game pushes back about 590 units per m/s^2 of cornering, so
 the cap bounds the bend it can hold at any speed: 2500 held about 4.2 m/s^2 (in the model at the game's spring
 at 130 km/h, an R 150 at 25 m/s ran off), the plugin's own 3000 (Lukas, 2026-11-01, for the tight-bend tests)

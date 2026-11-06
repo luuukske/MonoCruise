@@ -12,6 +12,7 @@ import pytest
 from core.la.actuator import WheelActuator
 from core.la.controller import STRENGTH_MAX, AssistTuning, Gains, LaneAssist, WantedPath, Wheel, bend_ceiling
 from core.lane_departure.command import SERVO_OFF
+from tests.la import servo_sim
 from tests.la.servo_sim import FORCE, GAIN, SPRING, Rig, Track, bend_track, kink_track, loop
 from tests.lane_departure.test_detector import DT, HALF_WIDTH, SPEED, START_S, frame_at, make_route
 
@@ -79,11 +80,19 @@ def test_with_resting_hands_and_friction_it_steers_the_bend(ring_hz, friction, l
     assert max(abs(e) for t, e, _, _ in out if t > 20.0) < 0.4
 
 
-def test_a_released_light_wheel_with_no_friction_rings_and_the_guard_cuts_it():
+def test_a_released_light_wheel_with_no_friction_rings_and_the_guard_cuts_it(monkeypatch):
+    monkeypatch.setattr(servo_sim, "SERVO_SLEW", 30000.0)  # the slew it rang on; at 150000 it no longer rings
     out = released_in_bend(300.0, *LIGHT, wobble=0.5, stick=0.0)
     lane_steer = -1.0 / 300.0 / GAIN
     assert any(o.event == "ring" for _, _, _, o in out)
     assert max(abs(s - lane_steer) for _, _, s, _ in out) < 0.12, "the shake stays bounded"
+
+
+def test_the_faster_slew_holds_the_released_light_wheel_without_a_ring():
+    out = released_in_bend(300.0, *LIGHT, wobble=0.5, stick=0.0)
+    lane_steer = -1.0 / 300.0 / GAIN
+    assert not any(o.event == "ring" for _, _, _, o in out), "Lukas 2026-11-06: slew 30000 -> 150000"
+    assert max(abs(s - lane_steer) for _, _, s, _ in out) < 0.12
 
 
 @pytest.mark.parametrize("ring_hz, friction", DAMPED)

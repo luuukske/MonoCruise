@@ -120,21 +120,30 @@ static double ffb_torque_step(FfbTorque *s, double target, int on, double dt) {
     return s->value;
 }
 
-/* Steering servo (layout 4): a damped PID on the wheel angle at the game's FFB rate, added to the game's own force.
-   MonoCruise sends the target with its rate, so the target moves between its 20 Hz updates instead of stepping. It can
-   also cancel a share of the game's steady force (off by default). It fades in and out and halves on a buzz. */
+/* Steering servo (layout 5): a damped PID on the wheel angle at the game's FFB rate, added to the game's own force.
+   MonoCruise sends the target with its rate and acceleration, so the target moves between its 20 Hz updates instead of
+   stepping, and may ask for the rim's own force pushed ahead and the wheel read ahead by its delay (both off by
+   default). It can also cancel a share of the game's steady force (off by default). It fades in and out and halves on
+   a buzz. */
 
-#define FFB_SERVO_CAP 3000.0
-#define FFB_ASSIST_CAP 4000.0
+/* Hard maximums. MonoCruise asks for 3000 unless LA's la_servo_cap says more (Lukas, 2026-11-06), never above 6000. */
+#define FFB_SERVO_CAP 6000.0
+#define FFB_ASSIST_CAP 6500.0
 #define FFB_CANCEL_CAP 6000.0
 #define FFB_SERVO_IN_S 0.3
 #define FFB_SERVO_OUT_S 0.2
-#define FFB_SERVO_SLEW 30000.0
+/* Slew 150000 per second and damping up to half the servo cap: Lukas, 2026-11-06, for fast moves (was 30000, 1500). */
+#define FFB_SERVO_SLEW 150000.0
 #define FFB_STEER_STALE_S 0.15
 #define FFB_STEER_RATE_TAU_S 0.04
 #define FFB_RATE_FAST_TAU_S 0.006
 #define FFB_EXTRAP_S 0.15
-#define FFB_D_CAP 1500.0
+#define FFB_D_SHARE 0.5
+#define FFB_LEAD_MAX_S 0.08
+#define FFB_FF_STILL_RATE 0.02
+#define FFB_FF_REST_BAND 0.002
+#define FFB_I_MOVE_RATE 0.3
+#define FFB_D_LAG_MAX_S 0.05
 #define FFB_I_SHARE 1.0
 #define FFB_CANCEL_TAU_S 1.5
 #define FFB_BUZZ_MIN 300.0
@@ -158,11 +167,15 @@ typedef struct FfbServo {
     int swing;
     int seen;
     double peak;
+    double ff;
+    double d_ref;
 } FfbServo;
 
 /* What MonoCruise asks for: ``target`` and ``rate`` in counterclockwise lock, gains per lock, ``dir`` the torque sign
    that turns the wheel counterclockwise (0 is off), ``only`` +1 or -1 the one way it may push (0 both),
-   ``damp_first`` 1 gives the damping its room under the cap before P and I get theirs. */
+   ``damp_first`` 1 gives the damping its room under the cap before P and I get theirs. ``accel`` is the target's
+   acceleration; ``ff_*`` the rim's inertia, damping and friction pushed ahead (0 is none) on ``ff_rate`` and
+   ``ff_accel``: the target's own motion, or the motion MonoCruise plans a wheel delay from now. */
 typedef struct FfbServoIn {
     double target;
     double rate;
@@ -173,6 +186,14 @@ typedef struct FfbServoIn {
     int dir;
     int only;
     int damp_first;
+    double accel;
+    double ff_inertia;
+    double ff_damping;
+    double ff_friction;
+    double ff_rate;
+    double ff_accel;
+    double d_lag;
+    double i_move;
 } FfbServoIn;
 
 static void ffb_servo_init(FfbServo *s) {
@@ -188,6 +209,8 @@ static void ffb_servo_init(FfbServo *s) {
     s->swing = 0;
     s->seen = 0;
     s->peak = 0.0;
+    s->ff = 0.0;
+    s->d_ref = 0.0;
     for (i = 0; i < FFB_BUZZ_FLIPS; i++) {
         s->flips[i] = 0.0;
     }
@@ -215,6 +238,71 @@ static double ffb_servo_target(double target, double rate, double age) {
     return target + rate * (age < FFB_EXTRAP_S ? age : FFB_EXTRAP_S);
 }
 
+static double ffb_finite(double x) {
+    return x == x && x < 1e30 && x > -1e30 ? x : 0.0;
+}
+
+/* The same with its acceleration: where the target is ``age`` seconds on, and how fast it moves there. */
+static void ffb_servo_aim(double target, double rate, double accel, double age, double *aim, double *aim_rate) {
+    double a = age > 0.0 ? (age < FFB_EXTRAP_S ? age : FFB_EXTRAP_S) : 0.0;
+    rate = ffb_finite(rate);
+    accel = ffb_finite(accel);
+    *aim = target + rate * a + 0.5 * accel * a * a;
+    *aim_rate = rate + accel * a;
+}
+
+/* How far ahead to read the wheel when MonoCruise asks for a lead (the wheel's own delay): that lead and the steering
+   reading's age (it comes at the game's frame rate), together at most FFB_LEAD_MAX_S. No lead reads it as it is. */
+static double ffb_servo_ahead(double lead, double reading_age) {
+    double ahead;
+    if (!(lead > 0.0)) {
+        return 0.0;
+    }
+    ahead = lead + (reading_age > 0.0 ? reading_age : 0.0);
+    return ahead < FFB_LEAD_MAX_S ? ahead : FFB_LEAD_MAX_S;
+}
+
+/* The force the rim needs to move as asked: its inertia times ``ff_accel``, its damping times ``ff_rate`` and its
+   friction in the way it moves, within the cap. At rest the friction push turns toward the target (``err``, full
+   from FFB_FF_REST_BAND), so a wheel held short or past by friction finishes the move instead of creeping. */
+static double ffb_servo_ff(const FfbServoIn *in, double cap, double err) {
+    double ff = 0.0;
+    if (in->ff_inertia > 0.0) {
+        ff += in->ff_inertia * ffb_finite(in->ff_accel);
+    }
+    if (in->ff_damping > 0.0) {
+        ff += in->ff_damping * ffb_finite(in->ff_rate);
+    }
+    if (in->ff_friction > 0.0) {
+        double moving = tanh(ffb_finite(in->ff_rate) / FFB_FF_STILL_RATE);
+        ff += in->ff_friction * (moving + (1.0 - fabs(moving)) * tanh(ffb_finite(err) / FFB_FF_REST_BAND));
+    }
+    return ffb_clamp(ff, cap);
+}
+
+/* With the plan the push ahead moves the rim on time, so the feedback must not also chase what the wheel reading
+   shows late: the damping compares the wheel's rate with the target's lagged as the reading lags (half the interval
+   between steering readings plus the rate filter), and the integral holds while the target moves faster than
+   FFB_I_MOVE_RATE (it wound up on the reading's lag during fast moves and pushed past the stop, 2026-11-06). */
+static void ffb_servo_plan_feedback(FfbServoIn *in, int plan, double reading_interval) {
+    double lag = 0.5 * (reading_interval > 0.0 ? reading_interval : 0.0) + FFB_RATE_FAST_TAU_S;
+    in->d_lag = plan ? (lag < FFB_D_LAG_MAX_S ? lag : FFB_D_LAG_MAX_S) : 0.0;
+    in->i_move = plan ? FFB_I_MOVE_RATE : 0.0;
+}
+
+/* What the push ahead moves on: the plan MonoCruise sent (``plan`` 1), moved on at its acceleration for at most
+   FFB_EXTRAP_S since it came, or else the target's own rate and acceleration where the servo aims. */
+static void ffb_servo_ff_motion(FfbServoIn *in, int plan, double plan_rate, double plan_accel, double age) {
+    double a = age > 0.0 ? (age < FFB_EXTRAP_S ? age : FFB_EXTRAP_S) : 0.0;
+    if (plan) {
+        in->ff_accel = ffb_finite(plan_accel);
+        in->ff_rate = ffb_finite(plan_rate) + in->ff_accel * a;
+    } else {
+        in->ff_accel = in->accel;
+        in->ff_rate = in->rate;
+    }
+}
+
 /* The three terms summed in the counterclockwise axis and held to ``cap``. With ``damp_first`` P and I get only the room
    the cap leaves after D, so a servo pinned at its cap still brakes a wheel that swings through the target. */
 static double ffb_servo_sum(double p, double d, double integ, double cap, int damp_first) {
@@ -227,8 +315,9 @@ static double ffb_servo_sum(double p, double d, double integ, double cap, int da
     return ffb_clamp(pi + d, cap);
 }
 
-/* One tick of the PID in the counterclockwise axis, turned into a torque sign by ``dir``. The integral grows only while
-   the output is not pinned the same way, and stays within the cap. With ``only`` nothing pushes the other way at all. */
+/* One tick of the PID in the counterclockwise axis, turned into a torque sign by ``dir``; ``in->rate`` is the target's
+   rate at ``target``. The integral grows only while the output is not pinned the same way, and stays within the cap.
+   The damping is capped at half the cap; the push ahead rides with P. With ``only`` nothing pushes the other way. */
 static double ffb_servo_pid(FfbServo *s, const FfbServoIn *in, double target, double angle, double rate, double dt) {
     double cap = ffb_servo_cap(in->cap);
     double e;
@@ -236,17 +325,27 @@ static double ffb_servo_pid(FfbServo *s, const FfbServoIn *in, double target, do
     double d;
     double u;
     double room;
+    int moving;
     dt = ffb_dt_clamp(dt);
+    s->ff = 0.0;
     if (!in->dir || !(in->kp >= 0.0) || !(in->kd >= 0.0) || !(in->ki >= 0.0)) {
         s->integ = 0.0;
+        s->d_ref = 0.0;
         return 0.0;
     }
     e = target - angle;
-    p = in->kp * e;
-    d = ffb_clamp(in->kd * (in->rate - rate), FFB_D_CAP);
+    s->ff = ffb_servo_ff(in, cap, e);
+    p = in->kp * e + s->ff;
+    if (in->d_lag > 0.0) {
+        s->d_ref += (in->rate - s->d_ref) * (1.0 - exp(-dt / in->d_lag));
+    } else {
+        s->d_ref = in->rate;
+    }
+    d = ffb_clamp(in->kd * (s->d_ref - rate), FFB_D_SHARE * cap);
     room = in->damp_first ? cap - fabs(d) : cap;
     u = in->damp_first ? p + s->integ : p + d + s->integ;
-    if (fabs(u) < room || u * e < 0.0) {
+    moving = in->i_move > 0.0 && (fabs(in->rate) > in->i_move || fabs(ffb_finite(in->ff_rate)) > in->i_move);
+    if (!moving && (fabs(u) < room || u * e < 0.0)) {
         s->integ = ffb_clamp(s->integ + in->ki * e * dt, FFB_I_SHARE * cap);
     }
     u = ffb_servo_sum(p, d, s->integ, cap, in->damp_first);

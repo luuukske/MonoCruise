@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from types import SimpleNamespace
 
 from core.la.controller import AssistTuning, Gains, LaneAssist, Wheel
-from core.lane_departure.command import servo_fields
+from core.lane_departure.command import SERVO_FF_PLAN, servo_ahead, servo_fields, servo_flags, servo_plan
 from tests.lane_departure.test_detector import DT, SPEED, START_S, _arc_x, _arc_z, frame_at, make_route
 
 SPRING = 34570.0
@@ -27,11 +27,16 @@ TORQUE_TAU_S = 0.06
 RATE_TAU_S = 0.006
 CANCEL_TAU_S = 1.5
 EXTRAP_S = 0.15
-D_CAP = 1500.0
+D_SHARE = 0.5
+LEAD_MAX_S = 0.08
+FF_STILL_RATE = 0.02
+FF_REST_BAND = 0.002
+I_MOVE_RATE = 0.3
+D_LAG_MAX_S = 0.05
 I_SHARE = 1.0
 SERVO_IN_S = 0.3
 SERVO_OUT_S = 0.2
-SERVO_SLEW = 30000.0
+SERVO_SLEW = 150000.0
 BUZZ_MIN = 300.0
 BUZZ_SWING = 0.002
 BUZZ_FLIPS = 4
@@ -60,8 +65,9 @@ def _sum(p: float, d: float, integ: float, cap: float, damp_first: bool) -> floa
 
 @dataclass
 class Plugin:
-    """Mirror of plugins/ffb/ffb_signal.h (layout 4): hold low-pass, damped PID with the target moved on at its
-    rate, a share of the game's steady force cancelled when asked, fade, slew and buzz guard.
+    """Mirror of plugins/ffb/ffb_signal.h (layout 5): hold low-pass, damped PID with the target moved on at its
+    rate and acceleration, the push ahead and the lead when asked, a share of the game's steady force cancelled when
+    asked, fade, slew and buzz guard. ``reading_age`` is how old the wheel reading is (the game's frame rate).
     """
 
     base: float = 0.0
@@ -81,6 +87,10 @@ class Plugin:
     sent: tuple | None = None
     age: float = 0.0
     cancel: float = 0.0
+    ff: float = 0.0
+    since: float = 0.0
+    d_ref: float = 0.0
+    interval: float = 0.0
 
     def _buzz(self, want: float, angle: float) -> None:
         sign = 1 if want > BUZZ_MIN else (-1 if want < -BUZZ_MIN else 0)
@@ -112,33 +122,56 @@ class Plugin:
             self.scale = max(BUZZ_FLOOR, self.scale * BUZZ_CUT)
             self.flips = []
 
-    def step(self, servo, torque, steer, dt, game=0.0):
+    def step(self, servo, torque, steer, dt, game=0.0, reading_age=0.0, fresh=True):
         fields = servo_fields(servo)
         target, kp, ki, cap, direction, rate, kd, cancel, only = fields
-        if fields != self.sent:
-            self.sent = fields
+        ahead_fields = servo_ahead(servo, fields)
+        plan = servo_plan(servo, fields) if servo_flags(servo, fields) & SERVO_FF_PLAN else None
+        if (fields, ahead_fields, plan) != self.sent:
+            self.sent = (fields, ahead_fields, plan)
             self.age = 0.0
         else:
             self.age += dt
         self.base += (max(-3000.0, min(3000.0, torque)) - self.base) * (1.0 - math.exp(-dt / TORQUE_TAU_S))
-        if self.prev is not None:
-            self.rate += ((steer - self.prev) / dt - self.rate) * (1.0 - math.exp(-dt / RATE_TAU_S))
-        self.prev = steer
+        self.since += dt
+        if fresh:
+            if self.prev is not None and self.since > 0.0:
+                self.interval = self.interval + (self.since - self.interval) * 0.05 if self.interval else self.since
+            if self.prev is not None:
+                self.rate += ((steer - self.prev) / self.since - self.rate) * (1.0 - math.exp(-self.since / RATE_TAU_S))
+            self.prev = steer
+            self.since = 0.0
         self.game_lp += (game - self.game_lp) * (1.0 - math.exp(-dt / CANCEL_TAU_S))
         self.clock += dt
         self.scale = min(1.0, self.scale + BUZZ_RECOVER * dt)
         on = bool(direction)
         want = 0.0
+        self.ff = 0.0
         if on:
-            cap = min(cap, 3000.0)
-            aim = target + rate * min(self.age, EXTRAP_S)
-            err = aim - steer
-            p = kp * err
-            d = _clamp(kd * (rate - self.rate), D_CAP)
+            cap = min(cap, 6000.0)
+            accel, ff_inertia, ff_damping, ff_friction, lead = ahead_fields
+            ahead = min(LEAD_MAX_S, lead + max(0.0, reading_age)) if lead > 0.0 else 0.0
+            a = min(self.age + ahead, EXTRAP_S)
+            aim = target + rate * a + 0.5 * accel * a * a
+            aim_rate = rate + accel * a
+            err = aim - (steer + self.rate * ahead)
+            ff_rate, ff_accel = aim_rate, accel
+            if plan is not None:
+                ff_accel = plan[1]
+                ff_rate = plan[0] + ff_accel * min(self.age, EXTRAP_S)
+            moving = math.tanh(ff_rate / FF_STILL_RATE)
+            way = moving + (1.0 - abs(moving)) * math.tanh(err / FF_REST_BAND)
+            ff = ff_inertia * ff_accel + ff_damping * ff_rate + ff_friction * way
+            self.ff = _clamp(ff, cap)
+            p = kp * err + self.ff
+            d_lag = min(D_LAG_MAX_S, 0.5 * self.interval + RATE_TAU_S) if plan is not None else 0.0
+            self.d_ref += (aim_rate - self.d_ref) * (1.0 - math.exp(-dt / d_lag)) if d_lag > 0.0 else aim_rate - self.d_ref
+            d = _clamp(kd * (self.d_ref - self.rate), D_SHARE * cap)
             first = bool(servo.damping_first)
             room = cap - abs(d) if first else cap
             pi = p + self.integ if first else p + d + self.integ
-            if abs(pi) < room or pi * err < 0.0:
+            still = plan is None or max(abs(aim_rate), abs(ff_rate)) <= I_MOVE_RATE
+            if still and (abs(pi) < room or pi * err < 0.0):
                 self.integ = _clamp(self.integ + ki * err * dt, I_SHARE * cap)
             if only and self.integ * only < 0.0:
                 self.integ = 0.0
@@ -147,13 +180,14 @@ class Plugin:
             self._buzz(want, steer)
         else:
             self.integ = 0.0
+            self.d_ref = 0.0
         self.gain = min(1.0, max(0.0, self.gain + (dt / SERVO_IN_S if on else -dt / SERVO_OUT_S)))
         goal = want * self.scale * _ease(self.gain)
         self.value += max(-SERVO_SLEW * dt, min(SERVO_SLEW * dt, goal - self.value))
         if not on and self.gain <= 0.0 and abs(self.value) < 0.5:
             self.value, self.sign, self.pushed, self.swing, self.peak, self.flips = 0.0, 0, False, 0, None, []
         self.cancel = _clamp(-min(1.0, cancel) * _ease(self.gain) * self.game_lp, 6000.0) if cancel > 0.0 else 0.0
-        return max(-4000.0, min(4000.0, self.base + self.value)) + self.cancel
+        return max(-6500.0, min(6500.0, self.base + self.value)) + self.cancel
 
     @property
     def servo_applied(self) -> float:

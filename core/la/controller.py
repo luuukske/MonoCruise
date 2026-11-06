@@ -24,7 +24,7 @@ from core.lane_departure.detector import (
     smooth_heading,
 )
 
-from .actuator import STRENGTH_MAX, Gains, Wheel, WheelActuator, WheelTuning, ease
+from .actuator import STRENGTH_MAX, Gains, Wheel, WheelActuator, WheelTuning, ease, follower_ahead
 from .hand_push import HandPush
 from .lane_model import LaneModel
 from .path import LANE, WantedPath
@@ -215,7 +215,7 @@ class LaneAssist:
         self._push_sign = 0
         self._wheel = WheelActuator(self.tune.wheel)
         self._lane = LaneModel(max(1.0, self.tune.lane_fit_m))
-        self._target_rate = 0.0
+        self._target_rate = self._plan_rate = self._plan_accel = 0.0
         self._lat_hold = 0.0
         self._preview = self.tune.preview_s
         self._speed = 0.0
@@ -255,7 +255,7 @@ class LaneAssist:
         self._clear_hands()
         self._auth = self._bias = self._lat_hold = 0.0
         self._target = None
-        self._target_rate = 0.0
+        self._target_rate = self._plan_rate = self._plan_accel = 0.0
         self._lane.reset()
         self._blink_until = self._override_until = self._evade_until = self._muted_at = self._geom_until = -_INF
         self._soft_reason = ""
@@ -476,14 +476,15 @@ class LaneAssist:
             self._step_authority(t, dt, mute, g.ceiling)
         if self._auth <= 0.0:
             self._target = wheel.steer if wheel.ok else None
-            self._target_rate = 0.0
+            self._target_rate = self._plan_rate = self._plan_accel = 0.0
             self._pulse_side = SIDE_NONE
             self._clear_resist()
         reason = mute or ("bend_sharp" if g.ceiling <= 0.0 else "bend" if g.ceiling < 1.0 else "assist")
         if tn.pulse and not mute:
             reason = "pulse" if self._auth > 0.0 else "standby"
         only = (1 if self._pulse_side == SIDE_RIGHT else -1) if tn.pulse and self._pulse_side != SIDE_NONE else 0
-        servo = self._wheel.commands(gains, self._target, self._target_rate, self._auth, wheel, self._speed, only)
+        servo = self._wheel.commands(gains, self._target, self._target_rate, self._auth, wheel, self._speed, only,
+                                     (self._plan_rate, self._plan_accel))
         if self._frozen is not None and servo.cap:
             servo = replace(servo, cap=min(servo.cap, round(self._frozen * ease(self._auth))))
         return AssistOutput(
@@ -570,9 +571,9 @@ class LaneAssist:
         tn = self.tune
         if self._target is None:
             self._target = wheel.steer if wheel.ok else want
-            self._target_rate = 0.0
+            self._target_rate = self._plan_rate = self._plan_accel = 0.0
         if want is None or self._target is None or dt <= 0.0:
-            self._target_rate = 0.0
+            self._target_rate = self._plan_rate = self._plan_accel = 0.0
             return
         w = 2.0 * math.pi * tn.target_hz
         e0, v0 = self._target - want, self._target_rate
@@ -583,8 +584,10 @@ class LaneAssist:
             v1 = math.copysign(tn.target_rate, v1)
             step = max(-tn.target_rate * dt, min(tn.target_rate * dt, want + e1 - self._target))
             self._target += step
+            self._plan_rate, self._plan_accel = v1, 0.0
         else:
             self._target = want + e1
+            self._plan_rate, self._plan_accel = follower_ahead(e1, v1, w, self._wheel.tune.plan_s)
         self._target_rate = v1
 
     def _pulse_line(self, half_width: float) -> float:
@@ -782,7 +785,7 @@ class LaneAssist:
         """No usable lane: the target stays where it is while the authority fades, and the re-arm wait starts."""
         self._muted_at = t
         self._auth = max(0.0, self._auth - dt / self.tune.fall_s)
-        self._target_rate = 0.0
+        self._target_rate = self._plan_rate = self._plan_accel = 0.0
         self._lat_hold = 0.0
         if self._auth <= 0.0:
             self._target = wheel.steer if wheel.ok else None

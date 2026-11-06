@@ -32,7 +32,7 @@ def channel(buf: bytearray) -> cmd.RumbleChannel:
 
 def test_python_layout_matches_the_plugin_header():
     text = HEADER.read_text(encoding="utf-8")
-    assert int(_define(text, "FFB_CMD_VERSION")) == cmd.VERSION
+    assert int(_define(text, "FFB_CMD_VERSION")) == cmd.AHEAD_VERSION
     assert int(_define(text, "FFB_CMD_SIZE")) == cmd.SIZE
     assert _define(text, "FFB_CMD_TAG") == 'L"' + cmd.TAG.replace("\\", "\\\\") + '"'
     offsets = dict(re.findall(r"offsetof\(FfbCmd, (\w+)\) == (\d+)", text))
@@ -41,8 +41,12 @@ def test_python_layout_matches_the_plugin_header():
         "applied": 28, "servo_applied": 30, "servo_target": 32, "servo_kp": 36, "servo_ki": 40, "servo_cap": 44,
         "servo_dir": 46, "servo_only": 47, "steer": 48, "steer_rate": 52, "steer_frames": 56, "servo_scale": 60, "servo_rate": 64,
         "servo_kd": 68, "servo_cancel": 72, "servo_stamp": 76, "servo_integ": 80, "frame_hz": 84,
-        "cancel_applied": 88, "servo_flags": 90,
+        "cancel_applied": 88, "servo_flags": 90, "servo_accel": 92, "ff_inertia": 96, "ff_damping": 100,
+        "ff_friction": 104, "servo_lead": 108, "ff_applied": 112, "plan_rate": 116, "plan_accel": 120,
     }
+    assert (cmd._OFF_PLAN, cmd._PLAN.size) == (116, 8)
+    assert (cmd._OFF_AHEAD, cmd._AHEAD.size, cmd._OFF_FF_APPLIED) == (92, 20, 112)
+    assert float(_define(SIGNAL.read_text(encoding="utf-8"), "FFB_LEAD_MAX_S")) == cmd.LEAD_MAX_S
     assert (cmd._OFF_HEARTBEAT, cmd._OFF_CMD, cmd._OFF_SEQ, cmd._OFF_TORQUE, cmd._OFF_GAME_FORCE, cmd._OFF_STATUS,
             cmd._OFF_FRAMES, cmd._OFF_APPLIED) == (4, 8, 12, 16, 18, 20, 24, 28)
     assert (cmd._OFF_SERVO_APPLIED, cmd._OFF_SERVO, cmd._OFF_STEER, cmd._OFF_STEER_RATE, cmd._OFF_STEER_FRAMES,
@@ -54,7 +58,8 @@ def test_python_layout_matches_the_plugin_header():
     for name, value in (("HOOKED", cmd.STATUS_HOOKED), ("FORCE_SEEN", cmd.STATUS_FORCE_SEEN),
                         ("RUMBLING", cmd.STATUS_RUMBLING), ("DEAD", cmd.STATUS_DEAD), ("TORQUE", cmd.STATUS_TORQUE),
                         ("SERVO", cmd.STATUS_SERVO), ("STEER", cmd.STATUS_STEER),
-                        ("ONE_SIDED", cmd.STATUS_ONE_SIDED), ("DAMP_FIRST", cmd.STATUS_DAMP_FIRST)):
+                        ("ONE_SIDED", cmd.STATUS_ONE_SIDED), ("DAMP_FIRST", cmd.STATUS_DAMP_FIRST),
+                        ("PUSH_AHEAD", cmd.STATUS_PUSH_AHEAD), ("FF_PLAN", cmd.STATUS_FF_PLAN)):
         assert int(_define(text, "FFB_ST_" + name)) == value
     assert int(_define(text, "FFB_CMD_RUMBLE")) == cmd.CMD_RUMBLE
 
@@ -286,3 +291,60 @@ def test_the_plugin_reports_it_can_damp_first():
     assert not cmd.decode_status(bytes(buf)).damping_first
     struct.pack_into("=I", buf, 20, cmd.STATUS_HOOKED | cmd.STATUS_STEER | cmd.STATUS_DAMP_FIRST)
     assert cmd.decode_status(bytes(buf)).damping_first
+
+
+def test_a_servo_cap_up_to_the_hard_maximum_reaches_the_block():
+    assert cmd.SERVO_CAP_UNITS == 6000
+    assert cmd.servo_fields(cmd.ServoCommand(0.1, 1.0, 1.0, 5500, 1))[3] == 5500
+    assert cmd.servo_fields(cmd.ServoCommand(0.1, 1.0, 1.0, 7000, 1))[3] == 6000
+
+
+def ahead_servo(**kw) -> cmd.ServoCommand:
+    return cmd.ServoCommand(target=0.1, kp=1.0, ki=1.0, cap=3000, direction=1, rate=0.4, **kw)
+
+
+def test_the_push_ahead_and_the_lead_reach_a_layout_5_plugin_only():
+    servo = ahead_servo(accel=2.0, ff_inertia=350.0, ff_damping=650.0, ff_friction=160.0, lead_s=0.026)
+    buf = stamped(cmd.AHEAD_VERSION)
+    channel(buf).publish(False, 0, 0, now=1.0, servo=servo)
+    assert struct.unpack_from("=fffff", buf, 92) == pytest.approx((2.0, 350.0, 650.0, 160.0, 0.026))
+    old = stamped(cmd.VERSION)
+    channel(old).publish(False, 0, 0, now=1.0, servo=servo)
+    assert struct.unpack_from("=fffff", old, 92) == (0.0,) * 5, "a layout 4 plugin keeps its bytes"
+    assert struct.unpack_from("=f", old, 32)[0] == pytest.approx(0.1), "and still steers"
+
+
+def test_the_push_ahead_is_bounded_and_off_with_the_servo():
+    fields = cmd.servo_fields(ahead_servo())
+    assert cmd.servo_ahead(ahead_servo(ff_damping=-5.0, lead_s=1.0), fields) == (0.0, 0.0, 0.0, 0.0, cmd.LEAD_MAX_S)
+    assert cmd.servo_ahead(ahead_servo(accel=float("nan"), ff_damping=650.0), fields) == (0.0,) * 5
+    assert cmd.servo_ahead(ahead_servo(ff_damping=650.0), cmd.servo_fields(cmd.SERVO_OFF)) == (0.0,) * 5
+    buf = stamped(cmd.AHEAD_VERSION)
+    ch = channel(buf)
+    ch.publish(False, 0, 0, now=1.0, servo=ahead_servo(ff_damping=650.0))
+    stamp = struct.unpack_from("=I", buf, 76)[0]
+    ch.publish(False, 0, 0, now=1.1, servo=ahead_servo(ff_damping=700.0))
+    assert struct.unpack_from("=I", buf, 76)[0] == stamp + 1, "a new push ahead is a new request"
+    ch.publish(False, 0, 0, now=1.2, servo=cmd.SERVO_OFF)
+    assert struct.unpack_from("=fffff", buf, 92) == (0.0,) * 5
+
+
+def test_a_layout_5_plugin_reports_its_push_ahead():
+    buf = stamped(cmd.AHEAD_VERSION)
+    struct.pack_into("=I", buf, 20, cmd.STATUS_HOOKED | cmd.STATUS_STEER | cmd.STATUS_PUSH_AHEAD)
+    struct.pack_into("=h", buf, 112, -420)
+    status = cmd.decode_status(bytes(buf))
+    assert status.servo_capable and status.push_ahead and status.ff_applied == -420
+    assert not cmd.decode_status(bytes(stamped(cmd.VERSION))).push_ahead
+    assert cmd.decode_status(bytes(stamped(cmd.AHEAD_VERSION))[:96]) == cmd.PluginStatus(), "a short block is no plugin"
+
+
+def test_a_planned_push_ahead_sets_its_flag_and_reaches_offset_116():
+    servo = ahead_servo(ff_damping=650.0, ff_plan=True, plan_rate=0.6, plan_accel=-4.0, damping_first=True)
+    buf = stamped(cmd.AHEAD_VERSION)
+    channel(buf).publish(False, 0, 0, now=1.0, servo=servo)
+    assert struct.unpack_from("=ff", buf, 116) == pytest.approx((0.6, -4.0))
+    assert buf[90] == cmd.SERVO_DAMP_FIRST | cmd.SERVO_FF_PLAN
+    bad = ahead_servo(ff_plan=True, plan_rate=float("nan"))
+    assert cmd.servo_flags(bad, cmd.servo_fields(bad)) == 0 and cmd.servo_plan(bad, cmd.servo_fields(bad)) == (0.0, 0.0)
+    assert cmd.servo_flags(servo, cmd.servo_fields(cmd.SERVO_OFF)) == 0

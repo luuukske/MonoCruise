@@ -8,8 +8,8 @@
    Steering values are truck.input.steering units: -1..1 of lock, counterclockwise positive. */
 
 #define FFB_CMD_TAG L"Local\\MonoCruiseFfbCmd"
-#define FFB_CMD_VERSION 4
-#define FFB_CMD_SIZE 96
+#define FFB_CMD_VERSION 5
+#define FFB_CMD_SIZE 128
 #define FFB_CMD_NONE 0
 #define FFB_CMD_RUMBLE 1
 
@@ -22,8 +22,11 @@
 #define FFB_ST_STEER 64
 #define FFB_ST_ONE_SIDED 128
 #define FFB_ST_DAMP_FIRST 256
+#define FFB_ST_PUSH_AHEAD 512
+#define FFB_ST_FF_PLAN 1024
 
 #define FFB_SF_DAMP_FIRST 1
+#define FFB_SF_FF_PLAN 2
 
 typedef struct FfbCmd {
     volatile uint32_t version;
@@ -57,7 +60,16 @@ typedef struct FfbCmd {
     volatile int16_t cancel_applied;
     volatile uint8_t servo_flags;
     volatile uint8_t reserved1;
-    volatile uint32_t reserved2;
+    volatile float servo_accel;
+    volatile float ff_inertia;
+    volatile float ff_damping;
+    volatile float ff_friction;
+    volatile float servo_lead;
+    volatile int16_t ff_applied;
+    volatile int16_t reserved3;
+    volatile float plan_rate;
+    volatile float plan_accel;
+    volatile uint32_t reserved4;
 } FfbCmd;
 
 _Static_assert(sizeof(FfbCmd) == FFB_CMD_SIZE, "command block size");
@@ -88,5 +100,13 @@ _Static_assert(offsetof(FfbCmd, servo_integ) == 80, "servo_integ offset");
 _Static_assert(offsetof(FfbCmd, frame_hz) == 84, "frame_hz offset");
 _Static_assert(offsetof(FfbCmd, cancel_applied) == 88, "cancel_applied offset");
 _Static_assert(offsetof(FfbCmd, servo_flags) == 90, "servo_flags offset");
+_Static_assert(offsetof(FfbCmd, servo_accel) == 92, "servo_accel offset");
+_Static_assert(offsetof(FfbCmd, ff_inertia) == 96, "ff_inertia offset");
+_Static_assert(offsetof(FfbCmd, ff_damping) == 100, "ff_damping offset");
+_Static_assert(offsetof(FfbCmd, ff_friction) == 104, "ff_friction offset");
+_Static_assert(offsetof(FfbCmd, servo_lead) == 108, "servo_lead offset");
+_Static_assert(offsetof(FfbCmd, ff_applied) == 112, "ff_applied offset");
+_Static_assert(offsetof(FfbCmd, plan_rate) == 116, "plan_rate offset");
+_Static_assert(offsetof(FfbCmd, plan_accel) == 120, "plan_accel offset");
 
 #endif

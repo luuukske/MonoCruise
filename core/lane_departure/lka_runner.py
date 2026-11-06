@@ -10,7 +10,7 @@ import logging
 import math
 from dataclasses import replace
 
-from core.la.actuator import design_overrides
+from core.la.actuator import design_overrides, push_ahead_overrides
 from core.la.controller import STRENGTH_MAX, AssistTuning, Wheel, WheelTuning
 from core.la.runner import _ARM_MARGIN_KMH, AssistRunner, Request, _setting
 from core.lane_departure.command import PluginStatus
@@ -31,6 +31,7 @@ class LkaRunner(AssistRunner):
     LABEL = "LKA"
     IDLE = AssistRunner.IDLE | {"standby"}
     DEBUG_NAME = "lka_debug.csv"
+    TRACE_NAME = "lka_ffb_debug.csv"
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
@@ -104,10 +105,15 @@ class LkaRunner(AssistRunner):
         inertia = max(50.0, min(20000.0, _setting("la_wheel_inertia", 0.0) or WheelTuning().inertia))
         design = (_setting("la_bandwidth_hz", 0.0), _setting("la_damping", 0.0),
                   bool(getattr(Settings, "la_damping_first", False)))
-        key = (arm, strength, bool(getattr(Settings, "lka_tmp_enabled", False)), inertia, *design)
+        ahead = (_setting("la_ff_inertia", 0.0), _setting("la_ff_damping", 0.0), _setting("la_ff_friction", 0.0),
+                 _setting("la_servo_lead_s", 0.0), _setting("la_ff_plan_s", 0.0))
+        key = (arm, strength, bool(getattr(Settings, "lka_tmp_enabled", False)), inertia, *design, *ahead)
         line = ("LKA settings: from %.0f km/h, strength %.2f, TruckersMP %s, wheel inertia %.0f, servo design %.2f Hz, "
-                "damping %.2f, damping first %s", *key)
+                "damping %.2f, damping first %s, push ahead inertia %.0f, damping %.0f, friction %.0f, lead %.3f s, "
+                "plan %.3f s",
+                *key)
         return key, AssistTuning(
             pulse=True, settle_s=1.0, arm_kmh=arm, disarm_kmh=max(0.0, arm - _ARM_MARGIN_KMH),
-            wheel=WheelTuning(strength=strength, inertia=inertia, **design_overrides(*design)), allow_tmp=key[2],
+            wheel=WheelTuning(strength=strength, inertia=inertia, **design_overrides(*design),
+                              **push_ahead_overrides(*ahead)), allow_tmp=key[2],
         ), line

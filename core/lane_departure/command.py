@@ -18,17 +18,20 @@ from dataclasses import dataclass
 logger = logging.getLogger(__name__)
 
 TAG = r"Local\MonoCruiseFfbCmd"
-SIZE = 96
+SIZE = 128
+V4_SIZE = 96
 SERVO3_SIZE = 64
 LEGACY_SIZE = 32
 VERSION = 4
+AHEAD_VERSION = 5
+LEAD_MAX_S = 0.08
 SERVO3_VERSION = 3
 TORQUE_VERSION = 2
 RUMBLE_ONLY_VERSION = 1
 PEAK_UNITS = 1600
 PEAK_CAP_UNITS = 3000
 TORQUE_CAP_UNITS = 3000
-SERVO_CAP_UNITS = 3000
+SERVO_CAP_UNITS = 6000
 CMD_NONE = 0
 CMD_RUMBLE = 1
 _RETRY_S = 2.0
@@ -40,6 +43,8 @@ _F32 = struct.Struct("=f")
 _U8 = struct.Struct("=B")
 _SERVO = struct.Struct("=fffHbb")
 _SERVO4 = struct.Struct("=fff")
+_AHEAD = struct.Struct("=fffff")
+_PLAN = struct.Struct("=ff")
 _OFF_VERSION = 0
 _OFF_HEARTBEAT = 4
 _OFF_CMD = 8
@@ -61,6 +66,9 @@ _OFF_INTEG = 80
 _OFF_FRAME_HZ = 84
 _OFF_CANCEL_APPLIED = 88
 _OFF_SERVO_FLAGS = 90
+_OFF_AHEAD = 92
+_OFF_FF_APPLIED = 112
+_OFF_PLAN = 116
 
 STATUS_HOOKED = 1
 STATUS_FORCE_SEEN = 2
@@ -71,7 +79,10 @@ STATUS_SERVO = 32
 STATUS_STEER = 64
 STATUS_ONE_SIDED = 128
 STATUS_DAMP_FIRST = 256
+STATUS_PUSH_AHEAD = 512
+STATUS_FF_PLAN = 1024
 SERVO_DAMP_FIRST = 1
+SERVO_FF_PLAN = 2
 
 
 @dataclass(frozen=True)
@@ -82,6 +93,10 @@ class ServoCommand:
     ``direction`` is the torque sign that turns the wheel counterclockwise; 0 is off. ``only`` +1 or -1: the servo
     pushes only that way (counterclockwise positive), never back; 0 both ways. ``damping_first`` gives the damping its
     room under the cap before P and I get theirs, so a servo pinned at its cap still brakes a swinging wheel.
+    ``accel`` is the target's acceleration; ``ff_*`` the rim's inertia, damping and friction the plugin pushes ahead
+    from the target's motion, and ``lead_s`` how far ahead it reads the wheel (layout 5; 0 is none). With ``ff_plan``
+    the push ahead uses ``plan_rate`` and ``plan_accel`` instead: the target's rate and acceleration a wheel delay
+    from now, as the commanding feature plans them, so the rim starts and stops on time.
     """
     target: float = 0.0
     kp: float = 0.0
@@ -93,6 +108,14 @@ class ServoCommand:
     cancel: float = 0.0
     only: int = 0
     damping_first: bool = False
+    accel: float = 0.0
+    ff_inertia: float = 0.0
+    ff_damping: float = 0.0
+    ff_friction: float = 0.0
+    lead_s: float = 0.0
+    ff_plan: bool = False
+    plan_rate: float = 0.0
+    plan_accel: float = 0.0
 
 
 SERVO_OFF = ServoCommand()
@@ -103,7 +126,7 @@ class PluginStatus:
     """What the plugin reports back. ``present`` is False until it has stamped the layout version.
 
     Version 1 only rumbles, version 2 adds a torque, version 3 the wheel's own angle and a servo, version 4 the
-    damped servo that cancels the game's slow force. Only version 4 steers.
+    damped servo that cancels the game's slow force, version 5 the push ahead and the lead. Versions 4 and 5 steer.
     """
 
     present: bool = False
@@ -120,6 +143,8 @@ class PluginStatus:
     steer_ok: bool = False
     one_sided: bool = False
     damping_first: bool = False
+    push_ahead: bool = False
+    ff_plan: bool = False
     steer: float = 0.0
     steer_rate: float = 0.0
     steer_frames: int = 0
@@ -128,6 +153,7 @@ class PluginStatus:
     servo_integ: float = 0.0
     frame_hz: float = 0.0
     cancel_applied: int = 0
+    ff_applied: int = 0
 
     @property
     def torque_capable(self) -> bool:
@@ -140,7 +166,8 @@ class PluginStatus:
 
 def decode_status(raw: bytes) -> PluginStatus:
     version = _U32.unpack_from(raw, _OFF_VERSION)[0]
-    sizes = {RUMBLE_ONLY_VERSION: LEGACY_SIZE, TORQUE_VERSION: LEGACY_SIZE, SERVO3_VERSION: SERVO3_SIZE, VERSION: SIZE}
+    sizes = {RUMBLE_ONLY_VERSION: LEGACY_SIZE, TORQUE_VERSION: LEGACY_SIZE, SERVO3_VERSION: SERVO3_SIZE,
+             VERSION: V4_SIZE, AHEAD_VERSION: SIZE}
     if version not in sizes or len(raw) < sizes[version]:
         return PluginStatus()
     bits = _U32.unpack_from(raw, _OFF_STATUS)[0]
@@ -177,6 +204,12 @@ def decode_status(raw: bytes) -> PluginStatus:
             cancel_applied=_I16.unpack_from(raw, _OFF_CANCEL_APPLIED)[0],
             damping_first=bool(bits & STATUS_DAMP_FIRST),
         )
+    if version >= AHEAD_VERSION:
+        base.update(
+            push_ahead=bool(bits & STATUS_PUSH_AHEAD),
+            ff_plan=bool(bits & STATUS_FF_PLAN),
+            ff_applied=_I16.unpack_from(raw, _OFF_FF_APPLIED)[0],
+        )
     return PluginStatus(**base)
 
 
@@ -207,9 +240,31 @@ def servo_fields(cmd: ServoCommand) -> tuple:
     return (target, cmd.kp, cmd.ki, cap, cmd.direction, cmd.rate, cmd.kd, max(0.0, min(1.0, cmd.cancel)), only)
 
 
+def servo_ahead(cmd: ServoCommand, fields: tuple) -> tuple:
+    """``(accel, ff_inertia, ff_damping, ff_friction, lead_s)`` as written at offset 92: zeros while the servo is off,
+    a bad number or a negative gain is none, the lead at most 0.08 s.
+    """
+    values = (cmd.accel, cmd.ff_inertia, cmd.ff_damping, cmd.ff_friction, cmd.lead_s)
+    if not fields[4] or not all(math.isfinite(v) for v in values):
+        return (0.0, 0.0, 0.0, 0.0, 0.0)
+    accel, inertia, damping, friction, lead = values
+    return (accel, max(0.0, inertia), max(0.0, damping), max(0.0, friction), max(0.0, min(LEAD_MAX_S, lead)))
+
+
+def servo_plan(cmd: ServoCommand, fields: tuple) -> tuple:
+    """``(plan_rate, plan_accel)`` as written at offset 116: zeros unless the servo is on and ``ff_plan`` asks."""
+    values = (cmd.plan_rate, cmd.plan_accel)
+    if not fields[4] or not cmd.ff_plan or not all(math.isfinite(v) for v in values):
+        return (0.0, 0.0)
+    return values
+
+
 def servo_flags(cmd: ServoCommand, fields: tuple) -> int:
-    """The flag byte at offset 90: damping first, only while the servo is on."""
-    return SERVO_DAMP_FIRST if cmd.damping_first and fields[4] else 0
+    """The flag byte at offset 90: damping first, the planned push ahead; only while the servo is on."""
+    if not fields[4]:
+        return 0
+    plan = cmd.ff_plan and all(math.isfinite(v) for v in (cmd.plan_rate, cmd.plan_accel))
+    return (SERVO_DAMP_FIRST if cmd.damping_first else 0) | (SERVO_FF_PLAN if plan else 0)
 
 
 class RumbleChannel:
@@ -236,7 +291,7 @@ class RumbleChannel:
         if sys.platform != "win32" or now < self._next_open:
             return False
         self._next_open = now + _RETRY_S
-        for size in (SIZE, SERVO3_SIZE, LEGACY_SIZE):
+        for size in (SIZE, V4_SIZE, SERVO3_SIZE, LEGACY_SIZE):
             try:
                 self._buf = mmap.mmap(0, size, TAG)
             except Exception:
@@ -267,10 +322,13 @@ class RumbleChannel:
                 self._sent_torque = torque_units(torque)
                 _I16.pack_into(self._buf, _OFF_TORQUE, self._sent_torque)
             fields = servo_fields(servo)
-            wanted = (fields, servo_flags(servo, fields))
+            wanted = (fields, servo_flags(servo, fields), servo_ahead(servo, fields), servo_plan(servo, fields))
             if status.version >= VERSION and wanted != self._sent_servo:
                 self._sent_servo = wanted
                 _U8.pack_into(self._buf, _OFF_SERVO_FLAGS, wanted[1])
+                if status.version >= AHEAD_VERSION:
+                    _AHEAD.pack_into(self._buf, _OFF_AHEAD, *wanted[2])
+                    _PLAN.pack_into(self._buf, _OFF_PLAN, *wanted[3])
                 _SERVO4.pack_into(self._buf, _OFF_SERVO4, *fields[5:8])
                 _SERVO.pack_into(self._buf, _OFF_SERVO, *fields[:5], fields[8])
                 self._stamp = (self._stamp + 1) & 0xFFFFFFFF

@@ -17,10 +17,11 @@ from tools.la_bench.metrics import interp
 
 STILL = 1e-4
 INERTIA_RANGE = (30.0, 20000.0)
+DELAY_MIN_S = 0.016
 DELAY_MAX_S = 0.1
 QUASI_STATIC_RATE = 0.02
 SATURATED_SHARE = 0.9
-DELAY_SCAN_S = (0.004, 0.012, 0.02, 0.028, 0.036)
+DELAY_SCAN_S = (0.016, 0.024, 0.032, 0.04, 0.05)
 
 
 @dataclass(frozen=True)
@@ -29,6 +30,8 @@ class WheelParams:
 
     ``cog`` is the peak of a force that repeats every ``cog_period`` of lock: the teeth of a geared wheel.
     ``quantum`` is the size of the steps the angle reads in (a coarse encoder); 0 reads it continuously.
+    ``reading_hz`` is how often the game reads the wheel angle (its frame rate, 60 Hz on the R3 on 2026-11-06); 0 reads
+    it at every FFB tick.
     """
 
     inertia: float = 650.0
@@ -40,6 +43,7 @@ class WheelParams:
     cog: float = 0.0
     cog_period: float = 0.01
     quantum: float = 0.0
+    reading_hz: float = 0.0
 
 
 class SimWheel:
@@ -59,6 +63,9 @@ class SimWheel:
         self.held = 0.0
         self.applied = 0.0
         self.frames = 0
+        self.readings = 0
+        self.held_reading: float | None = None
+        self.read_at = 0.0
         self.pending: deque = deque()
 
     @property
@@ -67,6 +74,9 @@ class SimWheel:
 
     @property
     def reading(self) -> float:
+        return self.held_reading if self.held_reading is not None else self._read()
+
+    def _read(self) -> float:
         q = self.params.quantum
         return round(self.steer / q) * q if q else self.steer
 
@@ -86,7 +96,13 @@ class SimWheel:
 
     def substep(self, servo: ServoCommand = SERVO_OFF, torque: float = 0.0) -> None:
         if self.n % self.substeps == 0:
-            self.applied = self.plugin.step(servo, torque, self.reading, 1.0 / self.frame_hz, 0.0)
+            hz = self.params.reading_hz
+            fresh = not hz or self.held_reading is None or self.time - self.read_at >= 1.0 / hz - 1e-9
+            if fresh:
+                self.held_reading, self.read_at = self._read(), self.time
+                self.readings += 1
+            self.applied = self.plugin.step(servo, torque, self.reading, 1.0 / self.frame_hz, 0.0,
+                                            reading_age=self.time - self.read_at, fresh=fresh)
             self.pending.append((self.time + self.params.delay_s, self.applied * self.params.sign))
             self.frames += 1
         while self.pending and self.pending[0][0] <= self.time:
@@ -126,9 +142,10 @@ class SimChannel:
         self.servo, self.torque = servo, torque
         p = w.params
         return PluginStatus(
-            present=True, hooked=True, version=4, steer_ok=True, damping_first=True, servoing=bool(servo.direction),
+            present=True, hooked=True, version=5, steer_ok=True, damping_first=True, push_ahead=True, ff_plan=True,
+            servoing=bool(servo.direction), ff_applied=round(w.plugin.ff * p.sign),
             steer=w.reading,
-            steer_rate=w.plugin.rate, steer_frames=w.frames, frames=w.frames, frame_hz=w.frame_hz,
+            steer_rate=w.plugin.rate, steer_frames=w.readings, frames=w.frames, frame_hz=w.frame_hz,
             game_force=round(-p.spring * w.steer * p.sign), applied=round(w.applied),
             servo_applied=round(w.plugin.value), servo_scale=w.plugin.scale, servo_integ=w.plugin.integ,
         )
@@ -151,7 +168,10 @@ def replay(run: dict, params: WheelParams, frame_hz: float, substeps: int = 4) -
     while wheel.time < end:
         while i < len(sent) and sent[i][0] <= wheel.time:
             servo = ServoCommand(target=sent[i][1], rate=sent[i][2], kp=g["kp"], kd=g["kd"], ki=g["ki"], cap=g["cap"],
-                                 direction=g["direction"], damping_first=g.get("damping_first", False))
+                                 direction=g["direction"], damping_first=g.get("damping_first", False),
+                                 accel=sent[i][3] if len(sent[i]) > 3 else 0.0, ff_inertia=g.get("ff_inertia", 0.0),
+                                 ff_damping=g.get("ff_damping", 0.0), ff_friction=g.get("ff_friction", 0.0),
+                                 lead_s=g.get("lead_s", 0.0))
             i += 1
         ts.append(wheel.time)
         ys.append(wheel.steer)
@@ -273,7 +293,7 @@ def fit(runs: list[dict], frame_hz: float, base: WheelParams, max_evals: int = 6
 
     def cost(x: list[float]) -> float:
         p = _params(x, base)
-        if not INERTIA_RANGE[0] <= p.inertia <= INERTIA_RANGE[1] or not 0.0 <= p.delay_s <= DELAY_MAX_S:
+        if not INERTIA_RANGE[0] <= p.inertia <= INERTIA_RANGE[1] or not DELAY_MIN_S <= p.delay_s <= DELAY_MAX_S:
             return 1e3
         vals = terms(p)
         return math.sqrt(sum(v * v for v in vals) / len(vals))

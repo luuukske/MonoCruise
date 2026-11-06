@@ -14,6 +14,7 @@ from core.la.actuator import WheelActuator, WheelTuning
 from core.lane_departure.command import SERVO_OFF
 from tools import la_servo_bench as bench_cli
 from tools.la_bench.metrics import describe, step_response, summarize
+from tests.la import servo_sim
 from tests.la.servo_sim import _sum
 from tools.la_bench.plant import SimChannel, SimClock, SimWheel, WheelParams, fit, replay
 from tools.la_bench.protocol import SUITES, Design, follow, ramp, step
@@ -174,7 +175,8 @@ def test_report_and_predict_run_from_a_saved_recording(tmp_path, capsys):
     assert capsys.readouterr().out.count("step 0.01") == 4
 
 
-def test_the_default_design_rings_on_the_measured_r3_and_damping_first_does_not():
+def test_the_default_design_rings_on_the_measured_r3_and_damping_first_does_not(monkeypatch):
+    monkeypatch.setattr(servo_sim, "SERVO_SLEW", 30000.0)  # the plugin it was measured on, before 2026-11-06
     plain = bench_cli.capture(sim_bench(R3), [Design(bandwidth_hz=2.0)], [step(0.02)], 20.0)["runs"][0]
     first = bench_cli.capture(sim_bench(R3), [Design(bandwidth_hz=2.0, damping_first=True)], [step(0.02)], 20.0)["runs"][0]
     ringing = summarize(plain)["swing"]

@@ -15,11 +15,12 @@ from pathlib import Path
 
 from core.lane_departure.command import SERVO_OFF, VERSION, PluginStatus, ServoCommand
 from core.lane_departure.detector import Frame
+from core.lane_departure.ffb_trace import TraceLog
 from core.sending_thread.debug_csv import TickDebugLog
 from core.settings import Settings
 
 from .calibration import Calibration, ForceCalibration
-from .actuator import design_overrides
+from .actuator import design_overrides, push_ahead_overrides
 from .controller import STRENGTH_MAX, AssistOutput, AssistTuning, Gains, LaneAssist, Wheel, WheelTuning
 from .hand_push import HandPush, HandPushEstimator, PushTuning
 
@@ -90,6 +91,7 @@ class AssistRunner:
     LABEL = "LA"
     IDLE = _IDLE
     DEBUG_NAME = _DEBUG_LOG_NAME
+    TRACE_NAME = "la_ffb_debug.csv"
 
     def __init__(self, debug_root: Path | None = None, calibration: ForceCalibration | None = None) -> None:
         self._assist = LaneAssist()
@@ -119,6 +121,7 @@ class AssistRunner:
         self._push_at: float | None = None
         root = debug_root or Path(__file__).resolve().parents[2]
         self._debug = TickDebugLog(root, self.DEBUG_NAME, _DEBUG_HEADER, 0.05, 2.0, _DEBUG_MAX_BYTES)
+        self._trace = TraceLog(root, self.TRACE_NAME, self.LABEL)
 
     @property
     def output(self) -> AssistOutput:
@@ -154,6 +157,7 @@ class AssistRunner:
 
     def close(self) -> None:
         self._debug.close()
+        self._trace.close()
 
     def _watch_push(self, status: PluginStatus) -> None:
         """The driver's push from the plugin's readings, every tick; it needs the wheel's torque direction.
@@ -171,11 +175,22 @@ class AssistRunner:
                                        direction, self._out.servo.only)
 
     def _record(self, status: PluginStatus) -> None:
-        """20 Hz rows to the debug file while ``Settings.debug`` is on and the assist is not idle."""
+        """20 Hz rows to the debug file while ``Settings.debug`` is on and the assist is not idle.
+
+        The plugin's trace goes to its own file at the FFB rate whenever the game drives, idle or not.
+        """
         out = self._out
         if not getattr(Settings, "debug", False):
             return
         servo = out.servo
+        gains = self._last_gains
+        self._trace.tick(time.monotonic(), {
+            "speed_kmh": out.speed_kmh, "reason": out.reason, "authority": out.authority, "target": out.target,
+            "target_rate": servo.rate, "kp": servo.kp, "kd": servo.kd, "ki": servo.ki, "cap": servo.cap,
+            "damping_first": servo.damping_first, "only": servo.only, "kappa_ff": out.kappa_ff,
+            "force_per_ms2": gains.force_per_ms2 if gains is not None else None,
+            "kappa_per_steer": gains.kappa_per_steer if gains is not None else None,
+        })
         self._debug.tick(time.monotonic(), out.reason not in self.IDLE, {
             "speed_kmh": out.speed_kmh, "reason": out.reason, "event": out.event, "authority": out.authority,
             "offset_m": out.offset_m, "centre_m": out.bias_m, "drift_ms": out.drift_ms, "kappa_ff": out.kappa_ff,
@@ -208,16 +223,20 @@ class AssistRunner:
         inertia = _setting("la_wheel_inertia", 0.0) or WheelTuning().inertia
         cancel = max(0.0, min(1.0, _setting("la_cancel_share", 0.0)))
         design = (_setting("la_bandwidth_hz", 0.0), _setting("la_damping", 0.0),
-                  bool(getattr(Settings, "la_damping_first", False)))
+                  bool(getattr(Settings, "la_damping_first", False)), _setting("la_servo_cap", 0.0))
+        ahead = (_setting("la_ff_inertia", 0.0), _setting("la_ff_damping", 0.0), _setting("la_ff_friction", 0.0),
+                 _setting("la_servo_lead_s", 0.0), _setting("la_ff_plan_s", 0.0))
         key = (arm, strength, bool(getattr(Settings, "la_tmp_enabled", False)),
                bool(getattr(Settings, "la_follow_all", False)), max(50.0, min(20000.0, inertia)), cancel,
-               bool(getattr(Settings, "la_always_on", False)), *design)
+               bool(getattr(Settings, "la_always_on", False)), *design, *ahead)
         line = ("LA settings: from %.0f km/h, strength %.2f, TruckersMP %s, follow everywhere %s, wheel inertia %.0f, "
                 "game force cancelled %.2f, always on (test, no hand-backs) %s, servo design %.2f Hz, damping %.2f, "
-                "damping first %s", *key)
+                "damping first %s, servo cap %.0f (0 is 3000), push ahead inertia %.0f, damping %.0f, friction %.0f, "
+                "lead %.3f s, plan %.3f s", *key)
         return key, AssistTuning(
             arm_kmh=arm, disarm_kmh=max(0.0, arm - _ARM_MARGIN_KMH),
-            wheel=WheelTuning(strength=strength, inertia=key[4], cancel_share=key[5], **design_overrides(*design)),
+            wheel=WheelTuning(strength=strength, inertia=key[4], cancel_share=key[5], **design_overrides(*design),
+                              **push_ahead_overrides(*ahead)),
             allow_tmp=key[2], follow_all=key[3], always_on=key[6],
         ), line if key[3] or key[6] else ()
 

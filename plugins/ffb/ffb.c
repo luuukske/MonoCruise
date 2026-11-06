@@ -18,12 +18,14 @@
 
 #include "ffb_cmd.h"
 #include "ffb_signal.h"
+#include "ffb_trace.h"
 
 #define VT_QI 0
 #define VT_RELEASE 2
 #define VT_CREATE_DEVICE 3
 #define VT_GET_CAPS 3
 #define VT_GET_EFFECT_GUID 4
+#define VT_GET_PARAMS 5
 #define VT_SET_PARAMS 6
 #define VT_GET_STATE 9
 #define VT_SET_FORMAT 11
@@ -56,6 +58,7 @@ typedef HRESULT (WINAPI *GdsFn)(void *self, DWORD cb, void *data);
 typedef HRESULT (WINAPI *SetFn)(void *self, const DIEFFECT *eff, DWORD flags);
 typedef HRESULT (WINAPI *GetCapsFn)(void *self, DIDEVCAPS *caps);
 typedef HRESULT (WINAPI *GetGuidFn)(void *self, GUID *guid);
+typedef HRESULT (WINAPI *GetParamsFn)(void *self, DIEFFECT *eff, DWORD flags);
 typedef HRESULT (WINAPI *EnumFxFn)(void *self, LPDIENUMCREATEDEFFECTOBJECTSCALLBACK cb, void *ctx, DWORD flags);
 typedef ULONG (WINAPI *RelFn)(void *self);
 
@@ -101,6 +104,7 @@ static volatile LONG g_steer_count;
 static volatile float g_steer;
 static volatile float g_steer_rate;
 static volatile float g_steer_rate_fast;
+static volatile float g_steer_interval;
 static uint32_t g_stamp_last;
 static LARGE_INTEGER g_stamp_at;
 static double g_frame_hz;
@@ -128,6 +132,10 @@ static int g_ndev;
 static void *g_skip[8];
 static int g_nskip;
 static int g_game_enum_done;
+static FfbTrace *g_trace;
+static HANDLE g_trace_handle;
+static double g_trace_servo;
+static int g_trace_live;
 
 static void log_msg(const char *msg) {
     if (g_log && msg) {
@@ -236,6 +244,144 @@ static CreateFxFn orig_create(void *self) {
     return g_ce_orig[0];
 }
 
+/* An effect's kind (FFB_FX_*): dinput.h numbers the effect GUIDs in a run from GUID_ConstantForce. */
+static int fx_kind(const GUID *g) {
+    uint32_t n;
+    if (!g || memcmp((const char *)g + 4, (const char *)&k_constant_force + 4, sizeof(GUID) - 4) != 0) {
+        return FFB_FX_OTHER;
+    }
+    n = (uint32_t)(g->Data1 - k_constant_force.Data1);
+    return n < FFB_FX_KINDS ? (int)n : FFB_FX_OTHER;
+}
+
+static int fx_kind_of(void *fx) {
+    GUID guid;
+    GetGuidFn get_guid;
+    if (!fx) {
+        return FFB_FX_OTHER;
+    }
+    get_guid = (GetGuidFn)(*(void ***)fx)[VT_GET_EFFECT_GUID];
+    if (!in_dinput((void *)get_guid) || FAILED(get_guid(fx, &guid))) {
+        return FFB_FX_OTHER;
+    }
+    return fx_kind(&guid);
+}
+
+static int16_t trace_i16(long x) {
+    return (int16_t)(x > 32767 ? 32767 : (x < -32767 ? -32767 : x));
+}
+
+static int fx_condition(int kind) {
+    return kind >= FFB_FX_SPRING && kind <= FFB_FX_FRICTION;
+}
+
+/* The gain and condition parameters the game gave an effect; read only, nothing is changed. */
+static void trace_params(int kind, const DIEFFECT *eff, DWORD flags) {
+    FfbTrace *tr = g_trace;
+    FfbCondition *c;
+    if (!tr || !eff || eff->dwSize != sizeof(DIEFFECT)) {
+        return;
+    }
+    if (kind == FFB_FX_CONSTANT) {
+        if (flags & DIEP_GAIN) {
+            tr->const_gain = eff->dwGain;
+        }
+        return;
+    }
+    if (!fx_condition(kind)) {
+        tr->other_sets++;
+        return;
+    }
+    c = &tr->cond[kind - FFB_FX_SPRING];
+    if ((flags & DIEP_TYPESPECIFICPARAMS) && eff->lpvTypeSpecificParams
+        && eff->cbTypeSpecificParams >= sizeof(DICONDITION)) {
+        const DICONDITION *p = (const DICONDITION *)eff->lpvTypeSpecificParams;
+        c->offset = p->lOffset;
+        c->pos_coeff = p->lPositiveCoefficient;
+        c->neg_coeff = p->lNegativeCoefficient;
+        c->pos_sat = p->dwPositiveSaturation;
+        c->neg_sat = p->dwNegativeSaturation;
+        c->deadband = p->lDeadBand;
+    }
+    if (flags & DIEP_GAIN) {
+        c->gain = eff->dwGain;
+    }
+    MemoryBarrier();
+    c->sets++;
+}
+
+static void trace_kind(int kind) {
+    if (g_trace) {
+        InterlockedOr((volatile LONG *)&g_trace->effects, (LONG)(1u << kind));
+    }
+}
+
+static void trace_created(const GUID *guid, const DIEFFECT *eff) {
+    int kind = fx_kind(guid);
+    if (!g_trace) {
+        return;
+    }
+    trace_kind(kind);
+    InterlockedIncrement((volatile LONG *)&g_trace->creates);
+    if (kind == FFB_FX_CONSTANT || fx_condition(kind)) {
+        trace_params(kind, eff, DIEP_TYPESPECIFICPARAMS | DIEP_GAIN);
+    }
+}
+
+/* An effect the game made before the hook: its kind, and what it holds now. */
+static void trace_existing(void *fx, int kind) {
+    GetParamsFn get;
+    DICONDITION cond[2];
+    DIEFFECT eff;
+    DWORD flags = DIEP_GAIN;
+    trace_kind(kind);
+    if (!g_trace || !(kind == FFB_FX_CONSTANT || fx_condition(kind))) {
+        return;
+    }
+    get = (GetParamsFn)(*(void ***)fx)[VT_GET_PARAMS];
+    if (!in_dinput((void *)get)) {
+        return;
+    }
+    ZeroMemory(&eff, sizeof eff);
+    ZeroMemory(cond, sizeof cond);
+    eff.dwSize = sizeof eff;
+    if (fx_condition(kind)) {
+        flags |= DIEP_TYPESPECIFICPARAMS;
+        eff.cbTypeSpecificParams = sizeof cond;
+        eff.lpvTypeSpecificParams = cond;
+    }
+    if (SUCCEEDED(get(fx, &eff, flags))) {
+        trace_params(kind, &eff, flags);
+    }
+}
+
+/* One constant-force update: what the game asked, what went to the wheel, the wheel angle the servo used. */
+static void trace_push(LONG game, LONG out) {
+    FfbTrace *tr = g_trace;
+    FfbTraceSample *s;
+    uint32_t head;
+    uint16_t flags = 0;
+    if (!tr || g_qpf.QuadPart == 0) {
+        return;
+    }
+    flags |= g_servo.gain > 0.0 ? FFB_TF_SERVO : 0;
+    flags |= g_wave.gain > 0.0 ? FFB_TF_RUMBLE : 0;
+    flags |= g_trace_live ? FFB_TF_LIVE : 0;
+    flags |= InterlockedOr((LONG *)&g_driving, 0) ? FFB_TF_DRIVING : 0;
+    head = tr->head;
+    s = &tr->samples[head % FFB_TRACE_LEN];
+    s->t = (double)g_qpc.QuadPart / (double)g_qpf.QuadPart;
+    s->steer = g_steer;
+    s->game = trace_i16(game);
+    s->out = trace_i16(out);
+    s->servo = trace_i16(ffb_round(g_trace_servo));
+    s->steer_seq = (uint16_t)((uint32_t)g_steer_count & 0xFFFFu);
+    s->flags = flags;
+    s->reserved = 0;
+    MemoryBarrier();
+    tr->head = head + 1;
+}
+
 static double tick_dt(void) {
     LARGE_INTEGER now;
     double dt;
@@ -289,14 +435,26 @@ static double target_age(uint32_t stamp) {
     return g_qpf.QuadPart ? (double)(now.QuadPart - g_stamp_at.QuadPart) / (double)g_qpf.QuadPart : 0.0;
 }
 
+static double steer_age(void) {
+    LARGE_INTEGER now;
+    if (g_steer_at.QuadPart == 0 || g_qpf.QuadPart == 0) {
+        return 0.0;
+    }
+    QueryPerformanceCounter(&now);
+    return (double)(now.QuadPart - g_steer_at.QuadPart) / (double)g_qpf.QuadPart;
+}
+
+/* The target and the wheel are both taken ``ahead`` seconds on: where the target will be and where the wheel will
+   be, read on at its rate, when the force reaches the rim. */
 static double servo_delta(int live, double dt) {
     double raw = 0.0;
     int on = live && g_map && g_map->servo_dir != 0 && steer_fresh();
     if (on) {
         FfbServoIn in;
         double target;
+        double age;
+        double ahead = ffb_servo_ahead(ffb_finite((double)g_map->servo_lead), steer_age());
         in.target = (double)g_map->servo_target;
-        in.rate = (double)g_map->servo_rate;
         in.kp = (double)g_map->servo_kp;
         in.kd = (double)g_map->servo_kd;
         in.ki = (double)g_map->servo_ki;
@@ -304,8 +462,19 @@ static double servo_delta(int live, double dt) {
         in.dir = (int)g_map->servo_dir;
         in.only = g_map->servo_only > 0 ? 1 : (g_map->servo_only < 0 ? -1 : 0);
         in.damp_first = (g_map->servo_flags & FFB_SF_DAMP_FIRST) != 0;
-        target = ffb_servo_target(in.target, in.rate, target_age(g_map->servo_stamp));
-        raw = ffb_servo_pid(&g_servo, &in, target, (double)g_steer, (double)g_steer_rate_fast, dt);
+        in.accel = ffb_finite((double)g_map->servo_accel);
+        in.ff_inertia = ffb_finite((double)g_map->ff_inertia);
+        in.ff_damping = ffb_finite((double)g_map->ff_damping);
+        in.ff_friction = ffb_finite((double)g_map->ff_friction);
+        age = target_age(g_map->servo_stamp);
+        ffb_servo_aim(in.target, (double)g_map->servo_rate, in.accel, age + ahead, &target, &in.rate);
+        ffb_servo_ff_motion(&in, (g_map->servo_flags & FFB_SF_FF_PLAN) != 0, (double)g_map->plan_rate,
+                            (double)g_map->plan_accel, age);
+        ffb_servo_plan_feedback(&in, (g_map->servo_flags & FFB_SF_FF_PLAN) != 0, (double)g_steer_interval);
+        raw = ffb_servo_pid(&g_servo, &in, target, (double)g_steer + (double)g_steer_rate_fast * ahead,
+                            (double)g_steer_rate_fast, dt);
+    } else {
+        g_servo.ff = 0.0;
     }
     return ffb_servo_step(&g_servo, raw, on, g_wave.gain > 0.0 ? NAN : (double)g_steer, dt);
 }
@@ -320,6 +489,8 @@ static long current_delta(LONG game_mag) {
     double servo = servo_delta(live, dt);
     double assist = ffb_clamp(base + servo, FFB_ASSIST_CAP);
     double cancel;
+    g_trace_servo = servo;
+    g_trace_live = live;
     g_force_lp = ffb_force_step(g_force_lp, (double)game_mag, dt);
     g_force_steady += ((double)game_mag - g_force_steady) * (1.0 - exp(-ffb_dt_clamp(dt) / FFB_CANCEL_TAU_S));
     cancel = ffb_cancel_term(g_force_steady, g_map ? (double)g_map->servo_cancel : 0.0, ffb_ease(g_servo.gain));
@@ -335,6 +506,7 @@ static long current_delta(LONG game_mag) {
         g_map->servo_integ = (float)g_servo.integ;
         g_map->frame_hz = (float)g_frame_hz;
         g_map->cancel_applied = (int16_t)ffb_round(cancel);
+        g_map->ff_applied = trace_i16(ffb_round(g_servo.ff * (double)(g_map->servo_dir ? g_map->servo_dir : 1)));
     }
     InterlockedExchange(&g_rumbling, g_wave.gain > 0.0);
     InterlockedExchange(&g_applied, (LONG)ffb_round(assist));
@@ -357,12 +529,18 @@ static HRESULT hook_set_body(SetFn orig, void *self, const DIEFFECT *eff, DWORD 
         if (eff && eff->dwSize != sizeof(DIEFFECT) && eff->dwSize != 0 && !g_bad_size) {
             g_bad_size = (LONG)eff->dwSize;
         }
+        if (g_trace && eff && eff->dwSize == sizeof(DIEFFECT)) {
+            trace_params(fx_kind_of(self), eff, flags);
+        }
         InterlockedDecrement(&g_depth);
         return orig(self, eff, flags);
     }
     g_seen = 1;
     if (g_map) {
         g_map->frames++;
+    }
+    if (g_trace && (flags & DIEP_GAIN)) {
+        g_trace->const_gain = eff->dwGain;
     }
     game_mag = ((const DICONSTANTFORCE *)eff->lpvTypeSpecificParams)->lMagnitude;
     if (InterlockedOr((LONG *)&g_driving, 0) && !g_have_mag) {
@@ -371,10 +549,12 @@ static HRESULT hook_set_body(SetFn orig, void *self, const DIEFFECT *eff, DWORD 
     }
     delta = current_delta(game_mag);
     if (delta == 0) {
+        trace_push(game_mag, game_mag);
         InterlockedDecrement(&g_depth);
         return orig(self, eff, flags);
     }
     cf.lMagnitude = ffb_apply(game_mag, delta);
+    trace_push(game_mag, cf.lMagnitude);
     copy = *eff;
     copy.lpvTypeSpecificParams = &cf;
     hr = orig(self, &copy, flags);
@@ -428,14 +608,14 @@ static void hook_effect(void *fx) {
 }
 
 static BOOL CALLBACK on_game_effect(LPDIRECTINPUTEFFECT fx, LPVOID ctx) {
-    GUID guid;
-    GetGuidFn get_guid;
+    int kind;
     (void)ctx;
     if (!fx) {
         return DIENUM_CONTINUE;
     }
-    get_guid = (GetGuidFn)(*(void ***)fx)[VT_GET_EFFECT_GUID];
-    if (in_dinput((void *)get_guid) && SUCCEEDED(get_guid(fx, &guid)) && guid_eq(&guid, &k_constant_force)) {
+    kind = fx_kind_of(fx);
+    trace_existing(fx, kind);
+    if (kind == FFB_FX_CONSTANT) {
         hook_effect(fx);
     }
     return DIENUM_CONTINUE;
@@ -506,9 +686,12 @@ static HRESULT WINAPI hook_create(void *self, const GUID *guid, const DIEFFECT *
         return E_FAIL;
     }
     hr = orig(self, guid, eff, out, unk);
-    if (g_live && !g_dead && SUCCEEDED(hr) && out && *out && guid && guid_eq(guid, &k_constant_force)) {
+    if (g_live && !g_dead && SUCCEEDED(hr) && out && *out && guid) {
         __try {
-            hook_effect(*out);
+            trace_created(guid, eff);
+            if (guid_eq(guid, &k_constant_force)) {
+                hook_effect(*out);
+            }
         } __except (EXCEPTION_EXECUTE_HANDLER) {
             g_dead = 1;
         }
@@ -660,10 +843,71 @@ static void open_map(void) {
         g_map->servo_integ = 0.0f;
         g_map->frame_hz = 0.0f;
         g_map->cancel_applied = 0;
+        g_map->servo_accel = 0.0f;
+        g_map->ff_inertia = 0.0f;
+        g_map->ff_damping = 0.0f;
+        g_map->ff_friction = 0.0f;
+        g_map->servo_lead = 0.0f;
+        g_map->plan_rate = 0.0f;
+        g_map->plan_accel = 0.0f;
+        g_map->ff_applied = 0;
         g_map->steer_frames = 0;
         g_map->status = 0;
         g_map->frames = 0;
         g_map->version = FFB_CMD_VERSION;
+    }
+}
+
+static void open_trace(void) {
+    g_trace_handle = CreateFileMappingW(INVALID_HANDLE_VALUE, NULL, PAGE_READWRITE, 0, FFB_TRACE_SIZE, FFB_TRACE_TAG);
+    if (g_trace_handle) {
+        g_trace = (FfbTrace *)MapViewOfFile(g_trace_handle, FILE_MAP_ALL_ACCESS, 0, 0, FFB_TRACE_SIZE);
+    }
+    if (g_trace) {
+        g_trace->version = 0;
+        MemoryBarrier();
+        ZeroMemory((void *)g_trace, FFB_TRACE_SIZE);
+        g_trace->capacity = FFB_TRACE_LEN;
+        MemoryBarrier();
+        g_trace->version = FFB_TRACE_VERSION;
+    }
+}
+
+static void log_trace(void) {
+    static const char *names[FFB_FX_KINDS] = {"constant", "ramp", "square", "sine", "triangle", "sawtooth up",
+                                              "sawtooth down", "spring", "damper", "inertia", "friction", "custom"};
+    static uint32_t logged_fx;
+    static int logged_cond[4];
+    char buf[256];
+    uint32_t fx;
+    int i;
+    if (!g_trace) {
+        return;
+    }
+    fx = g_trace->effects;
+    if (fx != logged_fx) {
+        int n = snprintf(buf, sizeof buf, "ffb: game effects:");
+        for (i = 0; i < FFB_FX_KINDS && n > 0 && n < (int)sizeof buf; i++) {
+            if (fx & (1u << i)) {
+                n += snprintf(buf + n, sizeof buf - (size_t)n, " %s", names[i]);
+            }
+        }
+        if ((fx & (1u << FFB_FX_OTHER)) && n > 0 && n < (int)sizeof buf) {
+            snprintf(buf + n, sizeof buf - (size_t)n, " other");
+        }
+        log_msg(buf);
+        logged_fx = fx;
+    }
+    for (i = 0; i < 4; i++) {
+        const FfbCondition *c = &g_trace->cond[i];
+        if (c->sets && !logged_cond[i]) {
+            snprintf(buf, sizeof buf, "ffb: game %s: coefficient %ld/%ld, saturation %lu/%lu, offset %ld, dead band %ld, "
+                     "gain %lu", names[FFB_FX_SPRING + i], (long)c->pos_coeff, (long)c->neg_coeff,
+                     (unsigned long)c->pos_sat, (unsigned long)c->neg_sat, (long)c->offset, (long)c->deadband,
+                     (unsigned long)c->gain);
+            log_msg(buf);
+            logged_cond[i] = 1;
+        }
     }
 }
 
@@ -695,7 +939,7 @@ static void publish_status(void) {
     if (g_dead) {
         bits |= FFB_ST_DEAD;
     }
-    g_map->status = bits | FFB_ST_ONE_SIDED | FFB_ST_DAMP_FIRST;
+    g_map->status = bits | FFB_ST_ONE_SIDED | FFB_ST_DAMP_FIRST | FFB_ST_PUSH_AHEAD | FFB_ST_FF_PLAN;
 }
 
 static void WINAPI on_frame(unsigned int event, const void *info, void *ctx) {
@@ -713,6 +957,7 @@ static void WINAPI on_frame(unsigned int event, const void *info, void *ctx) {
         return;
     }
     publish_status();
+    log_trace();
     if (g_dead && !logged_dead) {
         logged_dead = 1;
         unpatch_all();
@@ -770,6 +1015,8 @@ static void WINAPI on_steering(const char *name, unsigned int index, const void 
         g_steer_rate = (float)((double)g_steer_rate + (raw - (double)g_steer_rate) * (1.0 - exp(-dt / FFB_STEER_RATE_TAU_S)));
         g_steer_rate_fast = (float)((double)g_steer_rate_fast
                                     + (raw - (double)g_steer_rate_fast) * (1.0 - exp(-dt / FFB_RATE_FAST_TAU_S)));
+        g_steer_interval = g_steer_interval > 0.0f ? (float)((double)g_steer_interval + (dt - (double)g_steer_interval) * 0.05)
+                                                   : (float)dt;
     } else {
         g_steer_rate = 0.0f;
         g_steer_rate_fast = 0.0f;
@@ -829,6 +1076,7 @@ __declspec(dllexport) int WINAPI scs_telemetry_init(unsigned int version, const 
     QueryPerformanceFrequency(&g_qpf);
     ffb_servo_init(&g_servo);
     open_map();
+    open_trace();
     __try {
         install_hook();
     } __except (EXCEPTION_EXECUTE_HANDLER) {
@@ -861,6 +1109,7 @@ __declspec(dllexport) void WINAPI scs_telemetry_shutdown(void) {
         g_map->servo_cancel = 0.0f;
         g_map->servo_applied = 0;
         g_map->cancel_applied = 0;
+        g_map->ff_applied = 0;
         g_map->status = 0;
         g_map->version = 0;
         UnmapViewOfFile(g_map);
@@ -869,6 +1118,17 @@ __declspec(dllexport) void WINAPI scs_telemetry_shutdown(void) {
     if (g_map_handle) {
         CloseHandle(g_map_handle);
         g_map_handle = NULL;
+    }
+    if (g_trace) {
+        FfbTrace *tr = g_trace;
+        g_trace = NULL;
+        MemoryBarrier();
+        tr->version = 0;
+        UnmapViewOfFile((void *)tr);
+    }
+    if (g_trace_handle) {
+        CloseHandle(g_trace_handle);
+        g_trace_handle = NULL;
     }
     g_log = NULL;
 }

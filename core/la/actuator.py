@@ -11,7 +11,7 @@ import math
 from collections import deque
 from dataclasses import dataclass
 
-from core.lane_departure.command import SERVO_OFF, ServoCommand
+from core.lane_departure.command import LEAD_MAX_S, SERVO_CAP_UNITS, SERVO_OFF, ServoCommand
 
 STRENGTH_MAX = 2.0
 
@@ -45,6 +45,11 @@ class WheelTuning:
     hold_s: float = 0.3
     release_s: float = 1.0
     damping_first: bool = False
+    ff_inertia: float = 0.0
+    ff_damping: float = 0.0
+    ff_friction: float = 0.0
+    lead_s: float = 0.0
+    plan_s: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -77,14 +82,37 @@ class Gains:
         return self.force_per_ms2 * self.kappa_per_steer * speed_ms * speed_ms
 
 
-def design_overrides(bandwidth_hz: float, damping: float, damping_first: bool) -> dict:
-    """``WheelTuning`` fields from the three design settings; 0 keeps the default, the rest is bounded."""
+def design_overrides(bandwidth_hz: float, damping: float, damping_first: bool, servo_cap: float = 0.0) -> dict:
+    """``WheelTuning`` fields from the design settings; 0 keeps the default, the rest is bounded.
+
+    ``servo_cap`` is for LA only (the lane keeping assist does not pass it): up to the plugin's hard maximum.
+    """
     out: dict = {"damping_first": bool(damping_first)}
+    if servo_cap > 0.0:
+        out["servo_cap"] = max(1000.0, min(float(SERVO_CAP_UNITS), servo_cap))
     if bandwidth_hz > 0.0:
         out["bandwidth_hz"] = max(0.3, min(3.0, bandwidth_hz))
     if damping > 0.0:
         out["damping"] = max(0.3, min(2.0, damping))
     return out
+
+
+def push_ahead_overrides(inertia: float, damping: float, friction: float, lead_s: float, plan_s: float = 0.0) -> dict:
+    """``WheelTuning`` fields for the plugin's push ahead (the rim's own inertia, damping and friction, as the wheel
+    check fits them), its lead and how far ahead the push follows the plan (both the wheel's delay); 0 is none.
+    """
+    return {"ff_inertia": max(0.0, min(5000.0, inertia)), "ff_damping": max(0.0, min(5000.0, damping)),
+            "ff_friction": max(0.0, min(1500.0, friction)), "lead_s": max(0.0, min(LEAD_MAX_S, lead_s)),
+            "plan_s": max(0.0, min(LEAD_MAX_S, plan_s))}
+
+
+def follower_ahead(e: float, v: float, w: float, tau: float) -> tuple[float, float]:
+    """The critically damped follower's rate and acceleration ``tau`` seconds on, from error ``e`` and rate ``v``
+    toward a still goal: what the plugin's push ahead moves the rim on, a wheel delay early.
+    """
+    decay = math.exp(-w * tau)
+    k = v + w * e
+    return (v - w * k * tau) * decay, (-2.0 * w * v - w * w * e + w * w * k * tau) * decay
 
 
 def ease(u: float) -> float:
@@ -218,18 +246,28 @@ class WheelActuator:
         return True
 
     def commands(self, gains: Gains | None, target: float | None, rate: float, authority: float,
-                 wheel: Wheel, speed_ms: float = 0.0, only: int = 0) -> ServoCommand:
+                 wheel: Wheel, speed_ms: float = 0.0, only: int = 0,
+                 plan: tuple[float, float] | None = None) -> ServoCommand:
         """The servo request: hold ``target`` moving at ``rate``; ``cancel_share`` of the game's steady force goes.
-
         ``only`` +1 or -1 lets it push only that way (counterclockwise positive), never back.
+
+        ``plan`` is the target's rate and acceleration ``plan_s`` from now: the push ahead moves the rim on it, the
+        target itself moves on at its rate only (moving it on with the follower's acceleration swung a slower truck's
+        return further, closed-loop model 2026-11-06). The push ahead fades in with the authority like the gains.
         """
         if gains is None or not gains.force_per_ms2 or not wheel.ok or target is None or authority <= 0.0:
             return SERVO_OFF
         kp, kd, ki = self.gains(authority, gains.spring(speed_ms))
         if kp <= 0.0:
             return SERVO_OFF
+        tn = self.tune
+        pushes = bool(tn.ff_inertia or tn.ff_damping or tn.ff_friction)
+        plan = plan if plan is not None else (rate, 0.0)
         return ServoCommand(
             target=target, rate=rate, kp=kp, kd=kd, ki=ki, cap=round(self.cap(authority)),
             direction=1 if gains.force_per_ms2 > 0.0 else -1, cancel=self.tune.cancel_share * ease(authority), only=only,
-            damping_first=self.tune.damping_first,
+            damping_first=self.tune.damping_first, ff_inertia=self.tune.ff_inertia * ease(authority),
+            ff_damping=self.tune.ff_damping * ease(authority), ff_friction=self.tune.ff_friction * ease(authority),
+            lead_s=self.tune.lead_s, ff_plan=pushes, plan_rate=plan[0] if pushes else 0.0,
+            plan_accel=plan[1] if pushes else 0.0,
         )

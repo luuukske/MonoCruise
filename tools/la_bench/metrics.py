@@ -25,12 +25,16 @@ def interp(ts: list[float], vs: list[float], t: float) -> float:
 
 
 def aim_at(sent: list[list[float]], times: list[float], t: float) -> float:
-    """Where the plugin aims at ``t``: the last request, its target moved on at its rate for at most 0.15 s."""
+    """Where the plugin aims at ``t``: the last request, its target moved on at its rate (and acceleration, when
+    recorded) for at most 0.15 s.
+    """
     i = bisect_right(times, t) - 1
     if i < 0:
         return sent[0][1]
-    t_k, target, rate = sent[i]
-    return target + rate * min(max(t - t_k, 0.0), EXTRAP_S)
+    t_k, target, rate = sent[i][:3]
+    accel = sent[i][3] if len(sent[i]) > 3 else 0.0
+    a = min(max(t - t_k, 0.0), EXTRAP_S)
+    return target + rate * a + 0.5 * accel * a * a
 
 
 def step_response(ts: list[float], ys: list[float], t_step: float, start: float, goal: float, hold_s: float,

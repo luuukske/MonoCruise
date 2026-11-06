@@ -10,6 +10,7 @@ and rates are runtime fields of the command block, so a new design needs no game
   python tools/la_servo_bench.py report FILE                  rise, overshoot, settling, tracking per run
   python tools/la_servo_bench.py fit FILE                     inertia, damping, friction, spring, delay of the rim
   python tools/la_servo_bench.py predict FILE --bandwidth 1.5 2 2.5     other designs on the fitted rim
+  python tools/la_servo_bench.py speed --rim CHECK.json        how fast it moves the wheel, and what the rim allows
 
 See core/la/README.md, "Bench".
 """
@@ -21,7 +22,7 @@ import json
 import sys
 import time
 from contextlib import contextmanager
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -35,6 +36,8 @@ from tools.la_bench.metrics import describe, summarize
 from tools.la_bench.check import run_check, summary
 from tools.la_bench.plant import SIM_WHEELS, SimChannel, SimClock, WheelParams, fit, replay
 from tools.la_bench.protocol import SUITES, Design, Stage
+from tools.la_bench.speed import HALF_RATES, RAMP_CORNER_S, RAMP_RATES, STEP_SIZES, rim_accel, run_speed
+from tools.la_bench.speed import summary as speed_summary
 
 OUT_DIR = ROOT / "tools" / "la_bench_out"
 SIM_WHEEL = WheelParams(inertia=700.0, damping=500.0, stick=150.0, spring=2000.0, delay_s=0.02)
@@ -148,7 +151,7 @@ def cmd_check(args) -> int:
     aborted = None
     channel = None
     if args.simulate:
-        bench = sim_bench(SIM_WHEELS[args.simulate])
+        bench = sim_bench(replace(SIM_WHEELS[args.simulate], reading_hz=getattr(args, "reading_hz", 0.0)))
     else:
         channel = RumbleChannel()
         bench = Bench(channel)
@@ -169,6 +172,77 @@ def cmd_check(args) -> int:
     data["meta"] = _meta(bench, st, direction, args.hz, None, args.note)
     print(summary(data))
     out = Path(args.out) if args.out else (None if args.simulate else OUT_DIR / f"la_check_{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}.json")
+    if out is not None:
+        _save(out, data)
+        print(f"saved {out.relative_to(ROOT) if out.is_relative_to(ROOT) else out.name}")
+    return 0
+
+
+def _config_design() -> dict:
+    """LA's design keys from config.json, read only; 0 or absent keeps the code default."""
+    try:
+        with open(ROOT / "config.json", encoding="utf-8") as fh:
+            raw = json.load(fh)
+    except (OSError, ValueError):
+        return {}
+    keys = {"la_wheel_inertia": "inertia", "la_bandwidth_hz": "bandwidth", "la_damping": "damping",
+            "la_servo_cap": "cap", "la_ff_inertia": "ff_inertia", "la_ff_damping": "ff_damping",
+            "la_ff_friction": "ff_friction", "la_servo_lead_s": "lead", "la_ff_plan_s": "plan"}
+    out = {name: float(raw[key]) for key, name in keys.items() if isinstance(raw.get(key), (int, float)) and raw[key] > 0}
+    if raw.get("la_damping_first"):
+        out["law"] = "damping-first"
+    return out
+
+
+def _rim(args) -> WheelParams | None:
+    if args.rim:
+        data = _load(args.rim)
+        raw = data.get("wheel") or (data.get("fit") or {}).get("params")
+        return WheelParams(**raw) if raw else None
+    return SIM_WHEELS.get(args.simulate) if args.simulate else None
+
+
+def cmd_speed(args) -> int:
+    """The speed benchmark on the real wheel, or on a model wheel with --simulate."""
+    rim = _rim(args)
+    if args.push_ahead and rim is None:
+        print("--push-ahead needs --rim (or --simulate r3|bare|geared): it pushes that rim's inertia, damping, friction")
+        return 1
+    ahead = {"ff_inertia": rim.inertia, "ff_damping": rim.damping, "ff_friction": rim.stick} if args.push_ahead else {
+        "ff_inertia": args.ff_inertia, "ff_damping": args.ff_damping, "ff_friction": args.ff_friction}
+    lead = args.lead if args.lead is not None else 0.0
+    plan = args.plan if args.plan is not None else (rim.delay_s if args.push_ahead else 0.0)
+    design = Design(bandwidth_hz=args.bandwidth, damping=args.damping, inertia=args.inertia, cap=int(args.cap),
+                    damping_first=args.law == "damping-first", lead_s=lead, plan_s=plan, **ahead)
+    channel = None
+    if args.simulate:
+        if args.simulate == "rim" and rim is None:
+            print("--simulate rim needs --rim with a fitted wheel")
+            return 1
+        model = rim if args.simulate == "rim" else SIM_WHEELS[args.simulate]
+        bench = sim_bench(replace(model, reading_hz=getattr(args, "reading_hz", 0.0) or model.reading_hz))
+    else:
+        channel = RumbleChannel()
+        bench = Bench(channel)
+    st = direction = None
+    try:
+        with _fine_timer():
+            st, direction, home = bench.prepare(args.direction, design.damping_first, design.pushes_ahead, design)
+            half_accel = args.half_accel if args.half_accel else rim_accel(rim, args.cap)
+            data = run_speed(bench, design, direction, home, args.hz, bench.say, args.rates, args.steps, args.corner,
+                             args.half_rates, not args.no_half_at_once, half_accel)
+    except BenchAbort as exc:
+        print(f"aborted: {exc}")
+        return 1
+    finally:
+        if channel is not None:
+            channel.stop()
+            channel.close()
+    data["label"] = design.label
+    data["design"] = asdict(design)
+    data["meta"] = _meta(bench, st, direction, args.hz, None, args.note)
+    print(speed_summary(data, rim, args.cap, args.rotation))
+    out = Path(args.out) if args.out else (None if args.simulate else OUT_DIR / f"la_speed_{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}.json")
     if out is not None:
         _save(out, data)
         print(f"saved {out.relative_to(ROOT) if out.is_relative_to(ROOT) else out.name}")
@@ -244,6 +318,8 @@ def main() -> int:
     p.set_defaults(fn=cmd_capture)
     p = sub.add_parser("check", help="the wheel check: ladder, fit, a design for this rim, verification")
     p.add_argument("--simulate", choices=sorted(SIM_WHEELS), help="check a model wheel, no game")
+    p.add_argument("--reading-hz", type=float, default=60.0,
+                   help="with --simulate: how often the game reads the wheel (60 on the R3; 0 every FFB tick)")
     p.add_argument("--direction", type=int, choices=(1, -1), help="skip the torque test: the torque sign that turns it left")
     p.add_argument("--hz", type=float, default=20.0, help="how often a moving target is sent")
     p.add_argument("--evals", type=int, default=500, help="fit budget in model runs")
@@ -266,6 +342,39 @@ def main() -> int:
     p.add_argument("file")
     _add_design_args(p, [2.0])
     p.set_defaults(fn=cmd_predict)
+    cfg = _config_design()
+    p = sub.add_parser("speed", help="how fast the servo moves the standing wheel, against what the rim allows")
+    p.add_argument("--simulate", choices=sorted(SIM_WHEELS) + ["rim"], help="a model wheel, no game ('rim': the --rim fit)")
+    p.add_argument("--reading-hz", type=float, default=60.0,
+                   help="with --simulate: how often the game reads the wheel (60 on the R3 on 2026-11-06; 0 every FFB tick)")
+    p.add_argument("--direction", type=int, choices=(1, -1), help="skip the torque test: the torque sign that turns it left")
+    p.add_argument("--bandwidth", type=float, default=cfg.get("bandwidth", 2.0), help="servo bandwidth in Hz (config.json)")
+    p.add_argument("--damping", type=float, default=cfg.get("damping", 0.7), help="fraction of critical damping")
+    p.add_argument("--inertia", type=float, default=cfg.get("inertia", 650.0), help="la_wheel_inertia the design uses")
+    p.add_argument("--cap", type=float, default=cfg.get("cap", 3000.0), help="servo cap out of 10000 (la_servo_cap)")
+    p.add_argument("--law", choices=("plain", "damping-first"), default=cfg.get("law", "plain"))
+    p.add_argument("--rates", type=float, nargs="+", default=list(RAMP_RATES), help="ramp rates, lock per second")
+    p.add_argument("--steps", type=float, nargs="+", default=list(STEP_SIZES), help="step sizes, lock")
+    p.add_argument("--rim", help="a check or fitted capture file: the rim the ceiling is worked out on")
+    p.add_argument("--push-ahead", action="store_true",
+                   help="push the --rim fit's inertia, damping and friction ahead, on the plan its delay early (layout 5)")
+    p.add_argument("--ff-inertia", type=float, default=cfg.get("ff_inertia", 0.0), help="la_ff_inertia")
+    p.add_argument("--ff-damping", type=float, default=cfg.get("ff_damping", 0.0), help="la_ff_damping")
+    p.add_argument("--ff-friction", type=float, default=cfg.get("ff_friction", 0.0), help="la_ff_friction")
+    p.add_argument("--lead", type=float, default=cfg.get("lead"), help="la_servo_lead_s, seconds (default 0)")
+    p.add_argument("--plan", type=float, default=cfg.get("plan"),
+                   help="la_ff_plan_s: the push ahead follows the plan this early, s (default: the --rim delay)")
+    p.add_argument("--corner", type=float, default=RAMP_CORNER_S, help="ramp corner time, s (0: sharp corners)")
+    p.add_argument("--half-rates", type=float, nargs="*", default=list(HALF_RATES),
+                   help="half-lock rates, lock per second (none: skip the half-lock ramps)")
+    p.add_argument("--no-half-at-once", action="store_true", help="skip the half-lock move at once")
+    p.add_argument("--half-accel", type=float, help="half-lock ramps' acceleration, lock/s^2 (default: 70 %% of what "
+                   "the --rim fit does at the cap, else 8)")
+    p.add_argument("--rotation", type=float, default=900.0, help="the wheel's rotation in degrees, for the degree figures")
+    p.add_argument("--hz", type=float, default=20.0, help="how often a moving target is sent")
+    p.add_argument("--note", default="", help="free text kept in the recording")
+    p.add_argument("--out", help="where to write the recording")
+    p.set_defaults(fn=cmd_speed)
     args = parser.parse_args()
     return args.fn(args)
 

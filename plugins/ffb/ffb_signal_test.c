@@ -172,6 +172,14 @@ static FfbServoIn servo_in(double target, double rate, int dir) {
     in.dir = dir;
     in.only = 0;
     in.damp_first = 0;
+    in.accel = 0.0;
+    in.ff_inertia = 0.0;
+    in.ff_damping = 0.0;
+    in.ff_friction = 0.0;
+    in.ff_rate = rate;
+    in.ff_accel = 0.0;
+    in.d_lag = 0.0;
+    in.i_move = 0.0;
     return in;
 }
 
@@ -227,7 +235,101 @@ static void test_the_damping_resists_the_wheel_moving_off_the_target_rate(void) 
     expect(fabs(ffb_servo_pid(&s, &in, 0.0, 0.0, 0.1, DT)) < 1e-9, "moving with the target is free");
     in.rate = 0.0;
     ffb_servo_init(&s);
-    expect(ffb_servo_pid(&s, &in, 0.0, 0.0, 5.0, DT) >= -FFB_D_CAP - 1e-9, "the damping is capped");
+    expect(fabs(ffb_servo_pid(&s, &in, 0.0, 0.0, 5.0, DT) + FFB_D_SHARE * 2500.0) < 1e-9, "the damping is capped at half the cap");
+    in.cap = 5500.0;
+    ffb_servo_init(&s);
+    expect(fabs(ffb_servo_pid(&s, &in, 0.0, 0.0, 5.0, DT) + 2750.0) < 1e-9, "more cap, more damping (was 1500 at any cap)");
+}
+
+static void test_the_push_ahead_moves_the_rim_as_the_target_moves(void) {
+    FfbServo s;
+    FfbServoIn in = servo_in(0.0, 0.5, 1);
+    in.kp = in.kd = in.ki = 0.0;
+    ffb_servo_init(&s);
+    expect(ffb_servo_pid(&s, &in, 0.0, 0.0, 0.5, DT) == 0.0 && s.ff == 0.0, "off by default");
+    in.ff_damping = 600.0;
+    in.ff_friction = 150.0;
+    in.accel = 2.0;
+    in.ff_inertia = 350.0;
+    ffb_servo_ff_motion(&in, 0, 0.0, 0.0, 0.03);
+    ffb_servo_init(&s);
+    expect(fabs(ffb_servo_pid(&s, &in, 0.0, 0.0, 0.5, DT) - (700.0 + 300.0 + 150.0 * tanh(0.5 / FFB_FF_STILL_RATE))) < 1e-6,
+           "inertia times acceleration, damping times rate, friction the way it moves");
+    ffb_servo_ff_motion(&in, 1, 0.8, -4.0, 0.05);
+    expect(fabs(in.ff_rate - 0.6) < 1e-12 && in.ff_accel == -4.0 && in.rate == 0.5,
+           "a plan moves the push ahead only, on at its own acceleration");
+    ffb_servo_ff_motion(&in, 1, nan(""), nan(""), 0.05);
+    expect(in.ff_rate == 0.0 && in.ff_accel == 0.0, "a bad plan pushes nothing");
+    ffb_servo_ff_motion(&in, 0, 0.0, 0.0, 0.03);
+    {
+        FfbServoIn rest = servo_in(0.0, 0.0, 1);
+        rest.ff_friction = 150.0;
+        expect(fabs(ffb_servo_ff(&rest, 2500.0, 0.004) - 150.0 * tanh(2.0)) < 1e-9
+                   && fabs(ffb_servo_ff(&rest, 2500.0, -0.004) + 150.0 * tanh(2.0)) < 1e-9
+                   && ffb_servo_ff(&rest, 2500.0, 0.0) == 0.0,
+               "at rest the friction push turns toward the target");
+        rest.ff_rate = 0.5;
+        expect(fabs(ffb_servo_ff(&rest, 2500.0, -0.004) - 150.0 * tanh(25.0)) < 1e-6, "moving, it pushes the way it moves");
+    }
+    in.dir = -1;
+    ffb_servo_init(&s);
+    expect(ffb_servo_pid(&s, &in, 0.0, 0.0, 0.5, DT) < -1000.0, "in the wheel's torque sign");
+    in = servo_in(0.0, 0.0, 1);
+    in.ff_accel = 1e6;
+    in.ff_inertia = 350.0;
+    ffb_servo_init(&s);
+    expect(fabs(ffb_servo_pid(&s, &in, 0.0, 0.0, 0.0, DT)) <= 2500.0 + 1e-9, "never past the cap");
+    in.ff_accel = nan("");
+    ffb_servo_init(&s);
+    expect(ffb_servo_pid(&s, &in, 0.0, 0.0, 0.0, DT) == 0.0 && s.integ == 0.0, "a bad acceleration pushes nothing");
+    in = servo_in(0.0, 0.0, 1);
+    in.ff_damping = 600.0;
+    in.rate = 0.5;
+    in.ff_rate = 0.5;
+    in.only = -1;
+    ffb_servo_init(&s);
+    expect(ffb_servo_pid(&s, &in, 0.0, 0.0, 0.5, DT) == 0.0, "one-sided, the push ahead never pushes the other way");
+}
+
+static void test_with_the_plan_the_damping_lags_like_the_reading_and_the_integral_holds_on_fast_moves(void) {
+    FfbServo s;
+    FfbServoIn in = servo_in(0.0, 0.5, 1);
+    double first;
+    ffb_servo_plan_feedback(&in, 0, 1.0 / 60.0);
+    expect(in.d_lag == 0.0 && in.i_move == 0.0, "no plan, as before");
+    ffb_servo_plan_feedback(&in, 1, 1.0 / 60.0);
+    expect(fabs(in.d_lag - (0.5 / 60.0 + FFB_RATE_FAST_TAU_S)) < 1e-12 && in.i_move == FFB_I_MOVE_RATE,
+           "half a steering interval and the rate filter");
+    ffb_servo_init(&s);
+    first = ffb_servo_pid(&s, &in, 0.0, 0.0, 0.0, DT);
+    expect(first > 0.0 && first < in.kd * 0.5 * 0.9, "a target that starts moving pulls the damping in gradually");
+    in.rate = 0.0;
+    in.ff_rate = 0.0;
+    in.target = 0.01;
+    ffb_servo_init(&s);
+    ffb_servo_pid(&s, &in, 0.01, 0.0, 0.0, DT);
+    expect(s.integ > 0.0, "a still target integrates");
+    in.rate = 0.5;
+    ffb_servo_init(&s);
+    ffb_servo_pid(&s, &in, 0.01, 0.0, 0.0, DT);
+    expect(s.integ == 0.0, "a fast one does not");
+    ffb_servo_plan_feedback(&in, 1, 10.0);
+    expect(in.d_lag == FFB_D_LAG_MAX_S, "bounded");
+}
+
+static void test_the_target_and_the_wheel_are_read_ahead_only_when_asked(void) {
+    double aim;
+    double rate;
+    ffb_servo_aim(0.01, 0.4, 2.0, 0.05, &aim, &rate);
+    expect(fabs(aim - (0.01 + 0.4 * 0.05 + 0.5 * 2.0 * 0.0025)) < 1e-12 && fabs(rate - 0.5) < 1e-12,
+           "moved on with its rate and acceleration");
+    ffb_servo_aim(0.01, 0.4, 2.0, 1.0, &aim, &rate);
+    expect(fabs(rate - (0.4 + 2.0 * FFB_EXTRAP_S)) < 1e-12, "for at most the extrapolation window");
+    ffb_servo_aim(0.01, nan(""), nan(""), 0.05, &aim, &rate);
+    expect(aim == 0.01 && rate == 0.0, "bad numbers are ignored");
+    expect(ffb_servo_ahead(0.0, 0.012) == 0.0, "no lead: the wheel is read as it is, as before");
+    expect(fabs(ffb_servo_ahead(0.026, 0.012) - 0.038) < 1e-12, "the lead and the reading's age");
+    expect(ffb_servo_ahead(1.0, 0.0) == FFB_LEAD_MAX_S, "bounded");
 }
 
 static void test_damping_first_keeps_the_damping_room_under_the_cap(void) {
@@ -246,7 +348,7 @@ static void test_damping_first_keeps_the_damping_room_under_the_cap(void) {
     ffb_servo_init(&s);
     expect(ffb_servo_pid(&s, &in, 1.0, 0.0, 0.1, DT) < 1000.0, "damping first: it brakes the pinned servo");
     ffb_servo_init(&s);
-    expect(ffb_servo_pid(&s, &in, 1.0, 0.0, 5.0, DT) >= -FFB_D_CAP - 1e-9, "a wheel flung through brakes at most by the damping's own cap");
+    expect(ffb_servo_pid(&s, &in, 1.0, 0.0, 5.0, DT) >= -FFB_D_SHARE * 2500.0 - 1e-9, "a wheel flung through brakes at most by the damping's own cap");
     in.rate = 5.0;
     ffb_servo_init(&s);
     expect(fabs(ffb_servo_pid(&s, &in, 1.0, 0.0, 0.0, DT)) <= 2500.0 + 1e-9, "never above the cap, whatever D asks");
@@ -370,6 +472,9 @@ int main(void) {
     test_the_pid_pushes_toward_the_target_in_the_wheel_sign();
     test_one_sided_it_never_pushes_the_other_way();
     test_the_damping_resists_the_wheel_moving_off_the_target_rate();
+    test_the_push_ahead_moves_the_rim_as_the_target_moves();
+    test_the_target_and_the_wheel_are_read_ahead_only_when_asked();
+    test_with_the_plan_the_damping_lags_like_the_reading_and_the_integral_holds_on_fast_moves();
     test_damping_first_keeps_the_damping_room_under_the_cap();
     test_the_integral_takes_out_friction_and_does_not_wind_up();
     test_the_target_moves_on_between_updates_for_a_while();

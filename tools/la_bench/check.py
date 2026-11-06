@@ -2,8 +2,9 @@
 
 The ladder climbs the bandwidth of a damping-first design until one rings, so the check never asks more of the wheel
 than the rung before it held. The rim is fitted on those runs, a design is chosen for it in the model, and the design
-is then run on the wheel: if it rings, the bandwidth steps back and it is run again. The result is what `la_*` keys in
-config.json should hold, how responsive the wheel is and how smooth.
+is then run on the wheel: if it rings, that run goes back into the fit (a ring is what pins the delay) and a new design is
+chosen, up to three rounds. The result is what `la_*` keys in config.json should hold, how responsive the wheel is and how
+smooth.
 """
 
 from __future__ import annotations
@@ -11,7 +12,7 @@ from __future__ import annotations
 from dataclasses import asdict, replace
 
 from tools.la_bench.bench import Bench, BenchAbort
-from tools.la_bench.design import Choice, choose_design, smoothness
+from tools.la_bench.design import Choice, choose_design, push_ahead_of, smoothness
 from tools.la_bench.metrics import describe, summarize
 from tools.la_bench.plant import WheelParams, fit
 from tools.la_bench.protocol import Design, follow, ramp, step
@@ -21,14 +22,21 @@ RUNG_CAP = 2000
 RUNG_STEPS = (step(0.01), step(0.02))
 SLOW = (ramp(0.06, 0.05), follow(0.03, 0.4))
 VERIFY = (step(0.02),) + SLOW + (ramp(0.08, 0.2), follow(0.03, 0.7))
+VERIFY_AHEAD = VERIFY + (ramp(0.15, 0.4, 0.1),)
 RING_OVERSHOOT = 1.0
 RING_RIPPLE = 0.01
 RING_BUZZ = 0.6
 RING_TRACK = 0.02
-ACCEPT_UP = 0.3
-ACCEPT_SWING = 0.5
+ACCEPT_UP = 0.2
+ACCEPT_SWING = 0.35
 RETRY_SCALE = 0.8
-RETRIES = 2
+ROUNDS = 3
+REFINE_SCALE = 1.15
+REFINE_STEPS = 4
+BANDWIDTH_MAX = 3.0
+WHEEL_LADDER = (0.5, 0.7, 1.0, 1.4)
+WHEEL_LADDER_INERTIA = 650.0
+WHEEL_LADDER_DAMPING = 1.0
 
 
 def rings(s: dict) -> bool:
@@ -41,10 +49,11 @@ def rings(s: dict) -> bool:
     return "track" in s and (s["track"]["rms"] or 0.0) > RING_TRACK
 
 
-def accepted(s: dict) -> bool:
+def accepted(s: dict, margin: float = 1.0) -> bool:
+    """Not ringing and within the overshoot limits, scaled by ``margin`` (below 1: stricter)."""
     if rings(s):
         return False
-    return "up" not in s or (s["up"]["overshoot"] <= ACCEPT_UP and s["swing"]["overshoot"] <= ACCEPT_SWING)
+    return "up" not in s or (s["up"]["overshoot"] <= ACCEPT_UP * margin and s["swing"]["overshoot"] <= ACCEPT_SWING * margin)
 
 
 def _climb(bench: Bench, direction: int, home: float, hz: float, say, runs: list[dict]) -> float | None:
@@ -66,31 +75,66 @@ def _climb(bench: Bench, direction: int, home: float, hz: float, say, runs: list
     return clean
 
 
-def _try(bench: Bench, choice: Choice, direction: int, home: float, hz: float, say,
-         runs: list[dict]) -> tuple[list[dict], Choice | None]:
-    """Run a design on the wheel, stepping its bandwidth back while it rings.
-
-    Returns the runs of the last attempt and the design that held (None: none did); every run is added to ``runs``.
-    """
+def _verify_once(bench: Bench, choice: Choice, direction: int, home: float, hz: float, say,
+                 runs: list[dict], margin: float = 1.0) -> tuple[list[dict], bool]:
+    """Run a design on the wheel until a stage rings or it has held through all of them; the runs of this attempt."""
+    design = choice.design()
+    say(f"verifying {design.label}")
     last: list[dict] = []
-    bw = choice.bandwidth_hz
-    for _ in range(RETRIES + 1):
-        design = Design(bandwidth_hz=bw, damping=choice.damping, inertia=choice.inertia, damping_first=True)
-        say(f"verifying {design.label}")
-        good = True
-        last = []
-        for stage in VERIFY:
-            last.append(bench.run_stage(stage, design, direction, hz, home))
-            runs.append(last[-1])
-            s = summarize(last[-1])
-            say("  " + describe(s))
-            if not accepted(s):
-                good = False
-                break
-        if good:
-            return last, replace(choice, bandwidth_hz=bw)
-        bw = round(bw * RETRY_SCALE, 2)
-    return last, None
+    for stage in VERIFY_AHEAD if design.pushes_ahead else VERIFY:
+        last.append(bench.run_stage(stage, design, direction, hz, home))
+        runs.append(last[-1])
+        s = summarize(last[-1])
+        say("  " + describe(s))
+        if not accepted(s, margin):
+            return last, False
+    return last, True
+
+
+def _not_again(choice: Choice, failed: list[Choice]) -> Choice:
+    """A design at least as fast as one that rang, with the same shape, goes back 20 % from the slowest that rang."""
+    same = [f for f in failed if abs(f.inertia - choice.inertia) < 1.0 and f.damping == choice.damping
+            and choice.bandwidth_hz >= f.bandwidth_hz]
+    if not same:
+        return choice
+    return replace(choice, bandwidth_hz=round(min(f.bandwidth_hz for f in same) * RETRY_SCALE, 2))
+
+
+def _refine(bench: Bench, held: Choice, last_runs: list[dict], failed: list[Choice], direction: int, home: float,
+            hz: float, say, runs: list[dict]) -> tuple[Choice, list[dict]]:
+    """Try the held design faster, 15 % of bandwidth at a time, keeping the fastest the wheel accepts."""
+    for _ in range(REFINE_STEPS):
+        faster = replace(held, bandwidth_hz=round(held.bandwidth_hz * REFINE_SCALE, 2))
+        known = any(abs(f.inertia - faster.inertia) < 1.0 and f.damping == faster.damping
+                    and f.bandwidth_hz <= faster.bandwidth_hz for f in failed)
+        if faster.bandwidth_hz > BANDWIDTH_MAX or known:
+            break
+        say("trying it faster")
+        tried, good = _verify_once(bench, faster, direction, home, hz, say, runs)
+        if not good:
+            failed.append(faster)
+            break
+        held, last_runs = faster, tried
+    return held, last_runs
+
+
+def _wheel_ladder(bench: Bench, push: dict, direction: int, home: float, hz: float, say, runs: list[dict],
+                  failed: list[Choice]) -> tuple[Choice | None, list[dict]]:
+    """Push-ahead designs tried on the wheel itself, gentlest first, keeping the fastest that holds.
+
+    For a wheel the fit cannot describe (gear teeth, backlash, a coarse encoder): on the geared model wheel the fit read
+    inertia 159 and 67 ms where it is 600 and 25, no design held in the model, and 1.0 Hz with the push ahead held on
+    the wheel. The wheel decides, so this works on any wheel the push ahead can move.
+    """
+    held, last = None, []
+    for bw in WHEEL_LADDER:
+        cand = Choice(WHEEL_LADDER_INERTIA, bw, WHEEL_LADDER_DAMPING, None, None, 1.0, False, **push)
+        tried, good = _verify_once(bench, cand, direction, home, hz, say, runs)
+        if not good:
+            failed.append(cand)
+            break
+        held, last = cand, tried
+    return held, last
 
 
 def run_check(bench: Bench, direction: int, home: float, hz: float = 20.0, evals: int = 500, say=print,
@@ -100,22 +144,45 @@ def run_check(bench: Bench, direction: int, home: float, hz: float = 20.0, evals
     notes: list[str] = []
     clean = result = choice = held = None
     last_runs: list[dict] = []
+    failed: list[Choice] = []
+    ahead = bench.push_ahead and bench.ff_plan
+    reading = round(bench.reading_hz) if bench.reading_hz > 0.0 else 0.0
     try:
+        say(f"the game reads the wheel {reading:.0f} times a second" if reading else "wheel reading rate unknown")
+        if not ahead:
+            notes.append("the plugin cannot push ahead on a plan (layout 5, status 1024): designed without it")
         say("climbing: gentle damping-first designs, stopping at the first that rings")
         clean = _climb(bench, direction, home, hz, say, runs)
         if clean is None:
             notes.append(f"even {LADDER[0]} Hz rang or hunted: a very light or loose wheel, or stepping and backlash")
-        say("fitting the rim")
-        result = fit(runs, bench.frame_hz, WheelParams(sign=direction), max_evals=evals)
-        say("choosing a design for it")
-        choice = choose_design(result.params, bench.frame_hz, **(grid or {}))
-        if choice.limited:
-            notes.append("no design in the grid held up on the fitted rim and its neighbours")
-        last_runs, held = _try(bench, choice, direction, home, hz, say, runs)
+        for turn in range(ROUNDS):
+            say("fitting the rim" + (" again, with the run that rang" if turn else ""))
+            result = fit(runs, bench.frame_hz, WheelParams(sign=direction, reading_hz=reading), max_evals=evals)
+            say("choosing a design for it" + (", with the push ahead" if ahead else ""))
+            choice = _not_again(choose_design(result.params, bench.frame_hz, ahead=ahead, **(grid or {})), failed)
+            if choice.limited:
+                notes.append("no design in the grid held up on the fitted rim and its neighbours")
+                if ahead:
+                    break
+            last_runs, good = _verify_once(bench, choice, direction, home, hz, say, runs)
+            if good:
+                held = choice
+                break
+            failed.append(choice)
+        if held is None and ahead and result is not None:
+            say("the model's designs did not hold, trying push-ahead designs on the wheel, gentlest first")
+            held, last_runs = _wheel_ladder(bench, push_ahead_of(result.params), direction, home, hz, say, runs, failed)
+            if held is not None:
+                notes.append("chosen on the wheel, not in the model: the fit does not describe this wheel well")
         if held is None:
-            say("the model's design rang on the wheel, trying the gentlest rung")
-            last_runs, held = _try(bench, Choice(650.0, LADDER[0], 0.7, None, None, 1.0, True), direction, home, hz, say, runs)
-            notes.append("the model's design rang on the wheel" + ("; the gentlest rung held" if held else ""))
+            say("the model's designs rang on the wheel, trying the gentlest rung")
+            gentle = Choice(650.0, LADDER[0], 0.7, None, None, 1.0, True)
+            last_runs, good = _verify_once(bench, gentle, direction, home, hz, say, runs)
+            held = gentle if good else None
+        elif held is not None and not held.limited and held.rise_s is not None:
+            held, last_runs = _refine(bench, held, last_runs, failed, direction, home, hz, say, runs)
+        if failed:
+            notes.append(f"{len(failed)} design(s) rang on the wheel" + ("" if held else ", none held"))
     except BenchAbort as exc:
         notes.append(f"stopped: {exc}")
         held = None
@@ -129,7 +196,7 @@ def run_check(bench: Bench, direction: int, home: float, hz: float = 20.0, evals
         "ladder_clean_hz": clean, "smoothness": smoothness(last_runs if held else runs, params.stick if params else None),
         "step_rise_s": step_run["up"]["rise_s"] if step_run and held else None,
         "step_overshoot": step_run["up"]["overshoot"] if step_run and held else None,
-        "config": held.config() if held else {}, "notes": notes,
+        "config": held.config() if held else {}, "notes": notes, "reading_hz": reading,
     }
 
 
@@ -140,11 +207,14 @@ def summary(data: dict) -> str:
     lines = ["Wheel check"]
     if w:
         lines.append(f"  rim: inertia {w['inertia']:.0f}, damping {w['damping']:.0f}, dry friction {w['stick']:.0f}, "
-                     f"delay {w['delay_s'] * 1000:.0f} ms")
+                     f"delay {w['delay_s'] * 1000:.0f} ms" + (f", read {data['reading_hz']:.0f} times a second"
+                                                           if data.get("reading_hz") else ""))
     else:
         lines.append("  rim: not measured")
     if data["verified"]:
-        lines.append(f"  responsiveness: {c['bandwidth_hz']:g} Hz design, verified on the wheel"
+        lines.append(f"  responsiveness: {c['bandwidth_hz']:g} Hz design" + (" with the push ahead" if c.get("ff_damping")
+                                                                           or c.get("ff_inertia") else "")
+                     + ", verified on the wheel"
                      + (f", a 0.02 step rises in {rise:.2f} s" if rise else ""))
     else:
         lines.append("  responsiveness: no design held on the wheel")
