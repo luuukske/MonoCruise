@@ -300,6 +300,9 @@ def config_keys(data: dict) -> dict:
         return {}
     if (data.get("fastest_followed") or 0.0) < KEYS_MIN_RATE:
         return {}
-    return {"la_ff_inertia": round(d["ff_inertia"]), "la_ff_damping": round(d["ff_damping"]),
-            "la_ff_friction": round(d["ff_friction"]), "la_servo_lead_s": round(d["lead_s"], 3),
-            "la_ff_plan_s": round(d.get("plan_s", 0.0), 3)}
+    out = {"la_ff_inertia": round(d["ff_inertia"]), "la_ff_damping": round(d["ff_damping"]),
+           "la_ff_friction": round(d["ff_friction"]), "la_servo_lead_s": round(d["lead_s"], 3),
+           "la_ff_plan_s": round(d.get("plan_s", 0.0), 3)}
+    if d.get("ff_breakaway", 0.0) > d["ff_friction"] > 0.0:
+        out["la_ff_breakaway"] = round(d["ff_breakaway"])
+    return out

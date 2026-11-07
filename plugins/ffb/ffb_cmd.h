@@ -24,6 +24,7 @@
 #define FFB_ST_DAMP_FIRST 256
 #define FFB_ST_PUSH_AHEAD 512
 #define FFB_ST_FF_PLAN 1024
+#define FFB_ST_BREAKAWAY 2048
 
 #define FFB_SF_DAMP_FIRST 1
 #define FFB_SF_FF_PLAN 2
@@ -69,7 +70,7 @@ typedef struct FfbCmd {
     volatile int16_t reserved3;
     volatile float plan_rate;
     volatile float plan_accel;
-    volatile uint32_t reserved4;
+    volatile float ff_breakaway;
 } FfbCmd;
 
 _Static_assert(sizeof(FfbCmd) == FFB_CMD_SIZE, "command block size");
@@ -108,5 +109,6 @@ _Static_assert(offsetof(FfbCmd, servo_lead) == 108, "servo_lead offset");
 _Static_assert(offsetof(FfbCmd, ff_applied) == 112, "ff_applied offset");
 _Static_assert(offsetof(FfbCmd, plan_rate) == 116, "plan_rate offset");
 _Static_assert(offsetof(FfbCmd, plan_accel) == 120, "plan_accel offset");
+_Static_assert(offsetof(FfbCmd, ff_breakaway) == 124, "ff_breakaway offset");
 
 #endif

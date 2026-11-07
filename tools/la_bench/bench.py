@@ -8,7 +8,7 @@ runaway, not the run.
 from __future__ import annotations
 
 import time
-from dataclasses import asdict
+from dataclasses import asdict, replace
 
 from core.lane_departure.command import SERVO_OFF, VERSION, PluginStatus, ServoCommand
 from tools.la_bench.plant import SimChannel, SimClock, WheelParams
@@ -19,17 +19,28 @@ ANGLE_MARGIN = 0.15
 CENTRE = 0.0
 CENTRE_LIMIT = 0.25
 REST_LIMIT = 0.6
-HOME_BAND = 0.01
+HOME_BAND = 0.03
 HOME_RATE = 0.3
 HOME_CORNER_S = 0.3
 HOME_SEND_S = 0.02
 HOME_SETTLE_S = 0.3
 HOME_SPARE_S = 3.0
 HOME_DESIGN = Design(bandwidth_hz=1.0, cap=2000)
+HOME_GENTLE = Design(bandwidth_hz=0.5, damping=1.0, inertia=160.0, cap=2000)
 POLL_S = 0.001
 DIRECTION_UNITS = 600
 DIRECTION_S = 0.5
 DIRECTION_MIN_MOVE = 0.004
+DIRECTION_STOP = 0.02
+FFB_STALL_S = 0.5
+FFB_WAIT_S = 120.0
+FFB_RETRIES = 3
+STEER_STALL_S = 0.2
+STUTTER_FACTOR = 2.5
+STUTTER_SHARE = 0.05
+STUTTER_MIN = 20
+OTHER_WRITER = ("another program writes to the wheel's servo (MonoCruise with lane departure or LA on?): "
+                "close it during the check and rerun")
 
 
 class BenchAbort(Exception):
@@ -38,6 +49,31 @@ class BenchAbort(Exception):
 
 class WheelRunaway(BenchAbort):
     """The wheel went past the angle limit while the bench was pushing it; the stage ends, the next may still run."""
+
+
+class RunInvalid(BenchAbort):
+    """The run cannot measure the wheel (another writer, a game that keeps stalling): the check stops, nothing kept."""
+
+
+class FfbStalled(Exception):
+    """The game stopped sending its force, or reading the wheel, during a stage: the stage is run again."""
+
+    def __init__(self, why: str = "the game's force feedback stopped") -> None:
+        super().__init__(why)
+
+
+def reading_trouble(times: list[float]) -> str | None:
+    """Why wheel readings that came at ``times`` do not show the wheel: a stall, or readings in bunches (2026-11-06,
+    another program starved the game: 36 ms between bursts, stalls up to 2.4 s, and the fit and designs were wrong)."""
+    gaps = [b - a for a, b in zip(times, times[1:])]
+    if any(g >= STEER_STALL_S for g in gaps):
+        return "the game stopped reading the wheel"
+    if len(gaps) < STUTTER_MIN:
+        return None
+    med = sorted(gaps)[len(gaps) // 2]
+    if sum(g > STUTTER_FACTOR * med for g in gaps) > STUTTER_SHARE * len(gaps):
+        return "the game read the wheel in bunches"
+    return None
 
 
 def _why_not(st: PluginStatus) -> str:
@@ -63,6 +99,7 @@ class Bench:
         self.damping_first = False
         self.push_ahead = False
         self.ff_plan = False
+        self.breakaway = False
         self._readings: list[tuple[float, int]] = []
 
     @property
@@ -71,6 +108,8 @@ class Bench:
 
     def status(self, servo: ServoCommand = SERVO_OFF, torque: float = 0.0, limit: float = ANGLE_LIMIT) -> PluginStatus:
         st = self.channel.publish(False, 0, 0, torque=torque, servo=servo)
+        if getattr(self.channel, "foreign", 0):
+            raise RunInvalid(OTHER_WRITER)
         if not st.present or st.dead or not st.hooked:
             raise BenchAbort("plugin lost: is the game running and driving?")
         if (servo.direction or torque) and abs(st.steer) > limit:
@@ -130,6 +169,7 @@ class Bench:
         """
         st = self.ready()
         self.damping_first, self.push_ahead, self.ff_plan = st.damping_first, st.push_ahead, st.ff_plan
+        self.breakaway = st.breakaway
         self.say(f"plugin present, version {st.version}, {st.frame_hz:.0f} Hz FFB: hands off the wheel")
         if damping_first and not st.damping_first:
             raise BenchAbort("the plugin cannot damp first: rebuild plugins/ffb and restart the game")
@@ -144,29 +184,40 @@ class Bench:
         return st, direction, CENTRE
 
     def find_direction(self) -> int:
-        """Push a little torque with the servo off: +1 if positive torque turns the wheel counterclockwise."""
+        """Push a little torque with the servo off until the wheel moved DIRECTION_STOP, for at most DIRECTION_S: +1 if
+        positive torque turns it counterclockwise (the whole 0.5 s ran the old wheel's light rim past the limit)."""
         start = self.rest()
-        moved = self.idle(DIRECTION_S, DIRECTION_UNITS).steer - start
-        self.idle(0.0)
+        limit = max(ANGLE_LIMIT, abs(start) + ANGLE_MARGIN)
+        end = self.clock() + DIRECTION_S
+        moved = 0.0
+        try:
+            while self.clock() < end and abs(moved) < DIRECTION_STOP:
+                moved = self.status(torque=DIRECTION_UNITS, limit=limit).steer - start
+                self.sleep(self.poll_s)
+        finally:
+            self.idle(0.0)
         if abs(moved) < DIRECTION_MIN_MOVE:
             raise BenchAbort("the wheel did not move under torque: hands on the rim, or the game paused? (--direction skips the test)")
         return 1 if moved > 0 else -1
 
-    def go_home(self, home: float, direction: int, design: Design | None = None) -> None:
+    def go_home(self, home: float, direction: int, design: Design | None = None, gentle: bool = False) -> None:
         """Walk a wheel that rests away from ``home`` there on a rounded move (it speeds up and slows down over 0.3 s,
         at most 0.3 lock/s) with a gentle servo, damping first and with ``design``'s push ahead where the plugin can,
         sent every 20 ms with the move's rate and acceleration; let go once it has sat there for 0.3 s.
+
+        A walk that does not settle there goes once more on HOME_GENTLE: the walk's servo is designed on 650, and on the
+        old wheel (a rim of 30 to 50, 50 to 60 ms) it hunted and let go 0.3 lock off (2026-11-06).
         """
         start = self.rest()
         dist = abs(home - start)
         if dist <= HOME_BAND:
             return
-        walk = HOME_DESIGN
+        walk = HOME_GENTLE if gentle else HOME_DESIGN
         if self.damping_first:
-            walk = Design(bandwidth_hz=walk.bandwidth_hz, cap=walk.cap, damping_first=True)
+            walk = replace(walk, damping_first=True)
         if design is not None and design.pushes_ahead and self.push_ahead:
-            walk = Design(bandwidth_hz=walk.bandwidth_hz, cap=walk.cap, damping_first=walk.damping_first,
-                          ff_inertia=design.ff_inertia, ff_damping=design.ff_damping, ff_friction=design.ff_friction)
+            walk = replace(walk, ff_inertia=design.ff_inertia, ff_damping=design.ff_damping, ff_friction=design.ff_friction,
+                           ff_breakaway=design.ff_breakaway if self.breakaway else 0.0)
         kp, kd, ki = walk.gains()
         dur = move_s(dist, HOME_RATE, HOME_CORNER_S)
         marks = [m for m in accel_changes(dur, dist, HOME_RATE, HOME_CORNER_S) if m > 0.0] + [dur]
@@ -178,7 +229,8 @@ class Bench:
                 aim, rate, accel = rounded_move(t, dur, start, home, HOME_RATE, HOME_CORNER_S)
                 servo = ServoCommand(target=aim, rate=rate, kp=kp, kd=kd, ki=ki, cap=walk.cap, direction=direction,
                                      damping_first=walk.damping_first, accel=accel, ff_inertia=walk.ff_inertia,
-                                     ff_damping=walk.ff_damping, ff_friction=walk.ff_friction)
+                                     ff_damping=walk.ff_damping, ff_friction=walk.ff_friction,
+                                     ff_breakaway=walk.ff_breakaway)
                 st = self.status(servo, limit=limit)
                 near = t >= dur and abs(st.steer - home) <= HOME_BAND / 2
                 still = (t if still is None else still) if near else None
@@ -188,11 +240,48 @@ class Bench:
                 self.sleep(min(HOME_SEND_S, nxt - t) if nxt is not None else HOME_SEND_S)
         finally:
             self.channel.publish(False, 0, 0, servo=SERVO_OFF)
+        if not gentle and abs(self.rest(min_s=0.3) - home) > HOME_BAND:
+            self.say("the walk home did not settle: once more, gently")
+            self.go_home(home, direction, design, gentle=True)
+
+    def wait_ffb(self, wait_s: float = FFB_WAIT_S) -> None:
+        """Until the game's force updates come (a window in front of the game stopped them on 2026-11-06 and the servo
+        pushed nothing for whole stages); BenchAbort after ``wait_s``.
+        """
+        t0 = self.clock()
+        first = self.status().frames
+        said = False
+        while self.status().frames == first:
+            if not said and self.clock() - t0 >= FFB_STALL_S:
+                self.say("the game's force feedback stopped (a window in front of the game?): bring the game back, "
+                         "the check waits")
+                said = True
+            if self.clock() - t0 >= wait_s:
+                raise RunInvalid("the game's force feedback stayed off: keep the game in front during the run")
+            self.sleep(0.02)
+        if said:
+            self.say("force feedback back, going on")
 
     def run_stage(self, stage: Stage, design: Design, direction: int, hz: float = 20.0, home: float | None = None) -> dict:
+        """One stage; run again from home when the game's force or its wheel readings stalled during it."""
+        why = ""
+        for _ in range(FFB_RETRIES):
+            self.wait_ffb()
+            try:
+                return self._run_stage(stage, design, direction, hz, home)
+            except FfbStalled as exc:
+                why = str(exc)
+                self.say(f"{why} during {stage.name}: it runs again")
+        raise RunInvalid(f"{why} again and again: keep the game in front and close other programs during the check")
+
+    def _run_stage(self, stage: Stage, design: Design, direction: int, hz: float, home: float | None) -> dict:
         if home is not None:
             self.go_home(home, direction, design)
         start = self.rest()
+        if abs(start) > CENTRE_LIMIT and home is not None:
+            self.say(f"the wheel rests {start:+.2f} lock off centre: walking it back gently")
+            self.go_home(home, direction, design, gentle=True)
+            start = self.rest()
         if abs(start) > CENTRE_LIMIT:
             raise BenchAbort(f"the wheel rests {start:+.2f} lock off centre: centre it and rerun")
         limit = max(ANGLE_LIMIT, abs(start) + stage.amp + ANGLE_MARGIN)
@@ -205,6 +294,7 @@ class Bench:
         last = None
         t0 = self.clock()
         i = 0
+        frames, frames_at = None, 0.0
         try:
             while (t := self.clock() - t0) < stage.duration:
                 while i < len(events) and events[i] <= t:
@@ -214,10 +304,14 @@ class Bench:
                                          direction=direction, damping_first=design.damping_first, accel=accel,
                                          ff_inertia=design.ff_inertia, ff_damping=design.ff_damping,
                                          ff_friction=design.ff_friction, lead_s=design.lead_s, ff_plan=bool(plan),
-                                         plan_rate=plan_rate, plan_accel=plan_accel)
+                                         plan_rate=plan_rate, plan_accel=plan_accel, ff_breakaway=design.ff_breakaway)
                     sent.append([t, servo.target, rate, accel])
                     i += 1
                 st = self.status(servo, limit=limit)
+                if st.frames != frames:
+                    frames, frames_at = st.frames, t
+                elif t - frames_at >= FFB_STALL_S:
+                    raise FfbStalled()
                 if st.steer_frames != last:
                     last = st.steer_frames
                     samples.append([t, st.steer, st.steer_rate, st.applied, st.servo_applied, st.game_force,
@@ -227,11 +321,15 @@ class Bench:
             aborted = str(exc)
         finally:
             self.channel.publish(False, 0, 0, servo=SERVO_OFF)
+        trouble = None if aborted else reading_trouble([s[0] for s in samples] + [self.clock() - t0])
+        if trouble:
+            raise FfbStalled(trouble)
         run = {
             "name": stage.name, "label": design.label, "stage": stage.to_dict(), "design": asdict(design),
             "gains": {"kp": kp, "kd": kd, "ki": ki, "cap": design.cap, "direction": direction,
                       "damping_first": design.damping_first, "ff_inertia": design.ff_inertia,
-                      "ff_damping": design.ff_damping, "ff_friction": design.ff_friction, "lead_s": design.lead_s},
+                      "ff_damping": design.ff_damping, "ff_friction": design.ff_friction, "lead_s": design.lead_s,
+                      "ff_breakaway": design.ff_breakaway},
             "start": start, "sent": _round(sent), "samples": _round(samples),
         }
         if aborted:

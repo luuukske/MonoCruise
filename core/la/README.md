@@ -381,6 +381,7 @@ line crossed keeps the lane it left as the reference (see the lane under the tru
 | `la_ff_inertia`, `la_ff_damping`, `la_ff_friction` | 0 | the plugin pushes the rim ahead: its inertia times the target's acceleration, its damping times its rate, its dry friction the way it moves. Take them from the wheel check's fit, then confirm with the speed benchmark (`speed --push-ahead`), which prints them when the run was clean. LA and the lane keeping assist both use them: they are the wheel's |
 | `la_servo_lead_s` | 0 | reads the wheel and the target that many seconds ahead (the wheel's delay), at most 0.08. Buzzed ramps in the model; leave it at 0 |
 | `la_ff_plan_s` | 0 | the push ahead moves the rim on the target's motion that many seconds from now (the follower's own, propagated), so it starts and stops on time; the wheel check's delay (26 ms on the R3). At most 0.08 |
+| `la_ff_breakaway` | 0 | the ceiling the friction push climbs to while the wheel stands, for a wheel that needs more to start than to slide (the old wheel: 311 to 526 against 305); used when above `la_ff_friction`, needs the plugin's status bit 2048. The wheel check writes it for a sticky wheel; LA and the lane keeping assist both use it |
 | `la_servo_cap` | 0 (3000) | LA's servo cap out of 10000, 1000 to 6000. The game pushes back about 560 units per m/s^2 of cornering, so 8 m/s^2 needs about 4500 plus friction. A hand overpowers it; with `la_always_on` nothing hands back |
 | `la_bandwidth_hz`, `la_damping` | 0 (2 Hz, 0.7) | the servo's design on that rim, from the wheel check; bounded to 0.3 to 3 Hz and 0.3 to 2 |
 | `la_damping_first` | false | damping first under the cap (`plugins/ffb/README.md`); needs the plugin that knows it. LA and the lane keeping assist both read the three |
@@ -504,6 +505,93 @@ on a wheel the fit cannot describe (gear teeth, backlash, a coarse encoder: the 
 of critical damping, and keeps the fastest that holds (the geared model wheel held to 1.4 Hz). It then writes the
 `la_ff_*` and `la_ff_plan_s` keys too. The model wheels on 2026-11-06, read at 60 Hz: the R3 1.2 Hz, the bare R3 1.25
 Hz, the geared wheel 1.4 Hz chosen on the wheel, all with the push ahead.
+
+The old wheel (a Thrustmaster, 2026-11-06) got nothing from that check: every rung and every design rang. It needs
+about 460 to start and slides on about 200 (the R3 starts at about 106, under its fitted friction), its angle reads
+in steps of 0.0006 lock (the R3's 0.00002), and its rim is light. Each slow move stuck, jumped 5 to 12 mlock once the
+push built up, and the damping, braking the jump late, kicked the stopped wheel back until the buzz guard cut it. The
+fit read inertia 152 and damping 1457 there, because it matches angle traces and a limit cycle's trace is matched best
+by a heavily damped rim, and the model then held 2 Hz where the wheel rang at 4.3 Hz. Since then:
+
+- the breakaway (the median largest force in the readings before each start of a still wheel) and the angle's steps
+  are read off the wheel and given to the model (`plant.breakaway_of`, `quantum_of`); a rim is sticky when it starts
+  at over 1.5 times its fitted friction;
+- the fit is held to the wheel's verdicts: the runs are run again on the model, and if it does not ring where the
+  wheel rang and hold where it held, rims near the fit (a quarter and half the inertia, half the damping, 15 ms less
+  or 10 ms more delay) are tried and the one that agrees on most runs wins, then the closest peak force
+  (`check.match_verdicts`). A sticky rim is always scanned: many rims agree on a few stick-slip runs (a short fit of the
+  sticky model wheel read 132 and 57 ms, the scan 66 and 32 ms, the truth 55 and 30). On the old wheel's runs rims of
+  40 to 70 agreed on all ten. A model that agrees on under 80 % of the runs is not used: designs go on the wheel;
+- a wheel that rings on the first rung climbs again on a design of 160 (the bare R3 rang at 1.0 Hz on 650 too);
+- for a sticky rim the design search adds the breakaway push (`la_ff_breakaway`, `plugins/ffb/README.md`): the
+  plugin's push climbs to a ceiling of the sliding friction plus 1.1 or 1.4 times the gap to the highest start the
+  slide probe saw (1.2 on the wheel ladder), the slow ramp among the stages, a neighbour with a quarter less breakaway (where the push
+  over-pushes at every start) and design inertia up to four times the rim; its neighbours may track up to 30 mlock rms
+  (they are there to catch rings: the fast ramp tracked 18 to 24 on the rim with hands); the fitted rim still 15;
+- the designs tried on the wheel itself are on four times the rim (150 to 650), with the breakaway push, and on twice
+  it when even the gentlest of them rings;
+- a wheel that stands still over 45 % of the climb's slow moves (the old wheel 53 to 85 %, the real R3 2.5 %; the
+  R3 and bare model wheels 29 to 31 %, the geared, sticky and old-wheel ones 67 to 78 %) gets the slide probe
+  (`tools/la_bench/probe.py`), and only then is the breakaway given to the model: open-loop
+  torque ramps up at 400 per second until the wheel starts (its breakaway, read 5 to 10 % high on a light rim, more
+  on a heavy one), then holds 30, 50 or 70 % of that for 0.4 s, both ways round, the wheel walked home between: still
+  sliding at the end, the sliding friction is below the hold. The second run of the old wheel (2026-11-06) agreed as
+  well with a rim sliding on 150 (which has a design that holds) as with one on 358 (which has none), because the
+  wheel barely slid in it; on those two model rims the probe read 72 to 144 and 332 to 474. The scan then takes its
+  sliding frictions from that bracket, and of the rims that agree as well the design is made on the lowest friction
+  and must hold on the others (an under-push leaves the rest to the feedback, an over-push hunts at every stop);
+- the bench waits when the game's force stops while its steering goes on (the plugin's count of force updates stands
+  still for 0.5 s: another window in front of the game, 2026-11-06, left the servo pushing nothing for whole stages),
+  and runs that stage again once the force is back; after two minutes, or three stops in one stage, it gives up;
+- a stage or slide probe trial whose wheel readings stalled for 0.2 s, or came in bunches (over 5 % of the gaps 2.5
+  times the median), runs again too, and three in a row stop the check with nothing saved. The old wheel's 18:01 run
+  (2026-11-06) read in bursts 36 to 40 ms apart, with stalls of 0.3 to 2.4 s, while another program starved the PC
+  (MonoCruise's own threads froze on file opens in the same minutes): the fit moved to an inertia of 233 and a spring
+  of 3200, and the designs it chose rang. The rule flags all 9 of its stages and none of the 175 in every other saved
+  run, R3 and old wheel alike;
+- the check stops at once when another program writes to the servo (`RumbleChannel.foreign`: a heartbeat in the
+  block that is not its own). MonoCruise with lane departure on ran beside that run, and its thread, restarted by the
+  watchdog, turned the bench's servo off mid-stage: a fresh channel writes "servo off" once;
+- slide probe trials that disagree (a hold that stopped the wheel above one it kept sliding at: 276 stopped, 244 slid
+  at 18:01) bracket both, `mixed` in the probe, and the design is made on the lowest friction as before;
+- the clean 19:16 run (2026-11-06) showed the fixed breakaway push failing: the design it chose (0.5 Hz on 150,
+  push 371) sat at 400 to 440 for 1.5 s, the integral adding 27 a second, and the wheel never moved; 650 moved it and
+  stick-slipped into the buzz guard. Its starts ran 348 to 516. The model wheel now draws each stop's breakaway
+  within `breakaway_spread` (the probe's `start_spread`) and reproduces both; the plugin's push climbs instead (above);
+- the damping probe (`probe.damping_probe`, after the slide probe) starts the wheel on the ramp and holds 1.05, 1.2
+  and 1.35 of that start for 0.3 s each, both ways; push = damping * rate + spring * angle + friction over the steady
+  slides. On the old wheel's model the push ahead holds only with a damping 0.7 to 1.2 times the real one, and the
+  closed-loop fits read 250 to 2473 on the wheel. It reads the model's 595 at 561 to 569 and 1200 at 1158 to 1286; a
+  wheel that slides too fast for six steady slides reads nothing and the fit keeps it. A measured damping is held in
+  the fit and the verdict scan, and so is the spring the game reports on a wheel with a breakaway (the model's 1000
+  fitted at 8064; the old wheel's game read 533 to 692 against fits of 889 to 1163);
+- a step that stops more than 60 % short no longer counts as held (19:16 stopped 88 % short and passed; the geared
+  model stops exactly halfway on its 0.002 steps). On the old wheel's model the check now verifies 0.5 Hz on 150,
+  push ahead on the measured damping, ceiling 529;
+- the 21:45 run with the climbing push (2026-11-06, "almost smooth") was cut by the buzz guard on both steps: within
+  1.5 mlock of the target the rest push (the friction toward the target) flipped ±250 and the wheel hunted there at
+  4 Hz, though it started there on about 250 (its starts from rest ran 401 to 480), and on the swing the push climbed
+  only halfway 4 mlock short and stalled. With the breakaway push the plugin now pushes nothing within 1.5 mlock
+  (`FFB_BREAK_HOLD`) and climbs all the way from 3 mlock. The model cannot show that hunt (its wheel restarts only on
+  its drawn breakaway, never on 250), so only the wheel can confirm it. The damping probe read 424, spring 330 and
+  sliding 435 there: with the game's measured spring (about 690) its slides took 500 to 545 at 0.2 to 0.46 lock/s
+  whatever the speed, more friction than the 305 it creeps on;
+- the model wheel read the angle at 40 Hz where the game reads 60 whenever the FFB rate was a little over 120 (two
+  ticks of 120.6 Hz fall 0.1 ms short of 1/60 s): every fit and design on a real recording (120.4 to 120.8 Hz) ran on
+  a slower wheel than the real one, and a design that held at 120.0 rang at 120.6. It now reads within half a tick;
+- the walk home does not start for an offset under 0.03 lock (the stages run from where the wheel rests), and a walk
+  that does not settle goes once more on a gentle design (0.5 Hz on 160): its servo is designed on 650, and on the old
+  wheel it hunted and let go 0.3 lock off centre, which ended three checks;
+- a design that holds every stage but the 0.4 lock/s ramp the push ahead adds is kept when nothing holds them all,
+  with a note and not tried faster: LA's own target moves at most 0.2 lock/s. On the model rim sliding on 358 the
+  check found nothing before; now 0.5 Hz on 333 with the push ahead. On the one sliding on 150 it verified 1.25 Hz
+  with the breakaway push at 383 (two 2.5 Hz designs rang first and went back into the fit).
+
+On a model of the old wheel (`--simulate sticky`: inertia 55, sliding 200, breakaway 480, steps of 0.00058, 30 ms) the
+check now reads the breakaway at 501, fits inertia 65, agrees on 6 of 6 runs and verifies a 2 Hz design with the
+breakaway push at 301: the slow ramp tracks 4 mlock rms (the gentle rung 15, cut by the buzz guard), a 0.02 step
+rises in 0.07 s with 4 % overshoot. Expect small steps on slow moves all the same: each start overshoots by about
+the difference of the two frictions over the loop's 40 ms, whatever the servo does. Untested on the wheel.
 
 The output is responsiveness (the verified bandwidth and the rise of a 0.02 step), smoothness and the keys. Smoothness
 is steppy when the breakaway force is over 12 % of the servo's push, the wheel stands still over 25 % of the time

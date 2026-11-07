@@ -8,12 +8,14 @@ plugin's units: force out of 10000, angle in lock, ``inertia`` as in ``la_wheel_
 from __future__ import annotations
 
 import math
+import random
 from collections import deque
 from dataclasses import dataclass, replace
 
 from core.lane_departure.command import SERVO_OFF, PluginStatus, ServoCommand
 from tests.la.servo_sim import Plugin
 from tools.la_bench.metrics import interp
+from tools.la_bench.protocol import Stage
 
 STILL = 1e-4
 INERTIA_RANGE = (30.0, 20000.0)
@@ -22,6 +24,10 @@ DELAY_MAX_S = 0.1
 QUASI_STATIC_RATE = 0.02
 SATURATED_SHARE = 0.9
 DELAY_SCAN_S = (0.016, 0.024, 0.032, 0.04, 0.05)
+BREAKAWAY_STILL = 3
+BREAKAWAY_STARTS = 8
+QUANTUM_MIN = 1e-4
+SPREAD_SEED = 20261106
 
 
 @dataclass(frozen=True)
@@ -32,6 +38,10 @@ class WheelParams:
     ``quantum`` is the size of the steps the angle reads in (a coarse encoder); 0 reads it continuously.
     ``reading_hz`` is how often the game reads the wheel angle (its frame rate, 60 Hz on the R3 on 2026-11-06); 0 reads
     it at every FFB tick.
+    ``breakaway`` is the force a still wheel needs to start moving when it is above ``stick``, the force that holds a
+    moving one back (static over sliding friction: the old wheel broke free at about 460 and slid on about 230).
+    ``breakaway_spread`` gives every stop its own breakaway, up to that share either side (the old wheel's starts ran
+    311 to 526 from trial to trial at one spot), drawn from a fixed sequence so a replay repeats.
     """
 
     inertia: float = 650.0
@@ -44,6 +54,8 @@ class WheelParams:
     cog_period: float = 0.01
     quantum: float = 0.0
     reading_hz: float = 0.0
+    breakaway: float = 0.0
+    breakaway_spread: float = 0.0
 
 
 class SimWheel:
@@ -67,6 +79,15 @@ class SimWheel:
         self.held_reading: float | None = None
         self.read_at = 0.0
         self.pending: deque = deque()
+        self._draws = random.Random(SPREAD_SEED)
+        self.start_force = params.breakaway
+        self.standing = True
+
+    def _stood(self) -> None:
+        p = self.params
+        if not self.standing and p.breakaway_spread > 0.0:
+            self.start_force = p.breakaway * (1.0 + p.breakaway_spread * self._draws.uniform(-1.0, 1.0))
+        self.standing = True
 
     @property
     def time(self) -> float:
@@ -86,9 +107,11 @@ class SimWheel:
         if p.cog:
             force += p.cog * math.sin(2.0 * math.pi * self.steer / p.cog_period)
         if p.stick > 0.0:
-            if abs(self.rate) < STILL and abs(force) <= p.stick:
+            if abs(self.rate) < STILL and abs(force) <= max(p.stick, self.start_force):
                 self.rate = 0.0
+                self._stood()
                 return
+            self.standing = False
             force -= math.copysign(p.stick, self.rate if abs(self.rate) >= STILL else force)
         new = self.rate + force / p.inertia * h
         self.rate = 0.0 if p.stick > 0.0 and self.rate * new < 0.0 else new
@@ -97,7 +120,8 @@ class SimWheel:
     def substep(self, servo: ServoCommand = SERVO_OFF, torque: float = 0.0) -> None:
         if self.n % self.substeps == 0:
             hz = self.params.reading_hz
-            fresh = not hz or self.held_reading is None or self.time - self.read_at >= 1.0 / hz - 1e-9
+            # Within half a tick: at an FFB rate of 120.6 two ticks fall 0.1 ms short of 1/60 s and it read at 40 Hz.
+            fresh = not hz or self.held_reading is None or self.time - self.read_at >= 1.0 / hz - 0.5 / self.frame_hz
             if fresh:
                 self.held_reading, self.read_at = self._read(), self.time
                 self.readings += 1
@@ -143,7 +167,7 @@ class SimChannel:
         p = w.params
         return PluginStatus(
             present=True, hooked=True, version=5, steer_ok=True, damping_first=True, push_ahead=True, ff_plan=True,
-            servoing=bool(servo.direction), ff_applied=round(w.plugin.ff * p.sign),
+            breakaway=True, servoing=bool(servo.direction), ff_applied=round(w.plugin.ff * p.sign),
             steer=w.reading,
             steer_rate=w.plugin.rate, steer_frames=w.readings, frames=w.frames, frame_hz=w.frame_hz,
             game_force=round(-p.spring * w.steer * p.sign), applied=round(w.applied),
@@ -158,20 +182,26 @@ class SimChannel:
 
 
 def replay(run: dict, params: WheelParams, frame_hz: float, substeps: int = 4) -> tuple[list[float], list[float]]:
-    """The wheel angle over time on a model wheel given the requests ``run`` sent."""
+    """The wheel angle over time on a model wheel given the requests ``run`` sent, the plan rebuilt from its stage."""
     sent, g = run["sent"], run["gains"]
     wheel = SimWheel(params, frame_hz, substeps, steer0=run["samples"][0][1])
+    design = run.get("design", {})
+    pushes = any(design.get(k) for k in ("ff_inertia", "ff_damping", "ff_friction"))
+    plan = design.get("plan_s", 0.0) if pushes else 0.0
+    stage = Stage.from_dict(run["stage"]) if plan else None
     servo = SERVO_OFF
     i = 0
     end = run["samples"][-1][0]
     ts, ys = [], []
     while wheel.time < end:
         while i < len(sent) and sent[i][0] <= wheel.time:
+            _, plan_rate, plan_accel = stage.aim3(sent[i][0] + plan) if stage else (0.0, 0.0, 0.0)
             servo = ServoCommand(target=sent[i][1], rate=sent[i][2], kp=g["kp"], kd=g["kd"], ki=g["ki"], cap=g["cap"],
                                  direction=g["direction"], damping_first=g.get("damping_first", False),
                                  accel=sent[i][3] if len(sent[i]) > 3 else 0.0, ff_inertia=g.get("ff_inertia", 0.0),
                                  ff_damping=g.get("ff_damping", 0.0), ff_friction=g.get("ff_friction", 0.0),
-                                 lead_s=g.get("lead_s", 0.0))
+                                 lead_s=g.get("lead_s", 0.0), ff_plan=bool(stage), plan_rate=plan_rate,
+                                 plan_accel=plan_accel, ff_breakaway=g.get("ff_breakaway", 0.0))
             i += 1
         ts.append(wheel.time)
         ys.append(wheel.steer)
@@ -190,11 +220,38 @@ def estimate_spring(runs: list[dict], sign: int) -> float:
     return max(0.0, -sum((x - mx) * (y - my) for x, y in pts) / var) if var > 1e-9 else 0.0
 
 
+def breakaway_of(runs: list[dict]) -> float:
+    """The force that starts a still wheel: the median of the largest applied force in the readings before each start.
+
+    Read off the wheel, not fitted: the old wheel broke free at about 460 where the fit read a friction of 228, the
+    R3 at about 106 under its fitted 164 (so no breakaway above its friction). 0 with fewer than BREAKAWAY_STARTS.
+    """
+    forces = []
+    for run in runs:
+        s = run["samples"]
+        for i in range(BREAKAWAY_STILL, len(s)):
+            if s[i][1] != s[i - 1][1] and all(s[j][1] == s[i - 1][1] for j in range(i - BREAKAWAY_STILL, i)):
+                forces.append(max(abs(x[3]) for x in s[i - BREAKAWAY_STILL:i]))
+    forces.sort()
+    return forces[len(forces) // 2] if len(forces) >= BREAKAWAY_STARTS else 0.0
+
+
+def quantum_of(runs: list[dict]) -> float:
+    """The size of the angle's steps (the 2nd percentile of its changes), 0 for a fine encoder (the R3 read 0.00002)."""
+    deltas = sorted(abs(b[1] - a[1]) for r in runs for a, b in zip(r["samples"], r["samples"][1:]) if b[1] != a[1])
+    q = deltas[len(deltas) // 50] if deltas else 0.0
+    return q if q >= QUANTUM_MIN else 0.0
+
+
 SIM_WHEELS = {
     "r3": WheelParams(inertia=380.0, damping=630.0, stick=190.0, spring=2500.0, delay_s=0.036),
     "bare": WheelParams(inertia=150.0, damping=250.0, stick=190.0, spring=1500.0, delay_s=0.030),
     "geared": WheelParams(inertia=600.0, damping=900.0, stick=450.0, spring=3000.0, delay_s=0.025, cog=250.0,
                           cog_period=0.012, quantum=0.002),
+    "sticky": WheelParams(inertia=55.0, damping=500.0, stick=200.0, spring=500.0, delay_s=0.03, quantum=0.00058,
+                          breakaway=480.0),
+    "old": WheelParams(inertia=30.0, damping=595.0, stick=305.0, spring=650.0, delay_s=0.042, quantum=0.00058,
+                       reading_hz=60.0, breakaway=436.0, breakaway_spread=0.2),
 }
 
 
@@ -267,12 +324,14 @@ def _swing(ys: list[float], start: float) -> tuple[float, float]:
 
 
 def fit(runs: list[dict], frame_hz: float, base: WheelParams, max_evals: int = 600, every: int = 2,
-        ring: bool = True) -> FitResult:
+        ring: bool = True, damping_held: bool = False) -> FitResult:
     """Fit the rim to ``runs`` by Nelder-Mead: the wheel angle where the servo stayed linear, the swing where it pinned.
 
     A servo pinned at its cap with a delay is a relay, its limit cycle chaotic in phase but not in size, so those runs
     are matched on the size of the swing, which is what pins the delay. The delay is scanned first, it is flat in
-    the small-signal runs. ``ring=False`` leaves the pinned runs out.
+    the small-signal runs. ``ring=False`` leaves the pinned runs out. A wheel with a breakaway keeps the game's spring
+    as measured: friction hides it in small moves, and on a model of the old wheel the fit read 8064 for 1000.
+    ``damping_held`` keeps ``base``'s damping (the damping probe's).
     """
     runs = [r for r in runs if len(r["samples"]) > 10]
     linear = [r for r in runs if _peak(r) < SATURATED_SHARE * r["gains"]["cap"]]
@@ -298,16 +357,28 @@ def fit(runs: list[dict], frame_hz: float, base: WheelParams, max_evals: int = 6
         vals = terms(p)
         return math.sqrt(sum(v * v for v in vals) / len(vals))
 
-    start = replace(base, inertia=400.0, damping=400.0, stick=150.0, spring=estimate_spring(linear or runs, base.sign))
+    spring = estimate_spring(linear or runs, base.sign)
+    start = replace(base, inertia=400.0, damping=base.damping if damping_held else 400.0, stick=150.0, spring=spring)
     x0 = _vector(start)
+    keep = [i for i in (0, 1, 2, 3) if not (i == 1 and damping_held)
+            and not (i == 3 and base.breakaway > 0.0 and spring > 0.0)]
+
+    def full(v: list[float]) -> list[float]:
+        x = list(x0)
+        for k, i in enumerate(keep + [4]):
+            x[i] = v[k]
+        return x
+
     each = max(20, max_evals // (2 * len(DELAY_SCAN_S)))
     best = None
     evals = 0
     for delay in DELAY_SCAN_S:
-        x, value, n = _nelder_mead(lambda v, d=delay: cost(v + [d]), x0[:4], [0.5, 0.5, 0.5, 0.7], each)
+        x, value, n = _nelder_mead(lambda v, d=delay: cost(full(v + [d])), [x0[i] for i in keep],
+                                   [[0.5, 0.5, 0.5, 0.7][i] for i in keep], each)
         evals += n
         if best is None or value < best[1]:
             best = (x + [delay], value)
-    x, value, n = _nelder_mead(cost, best[0], [0.15, 0.15, 0.15, 0.2, 0.004], max(40, max_evals - evals))
-    final = _params(x, base)
+    x, value, n = _nelder_mead(lambda v: cost(full(v)), best[0], [[0.15, 0.15, 0.15, 0.2][i] for i in keep] + [0.004],
+                               max(40, max_evals - evals))
+    final = _params(full(x), base)
     return FitResult(final, value, evals + n, terms(final), len(linear))

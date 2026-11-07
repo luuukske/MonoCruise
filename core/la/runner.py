@@ -225,14 +225,14 @@ class AssistRunner:
         design = (_setting("la_bandwidth_hz", 0.0), _setting("la_damping", 0.0),
                   bool(getattr(Settings, "la_damping_first", False)), _setting("la_servo_cap", 0.0))
         ahead = (_setting("la_ff_inertia", 0.0), _setting("la_ff_damping", 0.0), _setting("la_ff_friction", 0.0),
-                 _setting("la_servo_lead_s", 0.0), _setting("la_ff_plan_s", 0.0))
+                 _setting("la_servo_lead_s", 0.0), _setting("la_ff_plan_s", 0.0), _setting("la_ff_breakaway", 0.0))
         key = (arm, strength, bool(getattr(Settings, "la_tmp_enabled", False)),
                bool(getattr(Settings, "la_follow_all", False)), max(50.0, min(20000.0, inertia)), cancel,
                bool(getattr(Settings, "la_always_on", False)), *design, *ahead)
         line = ("LA settings: from %.0f km/h, strength %.2f, TruckersMP %s, follow everywhere %s, wheel inertia %.0f, "
                 "game force cancelled %.2f, always on (test, no hand-backs) %s, servo design %.2f Hz, damping %.2f, "
                 "damping first %s, servo cap %.0f (0 is 3000), push ahead inertia %.0f, damping %.0f, friction %.0f, "
-                "lead %.3f s, plan %.3f s", *key)
+                "lead %.3f s, plan %.3f s, breakaway %.0f", *key)
         return key, AssistTuning(
             arm_kmh=arm, disarm_kmh=max(0.0, arm - _ARM_MARGIN_KMH),
             wheel=WheelTuning(strength=strength, inertia=key[4], cancel_share=key[5], **design_overrides(*design),

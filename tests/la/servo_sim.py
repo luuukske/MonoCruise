@@ -13,7 +13,14 @@ from dataclasses import dataclass, field
 from types import SimpleNamespace
 
 from core.la.controller import AssistTuning, Gains, LaneAssist, Wheel
-from core.lane_departure.command import SERVO_FF_PLAN, servo_ahead, servo_fields, servo_flags, servo_plan
+from core.lane_departure.command import (
+    SERVO_FF_PLAN,
+    servo_ahead,
+    servo_breakaway,
+    servo_fields,
+    servo_flags,
+    servo_plan,
+)
 from tests.lane_departure.test_detector import DT, SPEED, START_S, _arc_x, _arc_z, frame_at, make_route
 
 SPRING = 34570.0
@@ -31,6 +38,10 @@ D_SHARE = 0.5
 LEAD_MAX_S = 0.08
 FF_STILL_RATE = 0.02
 FF_REST_BAND = 0.002
+STUCK_FROM = 1.5
+BREAK_RAMP_S = 0.3
+BREAK_BAND = 0.003
+BREAK_HOLD = 0.0015
 I_MOVE_RATE = 0.3
 D_LAG_MAX_S = 0.05
 I_SHARE = 1.0
@@ -91,6 +102,14 @@ class Plugin:
     since: float = 0.0
     d_ref: float = 0.0
     interval: float = 0.0
+    still: float = 0.0
+
+    def stuck(self) -> float:
+        """Mirror of ffb_servo_stuck: the breakaway ramp, 0 until the reading stood STUCK_FROM intervals, 1 after
+        BREAK_RAMP_S more."""
+        if self.interval <= 0.0:
+            return 0.0
+        return min(1.0, max(0.0, (self.still - STUCK_FROM * self.interval) / BREAK_RAMP_S))
 
     def _buzz(self, want: float, angle: float) -> None:
         sign = 1 if want > BUZZ_MIN else (-1 if want < -BUZZ_MIN else 0)
@@ -134,11 +153,14 @@ class Plugin:
             self.age += dt
         self.base += (max(-3000.0, min(3000.0, torque)) - self.base) * (1.0 - math.exp(-dt / TORQUE_TAU_S))
         self.since += dt
+        self.still += dt
         if fresh:
             if self.prev is not None and self.since > 0.0:
                 self.interval = self.interval + (self.since - self.interval) * 0.05 if self.interval else self.since
             if self.prev is not None:
                 self.rate += ((steer - self.prev) / self.since - self.rate) * (1.0 - math.exp(-self.since / RATE_TAU_S))
+            if self.prev is None or steer != self.prev:
+                self.still = 0.0
             self.prev = steer
             self.since = 0.0
         self.game_lp += (game - self.game_lp) * (1.0 - math.exp(-dt / CANCEL_TAU_S))
@@ -160,8 +182,14 @@ class Plugin:
                 ff_accel = plan[1]
                 ff_rate = plan[0] + ff_accel * min(self.age, EXTRAP_S)
             moving = math.tanh(ff_rate / FF_STILL_RATE)
-            way = moving + (1.0 - abs(moving)) * math.tanh(err / FF_REST_BAND)
-            ff = ff_inertia * ff_accel + ff_damping * ff_rate + ff_friction * way
+            rest = (1.0 - abs(moving)) * math.tanh(err / FF_REST_BAND)
+            breakaway = servo_breakaway(servo, fields)
+            friction = ff_friction
+            if ff_friction > 0.0 and breakaway > ff_friction:
+                near = min(1.0, max(0.0, (abs(err) - BREAK_HOLD) / (BREAK_BAND - BREAK_HOLD)))
+                rest *= near
+                friction += (breakaway - ff_friction) * self.stuck() * max(abs(moving), near)
+            ff = ff_inertia * ff_accel + ff_damping * ff_rate + (friction * (moving + rest) if ff_friction > 0.0 else 0.0)
             self.ff = _clamp(ff, cap)
             p = kp * err + self.ff
             d_lag = min(D_LAG_MAX_S, 0.5 * self.interval + RATE_TAU_S) if plan is not None else 0.0

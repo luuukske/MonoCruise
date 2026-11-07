@@ -33,7 +33,8 @@ if str(ROOT) not in sys.path:
 from core.lane_departure.command import SERVO_OFF, VERSION, PluginStatus, RumbleChannel, ServoCommand
 from tools.la_bench.bench import (ANGLE_LIMIT, CENTRE_LIMIT, Bench, BenchAbort, WheelRunaway, _round, sim_bench)
 from tools.la_bench.metrics import describe, summarize
-from tools.la_bench.check import run_check, summary
+from tools.la_bench.check import WHEEL_LADDER_BREAKAWAY, run_check, summary
+from tools.la_bench.design import breakaway_top, sticky
 from tools.la_bench.plant import SIM_WHEELS, SimChannel, SimClock, WheelParams, fit, replay
 from tools.la_bench.protocol import SUITES, Design, Stage
 from tools.la_bench.speed import HALF_RATES, RAMP_CORNER_S, RAMP_RATES, STEP_SIZES, rim_accel, run_speed
@@ -187,7 +188,8 @@ def _config_design() -> dict:
         return {}
     keys = {"la_wheel_inertia": "inertia", "la_bandwidth_hz": "bandwidth", "la_damping": "damping",
             "la_servo_cap": "cap", "la_ff_inertia": "ff_inertia", "la_ff_damping": "ff_damping",
-            "la_ff_friction": "ff_friction", "la_servo_lead_s": "lead", "la_ff_plan_s": "plan"}
+            "la_ff_friction": "ff_friction", "la_servo_lead_s": "lead", "la_ff_plan_s": "plan",
+            "la_ff_breakaway": "ff_breakaway"}
     out = {name: float(raw[key]) for key, name in keys.items() if isinstance(raw.get(key), (int, float)) and raw[key] > 0}
     if raw.get("la_damping_first"):
         out["law"] = "damping-first"
@@ -210,6 +212,9 @@ def cmd_speed(args) -> int:
         return 1
     ahead = {"ff_inertia": rim.inertia, "ff_damping": rim.damping, "ff_friction": rim.stick} if args.push_ahead else {
         "ff_inertia": args.ff_inertia, "ff_damping": args.ff_damping, "ff_friction": args.ff_friction}
+    breakaway = getattr(args, "ff_breakaway", None)
+    ahead["ff_breakaway"] = breakaway if breakaway is not None else (
+        rim.stick + WHEEL_LADDER_BREAKAWAY * (breakaway_top(rim) - rim.stick) if args.push_ahead and sticky(rim) else 0.0)
     lead = args.lead if args.lead is not None else 0.0
     plan = args.plan if args.plan is not None else (rim.delay_s if args.push_ahead else 0.0)
     design = Design(bandwidth_hz=args.bandwidth, damping=args.damping, inertia=args.inertia, cap=int(args.cap),
@@ -361,6 +366,9 @@ def main() -> int:
     p.add_argument("--ff-inertia", type=float, default=cfg.get("ff_inertia", 0.0), help="la_ff_inertia")
     p.add_argument("--ff-damping", type=float, default=cfg.get("ff_damping", 0.0), help="la_ff_damping")
     p.add_argument("--ff-friction", type=float, default=cfg.get("ff_friction", 0.0), help="la_ff_friction")
+    p.add_argument("--ff-breakaway", type=float, default=cfg.get("ff_breakaway"),
+                   help="la_ff_breakaway: what the friction push climbs to while the wheel stands (default: with "
+                   "--push-ahead, a sticky --rim's friction plus 1.2 times the gap to its highest start)")
     p.add_argument("--lead", type=float, default=cfg.get("lead"), help="la_servo_lead_s, seconds (default 0)")
     p.add_argument("--plan", type=float, default=cfg.get("plan"),
                    help="la_ff_plan_s: the push ahead follows the plan this early, s (default: the --rim delay)")

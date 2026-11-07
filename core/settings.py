@@ -165,6 +165,8 @@ class Settings(metaclass=_SingletonMeta):
     la_servo_lead_s: float = 0.0
     # How far ahead of now the push ahead follows the target's planned motion (the wheel's delay, s); 0 is now.
     la_ff_plan_s: float = 0.0
+    # What the friction push climbs to while the wheel stands (a wheel that needs more to start than to slide).
+    la_ff_breakaway: float = 0.0
     # Share of the game's steady FFB force removed while the assist steers, 0 to 1; 0 keeps the game's feel.
     la_cancel_share: float = 0.0
     la_kappa_per_steer: float = 0.0

@@ -69,6 +69,7 @@ _OFF_SERVO_FLAGS = 90
 _OFF_AHEAD = 92
 _OFF_FF_APPLIED = 112
 _OFF_PLAN = 116
+_OFF_BREAKAWAY = 124
 
 STATUS_HOOKED = 1
 STATUS_FORCE_SEEN = 2
@@ -81,6 +82,7 @@ STATUS_ONE_SIDED = 128
 STATUS_DAMP_FIRST = 256
 STATUS_PUSH_AHEAD = 512
 STATUS_FF_PLAN = 1024
+STATUS_BREAKAWAY = 2048
 SERVO_DAMP_FIRST = 1
 SERVO_FF_PLAN = 2
 
@@ -96,7 +98,8 @@ class ServoCommand:
     ``accel`` is the target's acceleration; ``ff_*`` the rim's inertia, damping and friction the plugin pushes ahead
     from the target's motion, and ``lead_s`` how far ahead it reads the wheel (layout 5; 0 is none). With ``ff_plan``
     the push ahead uses ``plan_rate`` and ``plan_accel`` instead: the target's rate and acceleration a wheel delay
-    from now, as the commanding feature plans them, so the rim starts and stops on time.
+    from now, as the commanding feature plans them, so the rim starts and stops on time. ``ff_breakaway`` is the
+    friction push while the wheel stands, for a wheel that needs more to start than to slide (status bit 2048).
     """
     target: float = 0.0
     kp: float = 0.0
@@ -116,6 +119,7 @@ class ServoCommand:
     ff_plan: bool = False
     plan_rate: float = 0.0
     plan_accel: float = 0.0
+    ff_breakaway: float = 0.0
 
 
 SERVO_OFF = ServoCommand()
@@ -145,6 +149,7 @@ class PluginStatus:
     damping_first: bool = False
     push_ahead: bool = False
     ff_plan: bool = False
+    breakaway: bool = False
     steer: float = 0.0
     steer_rate: float = 0.0
     steer_frames: int = 0
@@ -208,6 +213,7 @@ def decode_status(raw: bytes) -> PluginStatus:
         base.update(
             push_ahead=bool(bits & STATUS_PUSH_AHEAD),
             ff_plan=bool(bits & STATUS_FF_PLAN),
+            breakaway=bool(bits & STATUS_BREAKAWAY),
             ff_applied=_I16.unpack_from(raw, _OFF_FF_APPLIED)[0],
         )
     return PluginStatus(**base)
@@ -259,6 +265,13 @@ def servo_plan(cmd: ServoCommand, fields: tuple) -> tuple:
     return values
 
 
+def servo_breakaway(cmd: ServoCommand, fields: tuple) -> float:
+    """The breakaway push as written at offset 124: 0 while the servo is off, for a bad number or below zero."""
+    if not fields[4] or not math.isfinite(cmd.ff_breakaway):
+        return 0.0
+    return max(0.0, cmd.ff_breakaway)
+
+
 def servo_flags(cmd: ServoCommand, fields: tuple) -> int:
     """The flag byte at offset 90: damping first, the planned push ahead; only while the servo is on."""
     if not fields[4]:
@@ -268,13 +281,15 @@ def servo_flags(cmd: ServoCommand, fields: tuple) -> int:
 
 
 class RumbleChannel:
-    """Writer for the command block. Absent plugin, non-Windows or any failure reads as ``PluginStatus()``."""
+    """Writer for the command block. Absent plugin, non-Windows or any failure reads as ``PluginStatus()``.
+    ``foreign`` counts the publishes that found another writer's heartbeat in the block since this one's last."""
 
     def __init__(self) -> None:
         self._buf: mmap.mmap | None = None
         self._size = SIZE
         self._next_open = 0.0
         self._heartbeat = 0
+        self.foreign = 0
         self._seq = 0
         self._sent: tuple[int, int, int] | None = None
         self._sent_torque: int | None = None
@@ -322,13 +337,15 @@ class RumbleChannel:
                 self._sent_torque = torque_units(torque)
                 _I16.pack_into(self._buf, _OFF_TORQUE, self._sent_torque)
             fields = servo_fields(servo)
-            wanted = (fields, servo_flags(servo, fields), servo_ahead(servo, fields), servo_plan(servo, fields))
+            wanted = (fields, servo_flags(servo, fields), servo_ahead(servo, fields), servo_plan(servo, fields),
+                      servo_breakaway(servo, fields))
             if status.version >= VERSION and wanted != self._sent_servo:
                 self._sent_servo = wanted
                 _U8.pack_into(self._buf, _OFF_SERVO_FLAGS, wanted[1])
                 if status.version >= AHEAD_VERSION:
                     _AHEAD.pack_into(self._buf, _OFF_AHEAD, *wanted[2])
                     _PLAN.pack_into(self._buf, _OFF_PLAN, *wanted[3])
+                    _F32.pack_into(self._buf, _OFF_BREAKAWAY, wanted[4])
                 _SERVO4.pack_into(self._buf, _OFF_SERVO4, *fields[5:8])
                 _SERVO.pack_into(self._buf, _OFF_SERVO, *fields[:5], fields[8])
                 self._stamp = (self._stamp + 1) & 0xFFFFFFFF
@@ -340,6 +357,8 @@ class RumbleChannel:
                     _U32.pack_into(self._buf, _OFF_SEQ, self._seq)
                 _CMD.pack_into(self._buf, _OFF_CMD, *want)
                 self._sent = want
+            if self._heartbeat and _U32.unpack_from(self._buf, _OFF_HEARTBEAT)[0] != self._heartbeat:
+                self.foreign += 1
             self._heartbeat = (self._heartbeat + 1) & 0xFFFFFFFF or 1
             _U32.pack_into(self._buf, _OFF_HEARTBEAT, self._heartbeat)
             return status
@@ -360,4 +379,5 @@ class RumbleChannel:
             except Exception:
                 logger.debug("FFB command block close failed", exc_info=True)
         self._buf = None
+        self._heartbeat = 0
         self._sent = self._sent_torque = self._sent_servo = None

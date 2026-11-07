@@ -57,7 +57,7 @@ OWN_PLUGINS: tuple[OwnPlugin, ...] = (
     OwnPlugin(name="monocruise_tmp.dll", sha="9f4dbd2477808c65668df4babf7c41506bc9be23", label="TruckersMP plugin"),
     # Built from plugins/ffb/ (lane departure rumble and steering); it patches the wheel's force, so opt-in.
     OwnPlugin(
-        name="monocruise_ffb.dll", sha="51b28a8935ee53cbe517b296bc5881310ad6289c",
+        name="monocruise_ffb.dll", sha="c426d15c078f22c9361e7cf2c194346a0016c374",
         label="Lane departure plugin", wanted=_lane_features_on,
     ),
 )

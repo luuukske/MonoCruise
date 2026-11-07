@@ -23,7 +23,8 @@ class Design:
     """The servo design under test: what ``WheelActuator.gains`` turns into kp, kd and ki.
 
     ``spring`` is the game's centring the design is told about (units per lock); standing it is about 0.
-    ``ff_*`` and ``lead_s`` are the plugin's push ahead and lead (layout 5), 0 is none.
+    ``ff_*`` and ``lead_s`` are the plugin's push ahead and lead (layout 5), 0 is none; ``ff_breakaway`` the friction
+    push while the wheel stands (status bit 2048).
     """
 
     bandwidth_hz: float = 2.0
@@ -39,12 +40,14 @@ class Design:
     ff_friction: float = 0.0
     lead_s: float = 0.0
     plan_s: float = 0.0
+    ff_breakaway: float = 0.0
 
     @property
     def label(self) -> str:
         base = f"bw{self.bandwidth_hz:g} z{self.damping:g} J{self.inertia:g}"
         base += " dfirst" if self.damping_first else ""
         base += " ahead" if self.ff_inertia or self.ff_damping or self.ff_friction else ""
+        base += f" break{self.ff_breakaway:.0f}" if self.ff_breakaway > self.ff_friction > 0.0 else ""
         base += f" plan{self.plan_s * 1000:.0f}ms" if self.plan_s else ""
         return base + (f" lead{self.lead_s * 1000:.0f}ms" if self.lead_s else "")
 

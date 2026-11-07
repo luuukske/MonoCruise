@@ -109,6 +109,7 @@ static uint32_t g_stamp_last;
 static LARGE_INTEGER g_stamp_at;
 static double g_frame_hz;
 static LARGE_INTEGER g_steer_at;
+static LARGE_INTEGER g_steer_moved_at;
 static LARGE_INTEGER g_qpf;
 static LARGE_INTEGER g_qpc;
 static LARGE_INTEGER g_hb_at;
@@ -444,6 +445,16 @@ static double steer_age(void) {
     return (double)(now.QuadPart - g_steer_at.QuadPart) / (double)g_qpf.QuadPart;
 }
 
+/* Seconds since the steering reading last changed value; 0 before the first change. */
+static double steer_still(void) {
+    LARGE_INTEGER now;
+    if (g_steer_moved_at.QuadPart == 0 || g_qpf.QuadPart == 0) {
+        return 0.0;
+    }
+    QueryPerformanceCounter(&now);
+    return (double)(now.QuadPart - g_steer_moved_at.QuadPart) / (double)g_qpf.QuadPart;
+}
+
 /* The target and the wheel are both taken ``ahead`` seconds on: where the target will be and where the wheel will
    be, read on at its rate, when the force reaches the rim. */
 static double servo_delta(int live, double dt) {
@@ -466,6 +477,8 @@ static double servo_delta(int live, double dt) {
         in.ff_inertia = ffb_finite((double)g_map->ff_inertia);
         in.ff_damping = ffb_finite((double)g_map->ff_damping);
         in.ff_friction = ffb_finite((double)g_map->ff_friction);
+        in.ff_breakaway = ffb_finite((double)g_map->ff_breakaway);
+        in.stuck = ffb_servo_stuck(steer_still(), (double)g_steer_interval);
         age = target_age(g_map->servo_stamp);
         ffb_servo_aim(in.target, (double)g_map->servo_rate, in.accel, age + ahead, &target, &in.rate);
         ffb_servo_ff_motion(&in, (g_map->servo_flags & FFB_SF_FF_PLAN) != 0, (double)g_map->plan_rate,
@@ -850,6 +863,7 @@ static void open_map(void) {
         g_map->servo_lead = 0.0f;
         g_map->plan_rate = 0.0f;
         g_map->plan_accel = 0.0f;
+        g_map->ff_breakaway = 0.0f;
         g_map->ff_applied = 0;
         g_map->steer_frames = 0;
         g_map->status = 0;
@@ -939,7 +953,7 @@ static void publish_status(void) {
     if (g_dead) {
         bits |= FFB_ST_DEAD;
     }
-    g_map->status = bits | FFB_ST_ONE_SIDED | FFB_ST_DAMP_FIRST | FFB_ST_PUSH_AHEAD | FFB_ST_FF_PLAN;
+    g_map->status = bits | FFB_ST_ONE_SIDED | FFB_ST_DAMP_FIRST | FFB_ST_PUSH_AHEAD | FFB_ST_FF_PLAN | FFB_ST_BREAKAWAY;
 }
 
 static void WINAPI on_frame(unsigned int event, const void *info, void *ctx) {
@@ -1020,6 +1034,9 @@ static void WINAPI on_steering(const char *name, unsigned int index, const void 
     } else {
         g_steer_rate = 0.0f;
         g_steer_rate_fast = 0.0f;
+    }
+    if (v != prev || g_steer_moved_at.QuadPart == 0) {
+        g_steer_moved_at = now;
     }
     last = now;
     prev = v;

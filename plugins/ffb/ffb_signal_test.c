@@ -176,6 +176,8 @@ static FfbServoIn servo_in(double target, double rate, int dir) {
     in.ff_inertia = 0.0;
     in.ff_damping = 0.0;
     in.ff_friction = 0.0;
+    in.ff_breakaway = 0.0;
+    in.stuck = 0.0;
     in.ff_rate = rate;
     in.ff_accel = 0.0;
     in.d_lag = 0.0;
@@ -289,6 +291,41 @@ static void test_the_push_ahead_moves_the_rim_as_the_target_moves(void) {
     in.only = -1;
     ffb_servo_init(&s);
     expect(ffb_servo_pid(&s, &in, 0.0, 0.0, 0.5, DT) == 0.0, "one-sided, the push ahead never pushes the other way");
+}
+
+static void test_a_standing_wheel_gets_the_breakaway_and_a_moving_one_the_sliding_friction(void) {
+    FfbServoIn in = servo_in(0.0, 0.0, 1);
+    double iv = 1.0 / 60.0;
+    in.ff_friction = 200.0;
+    in.ff_breakaway = 480.0;
+    in.ff_rate = 0.5;
+    expect(fabs(ffb_servo_ff(&in, 2500.0, 0.0) - 200.0 * tanh(25.0)) < 1e-6, "moving (stuck 0) it pushes the sliding friction");
+    in.stuck = 1.0;
+    expect(fabs(ffb_servo_ff(&in, 2500.0, 0.0) - 480.0 * tanh(25.0)) < 1e-6, "standing it pushes the breakaway");
+    in.ff_rate = 0.0;
+    double b = FFB_BREAK_BAND;
+    double h = FFB_BREAK_HOLD;
+    double rest = FFB_FF_REST_BAND;
+    double mid = 0.5 * (b + h);
+    expect(fabs(ffb_servo_ff(&in, 2500.0, b) - 480.0 * tanh(b / rest)) < 1e-6
+               && ffb_servo_ff(&in, 2500.0, 0.0) == 0.0,
+           "at rest the band from the target the whole breakaway toward it, and nothing on the target");
+    expect(ffb_servo_ff(&in, 2500.0, h) == 0.0 && ffb_servo_ff(&in, 2500.0, -0.5 * h) == 0.0,
+           "within the hold of the target no push at all: the rest push hunted the old wheel round it");
+    expect(fabs(ffb_servo_ff(&in, 2500.0, mid) - 340.0 * 0.5 * tanh(mid / rest)) < 1e-6, "between, a share of both");
+    in.ff_breakaway = 100.0;
+    expect(fabs(ffb_servo_ff(&in, 2500.0, 2.0 * b) - 200.0 * tanh(2.0 * b / rest)) < 1e-6,
+           "a breakaway under the friction is none");
+    in.ff_breakaway = 0.0;
+    expect(fabs(ffb_servo_ff(&in, 2500.0, h) - 200.0 * tanh(h / rest)) < 1e-6,
+           "without the breakaway push the rest push is as it was, hold or not");
+    in.ff_breakaway = 480.0;
+    in.stuck = nan("");
+    expect(fabs(ffb_servo_ff(&in, 2500.0, 2.0 * b) - 200.0 * tanh(2.0 * b / rest)) < 1e-6, "an unknown stand is moving");
+    expect(ffb_servo_stuck(1.5 * iv, iv) == 0.0 && fabs(ffb_servo_stuck(1.5 * iv + 0.15, iv) - 0.5) < 1e-9
+               && fabs(ffb_servo_stuck(1.5 * iv + FFB_BREAK_RAMP_S, iv) - 1.0) < 1e-9 && ffb_servo_stuck(5.0, iv) == 1.0,
+           "it climbs over FFB_BREAK_RAMP_S once 1.5 readings came without a change");
+    expect(ffb_servo_stuck(1.0, 0.0) == 0.0 && ffb_servo_stuck(nan(""), iv) == 0.0, "no reading rate, no stand");
 }
 
 static void test_with_the_plan_the_damping_lags_like_the_reading_and_the_integral_holds_on_fast_moves(void) {
@@ -473,6 +510,7 @@ int main(void) {
     test_one_sided_it_never_pushes_the_other_way();
     test_the_damping_resists_the_wheel_moving_off_the_target_rate();
     test_the_push_ahead_moves_the_rim_as_the_target_moves();
+    test_a_standing_wheel_gets_the_breakaway_and_a_moving_one_the_sliding_friction();
     test_the_target_and_the_wheel_are_read_ahead_only_when_asked();
     test_with_the_plan_the_damping_lags_like_the_reading_and_the_integral_holds_on_fast_moves();
     test_damping_first_keeps_the_damping_room_under_the_cap();

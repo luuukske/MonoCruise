@@ -55,6 +55,18 @@ patches the `SetParameters` slot of its constant-force effect. Each call it read
   at most 0.05 s, and the integral holds while the target or the plan moves faster than 0.3 lock/s (LA's target never
   does). On the wheel the integral wound up to about 650 during a fast half lock on the reading's lag and pushed
   the wheel 6 mlock past the stop for over a second; in the model the lagged damping halved the swing after a stop;
+- the breakaway push, if asked (offset 124, status bit 2048, 0 by default): while the wheel stands the friction push
+  climbs from the sliding friction to this ceiling over 0.3 s (`FFB_BREAK_RAMP_S`), and drops back the moment the
+  reading changes. "Stands" is read off the angle, not its rate: the climb starts once 1.5 readings came without a
+  change, so a coarse encoder's slow slide (steps with still readings between) does not count as standing. It climbs
+  only while the target moves or is more than 1.5 mlock away (`FFB_BREAK_HOLD`, all of it from 3 mlock,
+  `FFB_BREAK_BAND`), and within 1.5 mlock the rest push toward the target is off too, so a wheel stopped near its
+  target is not restarted into a hunt (the old wheel hunted ±1.5 mlock at 4 Hz on the rest push alone, 21:45). The old wheel (a Thrustmaster, 2026-11-06) slides on about
+  305 but starts on anything from 311 to 526 from one try to the next, with angle steps of 0.0006 lock: without a
+  push the stick-slip flipped the push and the buzz guard cut every slow ramp; a fixed push (370 at 19:16) left it
+  standing with the servo at 440, or lurched it where it started easily. With the climb to just above its highest
+  start, on its model (each stop drawing its own start force) a 0.5 Hz design holds every stage, slow tracking 5 to
+  10 mlock rms where the wheel stood at 37 to 48;
 - the lead, if asked (layout 5, 0 by default): the wheel and the target are read that many seconds ahead (the wheel
   on at its rate, plus the age of the steering reading, which comes at the game's frame rate, 60 Hz on the R3),
   together at most 0.08 s: where both are when the force reaches the rim. In the model it cut a small step's
@@ -85,7 +97,7 @@ Steering values are `truck.input.steering` units: -1 to 1 of lock, counterclockw
 | 12 | event counter | MonoCruise |
 | 16 | torque (i16, out of 10000, signed like the game's magnitude) | MonoCruise |
 | 18 | game force (i16, the game's magnitude low-passed at 0.1 s) | plugin |
-| 20 | status bits: hooked, force seen, rumbling, dead, torque, servo, steering channel, one-sided servo (128), damping first (256), push ahead and lead (512), the planned push ahead (1024) | plugin |
+| 20 | status bits: hooked, force seen, rumbling, dead, torque, servo, steering channel, one-sided servo (128), damping first (256), push ahead and lead (512), the planned push ahead (1024), the breakaway push (2048) | plugin |
 | 24 | count of constant-force updates seen | plugin |
 | 28 | assist applied now, torque plus servo (i16) | plugin |
 | 30 | servo part applied now (i16) | plugin |
@@ -100,6 +112,7 @@ Steering values are `truck.input.steering` units: -1 to 1 of lock, counterclockw
 | 92 | target acceleration (f32, lock/s^2), the rim's inertia, damping and friction to push ahead (f32 each, 0 none), lead (f32, s, at most 0.08) | MonoCruise |
 | 112 | push ahead applied now (i16, the wheel's torque sign) | plugin |
 | 116 | the plan the push ahead moves on with flag bit 1: the target's rate (f32, lock/s) and acceleration (f32, lock/s^2) a wheel delay from now, moved on at that acceleration for at most 0.15 s | MonoCruise |
+| 124 | the breakaway push (f32, the ceiling the friction push climbs to while the wheel stands, used when above the friction at 104; 0 none; reserved before status bit 2048) | MonoCruise |
 
 MonoCruise still rumbles through a version 1, 2 or 3 plugin (it falls back to the smaller block), and
 steers through version 4 (without the push ahead and the lead) and 5. MonoCruise opens the 128-byte block first:

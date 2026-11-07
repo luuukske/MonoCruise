@@ -43,8 +43,10 @@ def test_python_layout_matches_the_plugin_header():
         "servo_kd": 68, "servo_cancel": 72, "servo_stamp": 76, "servo_integ": 80, "frame_hz": 84,
         "cancel_applied": 88, "servo_flags": 90, "servo_accel": 92, "ff_inertia": 96, "ff_damping": 100,
         "ff_friction": 104, "servo_lead": 108, "ff_applied": 112, "plan_rate": 116, "plan_accel": 120,
+        "ff_breakaway": 124,
     }
     assert (cmd._OFF_PLAN, cmd._PLAN.size) == (116, 8)
+    assert cmd._OFF_BREAKAWAY == 124 and int(_define(text, "FFB_ST_BREAKAWAY")) == cmd.STATUS_BREAKAWAY
     assert (cmd._OFF_AHEAD, cmd._AHEAD.size, cmd._OFF_FF_APPLIED) == (92, 20, 112)
     assert float(_define(SIGNAL.read_text(encoding="utf-8"), "FFB_LEAD_MAX_S")) == cmd.LEAD_MAX_S
     assert (cmd._OFF_HEARTBEAT, cmd._OFF_CMD, cmd._OFF_SEQ, cmd._OFF_TORQUE, cmd._OFF_GAME_FORCE, cmd._OFF_STATUS,
@@ -115,6 +117,21 @@ def test_repeating_no_rumble_does_not_cancel_another_writers_request():
     ch.publish(False, 0, 0, now=1.1)
     assert struct.unpack_from("=BBH", buf, 8) == (cmd.CMD_RUMBLE, 2, 1600)
     assert struct.unpack_from("=I", buf, 4)[0] == beat + 1
+
+
+def test_another_writers_heartbeat_is_counted():
+    buf = stamped()
+    ours, theirs = channel(buf), channel(buf)
+    for _ in range(3):
+        ours.publish(False, 0, 0, now=1.0)
+    assert ours.foreign == 0, "alone it sees only its own heartbeat"
+    theirs.publish(False, 0, 0, now=1.0)
+    ours.publish(False, 0, 0, now=1.0)
+    assert ours.foreign == 1, "the bench beside MonoCruise (2026-11-06: a restarted thread turned the bench's servo off)"
+    ours.close()
+    ours._buf = buf
+    ours.publish(False, 0, 0, now=1.0)
+    assert ours.foreign == 1, "a reopened channel starts over"
 
 
 def test_a_plugin_that_goes_away_and_returns_gets_the_request_again():
@@ -348,3 +365,18 @@ def test_a_planned_push_ahead_sets_its_flag_and_reaches_offset_116():
     bad = ahead_servo(ff_plan=True, plan_rate=float("nan"))
     assert cmd.servo_flags(bad, cmd.servo_fields(bad)) == 0 and cmd.servo_plan(bad, cmd.servo_fields(bad)) == (0.0, 0.0)
     assert cmd.servo_flags(servo, cmd.servo_fields(cmd.SERVO_OFF)) == 0
+
+
+def test_the_breakaway_push_reaches_offset_124_and_the_plugin_reports_it():
+    buf = stamped(cmd.AHEAD_VERSION)
+    ch = channel(buf)
+    ch.publish(False, 0, 0, now=1.0, servo=ahead_servo(ff_friction=200.0, ff_breakaway=480.0))
+    assert struct.unpack_from("=f", buf, 124)[0] == pytest.approx(480.0)
+    ch.publish(False, 0, 0, now=1.1, servo=cmd.SERVO_OFF)
+    assert struct.unpack_from("=f", buf, 124)[0] == 0.0, "none with the servo off"
+    for bad in (-5.0, float("nan")):
+        servo = ahead_servo(ff_breakaway=bad)
+        assert cmd.servo_breakaway(servo, cmd.servo_fields(servo)) == 0.0
+    struct.pack_into("=I", buf, 20, cmd.STATUS_HOOKED | cmd.STATUS_BREAKAWAY)
+    assert cmd.decode_status(bytes(buf)).breakaway
+    assert not cmd.decode_status(bytes(stamped(cmd.AHEAD_VERSION))).breakaway, "an older layout 5 plugin has none"

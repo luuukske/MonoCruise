@@ -142,6 +142,10 @@ static double ffb_torque_step(FfbTorque *s, double target, int on, double dt) {
 #define FFB_LEAD_MAX_S 0.08
 #define FFB_FF_STILL_RATE 0.02
 #define FFB_FF_REST_BAND 0.002
+#define FFB_STUCK_FROM 1.5
+#define FFB_BREAK_RAMP_S 0.3
+#define FFB_BREAK_BAND 0.003
+#define FFB_BREAK_HOLD 0.0015
 #define FFB_I_MOVE_RATE 0.3
 #define FFB_D_LAG_MAX_S 0.05
 #define FFB_I_SHARE 1.0
@@ -175,7 +179,8 @@ typedef struct FfbServo {
    that turns the wheel counterclockwise (0 is off), ``only`` +1 or -1 the one way it may push (0 both),
    ``damp_first`` 1 gives the damping its room under the cap before P and I get theirs. ``accel`` is the target's
    acceleration; ``ff_*`` the rim's inertia, damping and friction pushed ahead (0 is none) on ``ff_rate`` and
-   ``ff_accel``: the target's own motion, or the motion MonoCruise plans a wheel delay from now. */
+   ``ff_accel``: the target's own motion, or the motion MonoCruise plans a wheel delay from now. ``ff_breakaway`` is
+   where the friction push climbs to as ``stuck`` (0 to 1) ramps while the wheel stands, when above ``ff_friction``. */
 typedef struct FfbServoIn {
     double target;
     double rate;
@@ -190,6 +195,8 @@ typedef struct FfbServoIn {
     double ff_inertia;
     double ff_damping;
     double ff_friction;
+    double ff_breakaway;
+    double stuck;
     double ff_rate;
     double ff_accel;
     double d_lag;
@@ -262,9 +269,24 @@ static double ffb_servo_ahead(double lead, double reading_age) {
     return ahead < FFB_LEAD_MAX_S ? ahead : FFB_LEAD_MAX_S;
 }
 
+/* The breakaway ramp: 0 while the wheel's reading changed within FFB_STUCK_FROM steering readings, then up to 1 over
+   FFB_BREAK_RAMP_S. Read off the angle, not its rate: a coarse encoder reads a slow slide as steps with still readings. */
+static double ffb_servo_stuck(double still_s, double interval) {
+    double n;
+    if (!(interval > 0.0) || !(still_s >= 0.0)) {
+        return 0.0;
+    }
+    n = (still_s - FFB_STUCK_FROM * interval) / FFB_BREAK_RAMP_S;
+    return n > 0.0 ? (n < 1.0 ? n : 1.0) : 0.0;
+}
+
 /* The force the rim needs to move as asked: its inertia times ``ff_accel``, its damping times ``ff_rate`` and its
    friction in the way it moves, within the cap. At rest the friction push turns toward the target (``err``, full
-   from FFB_FF_REST_BAND), so a wheel held short or past by friction finishes the move instead of creeping. */
+   from FFB_FF_REST_BAND), so a wheel held short or past by friction finishes the move instead of creeping. A wheel
+   that standing needs more to start than to slide has the push climb toward ``ff_breakaway`` while it stands, once
+   the target moves or is past FFB_BREAK_HOLD (full from FFB_BREAK_BAND), and no rest push within FFB_BREAK_HOLD: the
+   old wheel started on 311 to 526 from one try to the next, a fixed push left it standing or lurched it, and the rest
+   push hunted it 1.5 mlock either side of the target at 4 Hz (2026-11-06). */
 static double ffb_servo_ff(const FfbServoIn *in, double cap, double err) {
     double ff = 0.0;
     if (in->ff_inertia > 0.0) {
@@ -275,7 +297,18 @@ static double ffb_servo_ff(const FfbServoIn *in, double cap, double err) {
     }
     if (in->ff_friction > 0.0) {
         double moving = tanh(ffb_finite(in->ff_rate) / FFB_FF_STILL_RATE);
-        ff += in->ff_friction * (moving + (1.0 - fabs(moving)) * tanh(ffb_finite(err) / FFB_FF_REST_BAND));
+        double friction = in->ff_friction;
+        double rest = (1.0 - fabs(moving)) * tanh(ffb_finite(err) / FFB_FF_REST_BAND);
+        if (in->ff_breakaway > friction) {
+            double stuck = in->stuck > 0.0 ? (in->stuck < 1.0 ? in->stuck : 1.0) : 0.0;
+            double off = (fabs(ffb_finite(err)) - FFB_BREAK_HOLD) / (FFB_BREAK_BAND - FFB_BREAK_HOLD);
+            double gate;
+            off = off > 0.0 ? (off < 1.0 ? off : 1.0) : 0.0;
+            gate = fabs(moving) > off ? fabs(moving) : off;
+            rest *= off;
+            friction += (ffb_finite(in->ff_breakaway) - friction) * stuck * gate;
+        }
+        ff += friction * (moving + rest);
     }
     return ffb_clamp(ff, cap);
 }

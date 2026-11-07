@@ -162,14 +162,14 @@ def test_a_design_that_rings_is_fitted_again_with_the_ring_and_replaced(monkeypa
 
 def test_a_held_design_is_tried_faster_and_the_fastest_accepted_is_kept(monkeypatch):
     seen = []
-    real = check_module._verify_once
+    real = check_module._verify
 
     def spy(bench, choice, *args, **kwargs):
-        last, good = real(bench, choice, *args, **kwargs)
+        last, good, fast_only = real(bench, choice, *args, **kwargs)
         seen.append((choice.bandwidth_hz, good))
-        return last, good
+        return last, good, fast_only
 
-    monkeypatch.setattr(check_module, "_verify_once", spy)
+    monkeypatch.setattr(check_module, "_verify", spy)
     bench = sim_bench(SIM_WHEELS["r3"])
     bench.say = lambda _msg: None
     _, direction, home = bench.prepare(None, True)
@@ -207,22 +207,25 @@ def test_the_plugin_mirror_pushes_up_to_the_requested_cap_and_never_past_its_har
 
 def test_the_push_ahead_is_opt_in_bounded_and_shared_by_la_and_the_lane_keeping_assist(monkeypatch, tmp_path):
     assert push_ahead_overrides(0.0, 0.0, 0.0, 0.0) == {"ff_inertia": 0.0, "ff_damping": 0.0, "ff_friction": 0.0,
-                                                       "lead_s": 0.0, "plan_s": 0.0}
-    assert push_ahead_overrides(1e9, -5.0, 1e9, 1.0, 1.0) == {"ff_inertia": 5000.0, "ff_damping": 0.0,
-                                                             "ff_friction": 1500.0, "lead_s": 0.08, "plan_s": 0.08}
-    for key in ("la_ff_inertia", "la_ff_damping", "la_ff_friction", "la_servo_lead_s", "la_ff_plan_s"):
+                                                       "lead_s": 0.0, "plan_s": 0.0, "ff_breakaway": 0.0}
+    assert push_ahead_overrides(1e9, -5.0, 1e9, 1.0, 1.0, 1e9) == {
+        "ff_inertia": 5000.0, "ff_damping": 0.0, "ff_friction": 1500.0, "lead_s": 0.08, "plan_s": 0.08,
+        "ff_breakaway": 1500.0}
+    for key in ("la_ff_inertia", "la_ff_damping", "la_ff_friction", "la_servo_lead_s", "la_ff_plan_s",
+                "la_ff_breakaway"):
         assert getattr(Settings, key) == 0.0
     for key, value in (("la_ff_inertia", 352.0), ("la_ff_damping", 646.0), ("la_ff_friction", 164.0),
-                       ("la_servo_lead_s", 0.0), ("la_ff_plan_s", 0.026)):
+                       ("la_servo_lead_s", 0.0), ("la_ff_plan_s", 0.026), ("la_ff_breakaway", 380.0)):
         monkeypatch.setattr(Settings.instance(), key, value, raising=False)
     for runner in (AssistRunner(debug_root=tmp_path), LkaRunner(debug_root=tmp_path)):
         wheel = runner._tuning()[1].wheel
-        assert (wheel.ff_inertia, wheel.ff_damping, wheel.ff_friction, wheel.lead_s, wheel.plan_s) == (
-            352.0, 646.0, 164.0, 0.0, 0.026)
+        assert (wheel.ff_inertia, wheel.ff_damping, wheel.ff_friction, wheel.lead_s, wheel.plan_s,
+                wheel.ff_breakaway) == (352.0, 646.0, 164.0, 0.0, 0.026, 380.0)
     monkeypatch.setattr(Settings.instance(), "la_always_on", True, raising=False)
     for runner in (AssistRunner(debug_root=tmp_path), LkaRunner(debug_root=tmp_path)):
         line = runner._tuning()[2]
-        assert "push ahead inertia 352, damping 646, friction 164, lead 0.000 s, plan 0.026 s" in line[0] % tuple(line[1:])
+        assert ("push ahead inertia 352, damping 646, friction 164, lead 0.000 s, plan 0.026 s, breakaway 380"
+                in line[0] % tuple(line[1:]))
 
 
 def test_the_push_ahead_fades_in_with_the_authority_and_moves_on_the_plan():
@@ -282,8 +285,7 @@ def test_a_wheel_the_fit_cannot_describe_gets_its_design_on_the_wheel():
     data = run_check(bench, direction, home, evals=200, say=lambda _m: None)
     assert data["verified"] and data["reading_hz"] == 60 and data["config"]["la_ff_friction"] > 0
     poor_fit = WheelParams(inertia=153.0, damping=562.0, stick=530.0, spring=3000.0, delay_s=0.068, reading_hz=60.0)
-    held, runs = check_module._wheel_ladder(bench, push_ahead_of(poor_fit), direction, home, 20.0, lambda _m: None, [],
-                                            [])
+    held, runs = check_module._wheel_ladder(bench, poor_fit, direction, home, 20.0, lambda _m: None, [], [])
     assert held is not None and held.config()["la_ff_plan_s"] == 0.068, (
         "the geared model wheel: no design held in the model, 0.7 to 1.4 Hz with the push ahead held on the wheel")
 

@@ -50,6 +50,7 @@ class WheelTuning:
     ff_friction: float = 0.0
     lead_s: float = 0.0
     plan_s: float = 0.0
+    ff_breakaway: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -97,13 +98,15 @@ def design_overrides(bandwidth_hz: float, damping: float, damping_first: bool, s
     return out
 
 
-def push_ahead_overrides(inertia: float, damping: float, friction: float, lead_s: float, plan_s: float = 0.0) -> dict:
+def push_ahead_overrides(inertia: float, damping: float, friction: float, lead_s: float, plan_s: float = 0.0,
+                         breakaway: float = 0.0) -> dict:
     """``WheelTuning`` fields for the plugin's push ahead (the rim's own inertia, damping and friction, as the wheel
     check fits them), its lead and how far ahead the push follows the plan (both the wheel's delay); 0 is none.
+    ``breakaway`` is the friction push while the wheel stands (the force that starts it), bounded like the friction.
     """
     return {"ff_inertia": max(0.0, min(5000.0, inertia)), "ff_damping": max(0.0, min(5000.0, damping)),
             "ff_friction": max(0.0, min(1500.0, friction)), "lead_s": max(0.0, min(LEAD_MAX_S, lead_s)),
-            "plan_s": max(0.0, min(LEAD_MAX_S, plan_s))}
+            "plan_s": max(0.0, min(LEAD_MAX_S, plan_s)), "ff_breakaway": max(0.0, min(1500.0, breakaway))}
 
 
 def follower_ahead(e: float, v: float, w: float, tau: float) -> tuple[float, float]:
@@ -269,5 +272,5 @@ class WheelActuator:
             damping_first=self.tune.damping_first, ff_inertia=self.tune.ff_inertia * ease(authority),
             ff_damping=self.tune.ff_damping * ease(authority), ff_friction=self.tune.ff_friction * ease(authority),
             lead_s=self.tune.lead_s, ff_plan=pushes, plan_rate=plan[0] if pushes else 0.0,
-            plan_accel=plan[1] if pushes else 0.0,
+            plan_accel=plan[1] if pushes else 0.0, ff_breakaway=self.tune.ff_breakaway * ease(authority),
         )
