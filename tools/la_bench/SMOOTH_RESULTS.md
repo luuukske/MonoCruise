@@ -3,6 +3,30 @@
 Everything in this file is **simulated**. No real wheel was available. Branch `la-smooth-ffb`, cut from `v1.2` at
 `7185d85`.
 
+## STOPPED
+
+- **Trigger:** the stuck rule. After the last kept improvement (decision 18; decision 21 is a correctness fix that
+  measured neutral) three different approaches to the remaining failures (wheels parked more than 1.5 mlock off, or
+  never reaching the target) did not improve the tuning set, so no fourth was tried. Stopped at 13:45 UTC on
+  2026-11-08, before the 15:00 deadline. Nothing is blocked and nothing unsafe was found; every change is committed
+  and pushed (`la-smooth-ffb`), so no WIP commit was needed.
+- **Tried, one line each** (tuning set, learned + settle law, against 84 of 160 at decision 18):
+  - hunt detection at 6 flips in 2 s instead of 4: 63 of 160;
+  - hunt detection at 3 flips: 71 of 160;
+  - wheels without a learned friction push held at the fourth design step instead of the sixth: 81 of 160.
+  - (before those, also dropped: a 1.1 margin on the top start, 69; an integral speed-up while stuck far, 73;
+    lower damping per step, 70.)
+- **Command and output tail:** `python -m tools.la_bench.smooth_eval tune --part k --of 3 --out <file>` (k = 0, 1,
+  2), pass row: `| pass | 4/160 (2 %) | 69/160 (43 %) | 81/160 (51 %) | 77/160 (48 %) | 89/160 (56 %) |`.
+- **Held-out state** (commit `cc54838`): 19 of 40 meet every limit with the settle law, 17 of 40 on today's plugin
+  (0 of 40 with today's default); 32 and 26 of 40 are smooth at the target (jitter, jumps and flips all within the
+  limits). Not satisfactory (all 40).
+- **The one decision needed from Lukas:** whether the next step is the real wheel. The model cannot say more about the
+  remaining failures without real data (they sit on the friction, delay and hands the model guesses at). If yes:
+  rebuild the DLL with the settle law (`plugins/ffb/README.md`, Build), drive with `la_wheel_learning` on (the
+  default) and send `la_wheel_learned` from `config.json` and the `la_ffb_debug.csv` trace (with `debug` on) of a few
+  LA minutes; if not, say which of the remaining classes to chase in the model.
+
 ## Decision log
 
 Newest last. Every measured effect is on simulated wheels.
@@ -267,11 +291,11 @@ slow-sine error is half. Fast moves were not measured.
 
 ### Exit reason
 
-Deadline (15:00 UTC on 2026-11-08, the end Lukas set when he came back), unsatisfactory: 19 of 40 held-out wheels
-meet every limit with the settle law and 17 of 40 on today's plugin (the brief asks for all of them). On today's plugin
-the five presets pass and do not regress except `r3`'s final error (1.47 against 0.07 mlock, inside the limit); with
-the settle law `sticky` and `old` regress on final error. Not stuck: every kept step improved the tuning set, the ones
-that did not were reverted (decisions 16 to 18), and no cap, threshold, default or safety check was changed.
+STUCK rule, at 13:45 UTC (see STOPPED at the top), with the deadline at 15:00: unsatisfactory, 19 of 40 held-out
+wheels meet every limit with the settle law and 17 of 40 on today's plugin (the brief asks for all of them). On
+today's plugin the five presets pass and do not regress except `r3`'s final error (1.47 against 0.07 mlock, inside the
+limit); with the settle law `sticky` and `old` regress on final error. No cap, threshold, default or safety check was
+changed.
 
 ### Known limits (simulated)
 
