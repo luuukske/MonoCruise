@@ -251,7 +251,8 @@ is known or after two more hunts there, since a gentle servo alone cannot move a
 ringing never stands still long enough to learn its friction). The friction push is 0.6 of the start force (an
 under-push leaves the rest to the feedback), climbing to 1.2 of the way to the top start while the wheel stands; a
 configured push (`la_ff_*`) wins. The model is bounded on every field, saved to `la_wheel_learned` at most once a
-minute, and shared by LA and the lane keeping assist.
+minute, and shared by LA and the lane keeping assist (the lane keeping assist takes the hold and the settle flag only:
+its design and pushes stay as configured).
 
 The target hold runs at MonoCruise's 20 Hz on the plugin's reading. A wheel whose reading stays within half a reading
 step plus 0.25 mlock of a still target for 0.15 s (after 1.5 s within 1.5 mlock, the plugin's own breakaway hold-off),

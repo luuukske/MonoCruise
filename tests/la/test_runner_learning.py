@@ -57,8 +57,8 @@ def test_the_switch_turns_the_hold_and_the_learned_design_on_and_off(monkeypatch
     on = cls(debug_root=tmp_path)._tuning()[1].wheel
     monkeypatch.setattr(settings, "la_wheel_learning", False, raising=False)
     off = cls(debug_root=tmp_path)._tuning()[1].wheel
-    assert on.hold and on.learn and not off.hold and not off.learn
-    assert on.settle and not off.settle
+    assert on.hold and on.settle and not off.hold and not off.settle and not off.learn
+    assert on.learn == (cls is AssistRunner), "a lane keeping pulse keeps its configured design and pushes"
     assert replace(on, hold=False, learn=False, settle=False) == off, "nothing else in the tuning moves"
 
 

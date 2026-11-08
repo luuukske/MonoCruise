@@ -116,5 +116,5 @@ class LkaRunner(AssistRunner):
         return key, AssistTuning(
             pulse=True, settle_s=1.0, arm_kmh=arm, disarm_kmh=max(0.0, arm - _ARM_MARGIN_KMH),
             wheel=WheelTuning(strength=strength, inertia=inertia, **design_overrides(*design),
-                              **push_ahead_overrides(*ahead), hold=learn, learn=learn, settle=learn), allow_tmp=key[2],
+                              **push_ahead_overrides(*ahead), hold=learn, settle=learn), allow_tmp=key[2],
         ), line

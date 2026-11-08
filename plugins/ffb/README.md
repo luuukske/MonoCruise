@@ -75,7 +75,7 @@ patches the `SetParameters` slot of its constant-force effect. Each call it read
   changes, not in one tick. A wheel standing within the band of a still target parks: the output is held as it was
   and the integral stands until the error leaves the band by its step (at least 1 mlock) or the target moves. Within
   the cap like every other term. Simulated only (`tools/la_bench/SMOOTH_RESULTS.md`): on the model population it took
-  the learned design from 38 to 48 % of the tuning wheels (38 to 45 % held out) holding their target within the limits; on the light, very sticky
+  the learned design from 43 to 52 % of the tuning wheels (42 to 50 % held out) holding their target within the limits; on the light, very sticky
   model wheel (`sticky`) it hunts, which is why MonoCruise turns it off for a wheel that still hunts at its gentlest
   design. **Not in the shipped DLL yet**: the source has it, the DLL in `core/sdk_installer/own/` is the layout 5
   build and ignores the bit;
