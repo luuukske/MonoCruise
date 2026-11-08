@@ -280,10 +280,8 @@ class WheelLearner:
 
 RUNG_BANDWIDTH = 0.7
 RUNG_INERTIA = 0.7
-RUNG_DAMPING = 0.2
 BANDWIDTH_FLOOR = 0.5
 INERTIA_FLOOR = 50.0
-DAMPING_TOP = 1.4
 STICKY = 1.2
 BREAKAWAY_SHARE = 1.2
 PLAN_S = 0.04
@@ -295,8 +293,9 @@ SLIDE_SHARE = 0.6
 
 def learned_overrides(tune, model: WheelModel, pushes_set: bool = False) -> dict:
     """``WheelTuning`` fields from what was learned, on top of ``tune`` (the configured design): ``rung`` steps
-    gentler, never stiffer, and a friction push from the starts when none is configured (the slides' damping is not
-    pushed: their fit read it up to four times high). Unknown: nothing.
+    gentler (bandwidth and design inertia, the damping ratio as configured), never stiffer, and a friction push from
+    the starts when none is configured (the slides' damping is not pushed: their fit read it up to four times high).
+    Unknown: nothing.
     Below RUNG_BARE only with a friction push: a gentle servo alone cannot move a sticky wheel at all. Still hunting
     at the last rung turns the plugin's settle law off: that wheel's slips are longer than its band."""
     out: dict = {}
@@ -307,8 +306,7 @@ def learned_overrides(tune, model: WheelModel, pushes_set: bool = False) -> dict
         out["settle"] = False
     if k > 0:
         out.update(bandwidth_hz=min(tune.bandwidth_hz, max(BANDWIDTH_FLOOR, tune.bandwidth_hz * RUNG_BANDWIDTH ** k)),
-                   inertia=min(tune.inertia, max(INERTIA_FLOOR, tune.inertia * RUNG_INERTIA ** k)),
-                   damping=max(tune.damping, min(DAMPING_TOP, tune.damping + RUNG_DAMPING * k)), damping_first=True)
+                   inertia=min(tune.inertia, max(INERTIA_FLOOR, tune.inertia * RUNG_INERTIA ** k)), damping_first=True)
     if not pushes or pushes_set:
         return out
     friction = SLIDE_SHARE * model.start_force

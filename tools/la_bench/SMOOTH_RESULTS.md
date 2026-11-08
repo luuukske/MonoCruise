@@ -38,7 +38,7 @@ Newest last. Every measured effect is on simulated wheels.
    unknown for the first minutes LA steers.
 7. **Inertia and delay are not learned; a persistent design ladder replaces them.** Why: neither shows in normal
    driving with hands on the rim. What they cause, a servo hunting at a still target, does: each such hunt steps the
-   design one rung gentler (bandwidth x0.7, design inertia x0.7, damping +0.2, damping first; floor 0.5 Hz on 150),
+   design one rung gentler (bandwidth x0.7, design inertia x0.7, damping first; floor 0.5 Hz on 150, later 50),
    ten minutes of servo time without one steps it back. Never stiffer than the configured design.
 8. **Persisted in `config.json` (`la_wheel_learned`)**, as `la_saved_calibration` is: local, offline, bounded on read.
 9. **`WheelTuning.hold` and `.learn` default off; the runners turn both on from `la_wheel_learning` (default on).**
@@ -87,6 +87,11 @@ Newest last. Every measured effect is on simulated wheels.
     own hysteresis. Effect, tuning set, learned + settle law: 76 to 82 of 160, smooth 131 to 132; on the layout 5
     plugin 61 either way. Tried and dropped: the top start at 1.1 times the most a standing wheel resisted (69 of 160,
     more flips: an over-push) and four design steps instead of six (81, but 119 smooth).
+18. **The design steps keep the configured damping ratio.** They raised it by 0.2 a step to 1.4; with the delay on a
+    light rim the bigger damping term itself rang. Effect, tuning set: learned + settle law 82 to 84 of 160, layout 5
+    61 to 69, smooth 132 and 107 to 132 and 116. Tried and dropped: lowering it 0.05 a step to 0.5 (70 and 57). Also
+    tried and dropped: an integral eight times faster while a wheel stands more than 4 mlock off a still target for a
+    second (73 with the settle law, and it would wind the integral faster against a driver holding the wheel).
 
 ## Feature merit check
 

@@ -245,8 +245,8 @@ What it learns, and from what (nothing extra is ever pushed; the wheel only move
 
 Not learned: the rim's own inertia and the delay. With hands on the rim they do not show in normal driving, so the
 design steps down on the hunt they cause instead. Every estimate starts unknown, which leaves the servo exactly as
-configured (the defaults or the wheel check's keys); a step only ever lowers the bandwidth and the design inertia and
-raises the damping (`learned_overrides`), down to 0.5 Hz on 50 (six steps), and below the second step only once the friction push
+configured (the defaults or the wheel check's keys); a step only ever lowers the bandwidth and the design inertia, damping
+first, the damping ratio as configured (`learned_overrides`), down to 0.5 Hz on 50 (six steps), and below the second step only once the friction push
 is known or after two more hunts there, since a gentle servo alone cannot move a sticky wheel (but one that keeps
 ringing never stands still long enough to learn its friction). The friction push is 0.6 of the start force (an
 under-push leaves the rest to the feedback), climbing to 1.2 of the way to the top start while the wheel stands; a
