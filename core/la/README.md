@@ -241,12 +241,12 @@ What it learns, and from what (nothing extra is ever pushed; the wheel only move
 | reading step (quantum) | the reading's changes with the servo off (a hunting servo reads in big steps only) | the hold's band |
 | game's centring | the game's force against the angle, servo off | reported (the calibration still sets the servo) |
 | start force, its top | the force a standing wheel started on after a slow climb, or the forces (low-passed at 50 ms) it stood against for 0.15 s, while LA steers (hands included, which is what the servo must move); the top at most 1.5 times the middle | the friction push and the breakaway push |
-| design step (`rung`) | the hold: a still target the servo flipped round 4 times in 2 s without parking | one step gentler each time, back one step after 10 minutes of servo time without a hunt; at the sixth, the plugin's settle law off |
+| design step (`rung`) | the hold: a still target the servo's push flipped round 4 times in 2 s without parking, each flip past a tenth of the start force (at least 30) | one step gentler each time, back one step after 10 minutes of servo time without a hunt; at the eighth, the plugin's settle law off |
 
 Not learned: the rim's own inertia and the delay. With hands on the rim they do not show in normal driving, so the
 design steps down on the hunt they cause instead. Every estimate starts unknown, which leaves the servo exactly as
 configured (the defaults or the wheel check's keys); a step only ever lowers the bandwidth and the design inertia and
-raises the damping (`learned_overrides`), down to 0.5 Hz on 150, and below the second step only once the friction push
+raises the damping (`learned_overrides`), down to 0.5 Hz on 50 (six steps), and below the second step only once the friction push
 is known or after two more hunts there, since a gentle servo alone cannot move a sticky wheel (but one that keeps
 ringing never stands still long enough to learn its friction). The friction push is 0.6 of the start force (an
 under-push leaves the rest to the feedback), climbing to 1.2 of the way to the top start while the wheel stands; a

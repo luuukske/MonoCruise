@@ -15,6 +15,7 @@ from collections import deque
 from dataclasses import dataclass
 
 STILL_EPS = 2e-5
+HUNT_SHARE = 0.1
 
 
 @dataclass(frozen=True)
@@ -73,9 +74,9 @@ class TargetHold:
         self._hunted = False
 
     def update(self, dt: float, target: float | None, rate: float, reading: float, quantum: float = 0.0,
-               push: float = 0.0) -> HoldOut:
+               push: float = 0.0, force: float = 0.0) -> HoldOut:
         """``push`` is the servo's part now; ``hunted`` is set once per still target the servo flipped round
-        ``hunt_flips`` times within ``hunt_s`` without parking (the learner steps the design down for it)."""
+        ``hunt_flips`` times within ``hunt_s`` without parking, by a tenth of ``force`` (the wheel's start force)."""
         tn = self.tune
         if not tn.enabled or target is None or dt <= 0.0 or abs(rate) > tn.target_rate:
             self.reset()
@@ -109,11 +110,12 @@ class TargetHold:
         step = dt / (tn.fade_in_s if self.held else tn.fade_out_s)
         self.factor = max(0.0, self.factor - step) if self.held else min(1.0, self.factor + step)
         short = (not self.held and self._still >= tn.boost_from_s and band < abs(err) <= tn.boost_reach)
-        return HoldOut(self.factor, self.factor * (tn.boost if short else 1.0), self.held, self._hunt(push))
+        return HoldOut(self.factor, self.factor * (tn.boost if short else 1.0), self.held,
+                       self._hunt(push, max(tn.hunt_push, HUNT_SHARE * force)))
 
-    def _hunt(self, push: float) -> bool:
+    def _hunt(self, push: float, band: float) -> bool:
         tn = self.tune
-        side = 1 if push >= tn.hunt_push else (-1 if push <= -tn.hunt_push else 0)
+        side = 1 if push >= band else (-1 if push <= -band else 0)
         if side and self._side and side != self._side and not self.held:
             self._flips.append(self._t)
         self._side = side or self._side

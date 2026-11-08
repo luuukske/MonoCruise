@@ -83,7 +83,7 @@ def la_drive(p: WheelParams, learner: WheelLearner, base: Design = DEFAULT, epis
         if wheel.time - sent_at >= 1.0 / SEND_HZ - 1e-9:
             m = learner.model
             out = parker.update(wheel.time - sent_at if sent_at >= 0.0 else 0.0, target, 0.0, wheel.reading,
-                                m.quantum, wheel.plugin.value * p.sign) if sent_at >= 0.0 else HoldOut()
+                                m.quantum, wheel.plugin.value * p.sign, m.start_force) if sent_at >= 0.0 else HoldOut()
             if out.hunted:
                 learner.note_hunt()
                 hunts += 1

@@ -304,6 +304,6 @@ class WheelActuator:
         if not self.tune.hold or authority < 1.0:
             self._hold.reset()
             return HoldOut()
-        out = self._hold.update(dt, target, rate, wheel.steer, self.model.quantum, wheel.push)
+        out = self._hold.update(dt, target, rate, wheel.steer, self.model.quantum, wheel.push, self.model.start_force)
         self.hunts += out.hunted
         return out

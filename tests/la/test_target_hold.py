@@ -69,6 +69,16 @@ def test_a_hunt_round_a_still_target_is_reported_once():
     assert sum(o.hunted for o in outs) == 1
 
 
+def test_a_hunt_is_counted_on_pushes_that_matter_for_that_wheel():
+    readings = [0.015, 0.025] * 20
+    pushes = [60.0 if i % 2 else -60.0 for i in range(len(readings))]
+    hold = TargetHold(HoldTuning(rattle=0.0, wide=0.0))
+    assert sum(hold.update(DT, 0.02, 0.0, r, 0.0, f, 300.0).hunted for r, f in zip(readings, pushes)) == 1
+    hold = TargetHold(HoldTuning(rattle=0.0, wide=0.0))
+    assert not any(hold.update(DT, 0.02, 0.0, r, 0.0, f, 700.0).hunted for r, f in zip(readings, pushes)), (
+        "60 units either way is no hunt on a wheel that starts on 700")
+
+
 def test_off_it_does_nothing():
     assert all(o.gain == 1.0 and not o.held for o in _run(TargetHold(HoldTuning(enabled=False)), [0.02] * 20))
 
