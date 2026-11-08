@@ -31,12 +31,13 @@ MIN_START = 20.0
 FORCE_MAX = 1500.0
 RATE_MIN = 0.005
 RATE_MAX = 0.3
-RUNG_MAX = 6
+RUNG_MAX = 8
 CALM_UP_S = 600.0
 START_WINDOW_S = 0.15
 START_FLAT = 0.2
 FORCE_TAU_S = 0.05
 TOP_SHARE = 1.5
+RESIST_EVERY_S = 1.0
 
 
 @dataclass(frozen=True)
@@ -89,7 +90,7 @@ def bound(m: WheelModel) -> WheelModel:
 class LearnTuning:
     """How much evidence each estimate needs before it is used."""
 
-    quantum_min_n: int = 200
+    quantum_min_n: int = 60
     starts_min: int = 8
     resisted_min: int = 20
     slides_min: int = 200
@@ -137,6 +138,8 @@ class WheelLearner:
         self._starts: deque[float] = deque(maxlen=64)
         self._resisted: deque[float] = deque(maxlen=128)
         self._held_max = 0.0
+        self._resist_n = 0
+        self._still_since = -math.inf
         self._f_lp = 0.0
         self._slides: deque[tuple[float, float]] = deque(maxlen=n)
         self._spring = [0.0] * 6
@@ -176,10 +179,16 @@ class WheelLearner:
             self._f_lp += (abs(out) - self._f_lp) * a
             self._forces.append((t, self._f_lp))
             while self._forces and t - self._forces[0][0] > START_WINDOW_S:
-                self._held_max = max(self._held_max, self._forces.popleft()[1])
+                ft, f = self._forces.popleft()
+                if ft >= self._still_since:
+                    self._held_max = max(self._held_max, f)
         else:
             self._forces.clear()
             self._held_max = 0.0
+        if on and self._held_max >= MIN_START and t - self._still_since >= RESIST_EVERY_S * (self._resist_n + 1):
+            self._resist_n += 1
+            self._resisted.append(min(FORCE_MAX, self._held_max))
+            self._refresh()
         if seq == self._seq:
             return
         gap = (t - self._read_t) / (seq - self._seq)
@@ -194,7 +203,7 @@ class WheelLearner:
                 self._starts.append(start)
             if on and self._still >= STILL_READINGS and self._held_max >= MIN_START:
                 self._resisted.append(min(FORCE_MAX, self._held_max))
-            self._held_max = 0.0
+            self._held_max, self._resist_n, self._still_since = 0.0, 0, t
             if on and self._still == 0 and 0.0 < gap < STALL_S:
                 rate = (steer - self._read) / (t - self._read_t)
                 if RATE_MIN <= abs(rate) <= RATE_MAX:
@@ -237,12 +246,12 @@ class WheelLearner:
             m = replace(m, quantum=quantum_of(list(self._steps)), quantum_n=len(self._steps))
         starts, held = list(self._starts), list(self._resisted)
         if len(starts) >= tn.starts_min:
-            mid = _quantile(starts, 0.5)
-            top = max(_quantile(starts, 0.9), _quantile(held, 0.9) if held else 0.0)
-            m = replace(m, start_force=mid, starts=len(starts), start_top=min(top, TOP_SHARE * mid))
+            mid = max(_quantile(starts, 0.5), _quantile(held, 0.75) if held else 0.0)
+            top = max(min(_quantile(starts, 0.9), TOP_SHARE * mid), max(held) if held else 0.0)
+            m = replace(m, start_force=mid, starts=len(starts), start_top=top)
         elif len(held) >= tn.resisted_min:
             mid = _quantile(held, 0.75)
-            m = replace(m, start_force=mid, start_top=min(_quantile(held, 0.9), TOP_SHARE * mid), starts=len(held))
+            m = replace(m, start_force=mid, start_top=max(held), starts=len(held))
         if len(self._slides) >= tn.slides_min:
             m = self._fit_slides(m)
         n, sx, sy, sxx, sxy, seen = self._spring
@@ -273,14 +282,14 @@ RUNG_BANDWIDTH = 0.7
 RUNG_INERTIA = 0.7
 RUNG_DAMPING = 0.2
 BANDWIDTH_FLOOR = 0.5
-INERTIA_FLOOR = 150.0
+INERTIA_FLOOR = 50.0
 DAMPING_TOP = 1.4
 STICKY = 1.2
 BREAKAWAY_SHARE = 1.2
 PLAN_S = 0.04
 RUNG_BARE = 2
 RUNG_PATIENCE = 2
-DESIGN_RUNGS = 4
+DESIGN_RUNGS = 6
 SLIDE_SHARE = 0.6
 
 

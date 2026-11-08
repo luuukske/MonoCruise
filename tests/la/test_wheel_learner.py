@@ -123,4 +123,6 @@ def test_short_spikes_a_standing_wheel_rode_out_are_not_read_as_its_start():
     p = SIM_WHEELS["sticky"]
     learner = WheelLearner()
     la_drive(p, learner, episodes=20)
-    assert learner.model.start_top <= 1.5 * learner.model.start_force <= 1.5 * 1.3 * p.breakaway
+    m = learner.model
+    assert m.start_force <= 1.15 * p.breakaway and m.start_top <= 1.15 * p.breakaway, (
+        "no more than a standing wheel of 480 can resist (the old reading took the peak: 832)")

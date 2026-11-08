@@ -35,7 +35,7 @@ class HoldTuning:
     boost_from_s: float = 0.3
     boost_reach: float = 0.004
     wide: float = 0.0015
-    wide_after_s: float = 3.0
+    wide_after_s: float = 1.5
     wide_still_s: float = 0.5
     hunt_push: float = 30.0
     hunt_flips: int = 4
