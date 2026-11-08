@@ -98,6 +98,11 @@ Newest last. Every measured effect is on simulated wheels.
     still feeds the shared learner. Cost: LKA does not get the friction push on a sticky wheel.
 20. **Hunt detection stays at 4 flips in 2 s.** Measured on the tuning set with the final configuration: 6 flips gave
     63 of 160 with the settle law (93 smooth), 3 flips 71 (133 smooth), against 84 (132 smooth) at 4.
+21. **The plugin's settle hold lets go when the target moves past its band** (C and mirror). Found by driving the C
+    law and the Python mirror with the same scripted readings: both matched to the last bit over 480 ticks, and both
+    kept a wheel parked with its old push when the target moved by less than the release margin (1 mlock plus the
+    band). LA's target moves all the time, so this matters more in the game than in the step test: tuning set 82 of
+    160 with the settle law, against 84 before (within run-to-run noise).
 
 ## Feature merit check
 
@@ -170,21 +175,21 @@ is the learner and the target hold with the plugin as shipped; **learned + settl
 law (decision 14, needs the rebuilt DLL); **reference** is the tuning grid's most robust design given the true rim's
 friction, delay and damping (what a perfect wheel check would know), with the hold.
 
-### Held-out set (40 wheels, every fifth of the 200), final configuration (commit `9c9c0f5`)
+### Held-out set (40 wheels, every fifth of the 200), final configuration (commit `cc54838`)
 
 | metric | default (today, no check) | learned, layout 5 plugin | learned + settle law | reference (true rim) + hold | reference + settle law |
 |---|---|---|---|---|---|
-| pass | 0/40 (0 %) | 17/40 (42 %) | 20/40 (50 %) | 17/40 (42 %) | 25/40 (62 %) |
-| smooth (jitter, jumps, flips all in) | 0/40 | 26/40 | 31/40 | 29/40 | 32/40 |
+| pass | 0/40 (0 %) | 17/40 (42 %) | 19/40 (48 %) | 17/40 (42 %) | 25/40 (62 %) |
+| smooth (jitter, jumps, flips all in) | 0/40 | 26/40 | 32/40 | 29/40 | 32/40 |
 | jitter > 0.05 | 40 | 14 | 8 | 11 | 8 |
-| jumps > 0.5 | 39 | 10 | 5 | 7 | 4 |
-| flips > 1 | 40 | 5 | 5 | 4 | 4 |
-| final > 1.5 mlock | 33 | 21 | 19 | 21 | 13 |
-| jitter median / p90 | 0.673 / 1.161 | 0.000 / 0.110 | 0.000 / 0.113 | 0.000 / 0.225 | 0.000 / 0.106 |
-| jump median / p90 | 2.290 / 3.59 | 0.000 / 0.85 | 0.000 / 0.56 | 0.000 / 0.74 | 0.000 / 0.46 |
-| flips median / p90 / worst | 6 / 19 / 42 | 0 / 2 / 4 | 0 / 3 / 7 | 0 / 0 / 32 | 0 / 1 / 16 |
-| final mlock median / p90 | 138.34 / 825.6 | 1.54 / 20.0 | 1.39 / 20.6 | 1.53 / 3.8 | 0.77 / 3.3 |
-| overshoot median / p90 | 19.14 / 66.41 | 0.00 / 0.81 | 0.03 / 1.39 | 0.00 / 1.15 | 0.03 / 1.46 |
+| jumps > 0.5 | 39 | 10 | 4 | 7 | 4 |
+| flips > 1 | 40 | 5 | 4 | 4 | 4 |
+| final > 1.5 mlock | 33 | 21 | 21 | 21 | 13 |
+| jitter median / p90 | 0.673 / 1.161 | 0.000 / 0.110 | 0.020 / 0.061 | 0.000 / 0.225 | 0.000 / 0.106 |
+| jump median / p90 | 2.290 / 3.59 | 0.000 / 0.85 | 0.112 / 0.44 | 0.000 / 0.74 | 0.000 / 0.46 |
+| flips median / p90 / worst | 6 / 19 / 42 | 0 / 2 / 4 | 0 / 1 / 4 | 0 / 0 / 32 | 0 / 1 / 16 |
+| final mlock median / p90 | 138.34 / 825.6 | 1.54 / 20.0 | 1.75 / 20.6 | 1.53 / 3.8 | 0.77 / 3.3 |
+| overshoot median / p90 | 19.14 / 66.41 | 0.00 / 0.81 | 0.06 / 1.30 | 0.00 / 1.15 | 0.03 / 1.46 |
 
 Convergence (after the manual drive and that many LA holds; at 0 nothing about friction is known yet):
 
@@ -192,23 +197,24 @@ Convergence (after the manual drive and that many LA holds; at 0 nothing about f
 |---|---|---|
 | 0 | 3/40 | 2/40 |
 | 8 | 16/40 | 18/40 |
-| 16 | 19/40 | 25/40 |
-| 30 | 17/40 | 20/40 |
+| 16 | 19/40 | 24/40 |
+| 30 | 17/40 | 19/40 |
 
-The held-out set was run three times in the session, each time on the configuration the tuning set had chosen:
-18, 19 and 20 of 40 with the settle law, after decisions 16, 17 and 18. No choice was made on it.
+The held-out set was run four times in the session, each time on the configuration the tuning set had chosen:
+18, 19, 20 and 19 of 40 with the settle law, after decisions 16, 17, 18 and the settle hold fix. No choice was made
+on it; the last is the one that ships.
 
 ### Tuning set (160 wheels), final configuration
 
 | metric | default | learned, layout 5 | learned + settle law | reference + hold | reference + settle law |
 |---|---|---|---|---|---|
-| pass | 4/160 (2 %) | 69/160 (43 %) | 84/160 (52 %) | 77/160 (48 %) | 89/160 (56 %) |
-| smooth (jitter, jumps, flips all in) | 4/160 | 116/160 | 132/160 | 138/160 | 124/160 |
-| final > 1.5 mlock | 141 | 83 | 71 | 82 | 58 |
+| pass | 4/160 (2 %) | 69/160 (43 %) | 82/160 (51 %) | 77/160 (48 %) | 89/160 (56 %) |
+| smooth (jitter, jumps, flips all in) | 4/160 | 116/160 | 131/160 | 138/160 | 124/160 |
+| final > 1.5 mlock | 141 | 83 | 74 | 82 | 58 |
 
 How the tuning set moved through the run (learned, settle law where it exists): 2 % default; 26 % with the first
 learner and the hold at the 0.5 mlock limit; 38 % at the 1.5 mlock limit; 41 % with the settle law; 48 % after the
-fixes of decision 16; 51 % after decision 17; 52 % after decision 18 (43 % on the layout 5 plugin).
+fixes of decision 16; 51 % after decision 17; 52 % after decision 18 (43 % on the layout 5 plugin); 51 % after the settle hold fix (decision 21).
 
 ### The five presets against the handoff baseline
 
@@ -236,10 +242,10 @@ and 3.8 mlock with the settle law.
 - quantum within 5 % (or both fine): 38/40; fine read as coarse 0; coarse read as fine 2
 - reading rate within 5 % of the model's tick-quantised rate: 40/40
 - game spring learned on 40/40, learned/true median 1.000, p10 0.995, p90 1.002
-- start force learned on 39/40, learned/true breakaway median 0.80, p10 0.58, p90 0.99
-- rung after the drive: {3: 8, 4: 11, 5: 5, 6: 5, 7: 4, 8: 7}
-- tracking slow ramp 0.06 at 0.05/s: default rms median 27.2 mlock (21 ran away), learned median 28.5 mlock p90 41.2 (0 ran away)
-- tracking slow sine 0.03 at 0.4 Hz: default rms median 35.2 mlock (20 ran away), learned median 16.3 mlock p90 21.2 (0 ran away)
+- start force learned on 39/40, learned/true breakaway median 0.76, p10 0.57, p90 0.97
+- rung after the drive: {3: 8, 4: 9, 5: 4, 6: 9, 7: 3, 8: 7}
+- tracking slow ramp 0.06 at 0.05/s: default rms median 27.2 mlock (21 ran away), learned median 26.0 mlock p90 41.2 (0 ran away)
+- tracking slow sine 0.03 at 0.4 Hz: default rms median 35.2 mlock (20 ran away), learned median 16.6 mlock p90 24.2 (0 ran away)
 
 - Reading rate and quantum: from the first minute of manual driving (60 reading steps). The game's centring: exact on
   the model, where it is a pure spring; in the game it depends on speed and cornering, and the existing calibration
@@ -248,8 +254,8 @@ and 3.8 mlock with the settle law.
   targets); it reads low (median 0.80 of the model's breakaway), the safe side: an under-push leaves the rest to the
   feedback.
 - Design step: on the bench condition the default design hunts on almost every wheel, so most wheels step down
-  within the first holds; the pass share peaks after 16 holds (25 of 40 with the settle law, 19 on the layout 5
-  plugin) and the later steps cost some of it (20 and 17 at 30 holds).
+  within the first holds; the pass share peaks after 16 holds (24 of 40 with the settle law, 19 on the layout 5
+  plugin) and the later steps cost some of it (19 and 17 at 30 holds).
 - Inertia and delay: not learned (decision 7).
 
 ### Tracking cost
@@ -261,7 +267,7 @@ slow-sine error is half. Fast moves were not measured.
 
 ### Exit reason
 
-Deadline (15:00 UTC on 2026-11-08, the end Lukas set when he came back), unsatisfactory: 20 of 40 held-out wheels
+Deadline (15:00 UTC on 2026-11-08, the end Lukas set when he came back), unsatisfactory: 19 of 40 held-out wheels
 meet every limit with the settle law and 17 of 40 on today's plugin (the brief asks for all of them). On today's plugin
 the five presets pass and do not regress except `r3`'s final error (1.47 against 0.07 mlock, inside the limit); with
 the settle law `sticky` and `old` regress on final error. Not stuck: every kept step improved the tuning set, the ones
@@ -292,6 +298,6 @@ that did not were reverted (decisions 16 to 18), and no cap, threshold, default 
    target"); if it does, the R3's feel changes, and `la_wheel_learning: false` restores today's servo exactly.
 5. The lane keeping assist's pulses: they move the target, so the hold should rarely park during one; check that the
    pulses feel the same.
-6. Tests: `python -m pytest tests/la tests/lane_departure tests/invariants tests/test_sdk_own_plugins.py -q` gave 523
+6. Tests: `python -m pytest tests/la tests/lane_departure tests/invariants tests/test_sdk_own_plugins.py -q` gave 524
    passed and the 3 known failures in `tests/lane_departure/test_side_traffic.py` (unchanged from the handoff); the C
    signal test builds with gcc and prints `ffb signal ok`.
