@@ -96,6 +96,8 @@ Newest last. Every measured effect is on simulated wheels.
     (Steer), and the design steps lower the servo's bandwidth after hunts at still targets, which could weaken a
     pulse's push back from the line; that was not measured, so LKA's design and pushes stay as configured. Its trace
     still feeds the shared learner. Cost: LKA does not get the friction push on a sticky wheel.
+20. **Hunt detection stays at 4 flips in 2 s.** Measured on the tuning set with the final configuration: 6 flips gave
+    63 of 160 with the settle law (93 smooth), 3 flips 71 (133 smooth), against 84 (132 smooth) at 4.
 
 ## Feature merit check
 
@@ -141,6 +143,20 @@ pass share too) and the five presets do not regress against the handoff baseline
 
 - Hands off the rim in the step tests, as the bench runs them: the lightest rim, so the most prone to ring.
 - The game's spring in the step tests is the wheel's standing spring (the bench's), not the stiffer one at speed.
+- Manual driving in the model: the driver's hands pull the rim toward a wanted angle (three slow sines, 0.05 to
+  0.4 Hz, up to 40 mlock) with 10000 to 40000 units per lock and 100 to 400 of damping, servo off, 60 s per wheel.
+  Real drives give the learner far more than a minute; 60 s is the short end.
+- LA's part in the model: still targets 5 to 30 mlock off for 4 s each, hands off (the harsher case; resting hands
+  would add friction, which the learner would read as the wheel's, as LA would meet it).
+- The model reads the wheel on FFB ticks, so its reading rates are 120/n Hz (60, 40, 30); the learner is scored
+  against that.
+- `la_wheel_learning` defaults to on: nothing for the driver to do is the point. LA itself stays off by default; the
+  setting off restores today's servo exactly (`tests/la/test_runner_learning.py`).
+- "A small local JSON": the learned model is a `config.json` key, as the saved calibration already is (decision 8).
+- The population: every wheel has a breakaway of 300 to 700 and slides on 40 to 95 % of it; inertia 30 to 800 and
+  damping 100 to 1500 (log-uniform), spring 300 to 3000, delay 20 to 100 ms, reading 30 to 60 Hz, quantum 0 (a fifth)
+  or 0.2 to 5 mlock, start spread up to 0.4; dwell stiction, backlash (1 to 2 mlock) and speed-dependent friction on
+  about half, reading stalls (40 to 120 ms, every 1 to 4 s) on about 40 %.
 
 ## Results
 

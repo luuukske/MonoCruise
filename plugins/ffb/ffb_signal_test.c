@@ -217,6 +217,10 @@ static void test_the_settle_law_parks_a_standing_wheel_and_holds_its_push(void) 
     expect(fabs(now - first) < 1e-9 && s.integ == 0.0, "the push stands as it was and the integral holds");
     now = ffb_servo_pid(&s, &in, 0.0003, -0.003, 0.0, DT);
     expect(!s.held, "pushed 3 mlock off: the servo is back");
+    ffb_servo_init(&s);
+    ffb_servo_pid(&s, &in, 0.0003, 0.0, 0.0, DT);
+    ffb_servo_pid(&s, &in, 0.0013, 0.0, 0.0, DT);
+    expect(!s.held, "the target moved 1 mlock: no longer parked on the old one");
     in.settle = 0;
     ffb_servo_init(&s);
     ffb_servo_pid(&s, &in, 0.0003, 0.0, 0.0, DT);

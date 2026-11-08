@@ -182,6 +182,7 @@ typedef struct FfbServo {
     double d_ref;
     int held;
     double held_u;
+    double held_target;
     double u_prev;
     double ff_prev;
 } FfbServo;
@@ -235,6 +236,7 @@ static void ffb_servo_init(FfbServo *s) {
     s->d_ref = 0.0;
     s->held = 0;
     s->held_u = 0.0;
+    s->held_target = 0.0;
     s->u_prev = 0.0;
     s->ff_prev = 0.0;
     for (i = 0; i < FFB_BUZZ_FLIPS; i++) {
@@ -365,7 +367,7 @@ static void ffb_settle_reset(FfbServo *s) {
 
 /* The settle law's part of a tick: the friction push lets go over FFB_SETTLE_DROP_S instead of at once, and a wheel
    standing within the band of a still target parks: the output is held as it was and the integral stands. */
-static void ffb_settle_note(FfbServo *s, const FfbServoIn *in, double e, double dt) {
+static void ffb_settle_note(FfbServo *s, const FfbServoIn *in, double target, double e, double dt) {
     double band = FFB_SETTLE_BAND + 0.5 * in->step;
     double release = in->step > FFB_SETTLE_RELEASE ? in->step : FFB_SETTLE_RELEASE;
     int standing;
@@ -380,11 +382,12 @@ static void ffb_settle_note(FfbServo *s, const FfbServoIn *in, double e, double 
     s->ff_prev = s->ff;
     standing = in->interval > 0.0 && in->still_s >= FFB_STUCK_FROM * in->interval;
     calm = fabs(ffb_finite(in->rate)) < FFB_FF_STILL_RATE && fabs(ffb_finite(in->ff_rate)) < FFB_FF_STILL_RATE;
-    if (s->held && (fabs(e) > band + release || !calm)) {
+    if (s->held && (fabs(e) > band + release || !calm || fabs(target - s->held_target) > band)) {
         s->held = 0;
     } else if (!s->held && standing && calm && fabs(e) <= band) {
         s->held = 1;
         s->held_u = s->u_prev;
+        s->held_target = target;
     }
 }
 
@@ -444,7 +447,7 @@ static double ffb_servo_pid(FfbServo *s, const FfbServoIn *in, double target, do
     }
     e = target - angle;
     s->ff = ffb_servo_ff(in, cap, e);
-    ffb_settle_note(s, in, e, dt);
+    ffb_settle_note(s, in, target, e, dt);
     p = in->kp * e + s->ff;
     if (in->d_lag > 0.0) {
         s->d_ref += (in->rate - s->d_ref) * (1.0 - exp(-dt / in->d_lag));

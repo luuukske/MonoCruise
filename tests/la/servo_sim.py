@@ -113,6 +113,7 @@ class Plugin:
     step_q: float = 0.0
     held: bool = False
     held_u: float = 0.0
+    held_target: float = 0.0
     u_prev: float = 0.0
     ff_prev: float = 0.0
 
@@ -221,10 +222,11 @@ class Plugin:
                 self.ff_prev = self.ff
                 standing = self.interval > 0.0 and self.still >= STUCK_FROM * self.interval
                 calm = abs(aim_rate) < FF_STILL_RATE and abs(ff_rate) < FF_STILL_RATE
-                if self.held and (abs(err) > band + max(self.step_q, SETTLE_RELEASE) or not calm):
+                if self.held and (abs(err) > band + max(self.step_q, SETTLE_RELEASE) or not calm
+                                  or abs(aim - self.held_target) > band):
                     self.held = False
                 elif not self.held and standing and calm and abs(err) <= band:
-                    self.held, self.held_u = True, self.u_prev
+                    self.held, self.held_u, self.held_target = True, self.u_prev, aim
             else:
                 self.held = False
             p = kp * err + self.ff
