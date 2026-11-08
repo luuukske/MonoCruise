@@ -25,9 +25,11 @@
 #define FFB_ST_PUSH_AHEAD 512
 #define FFB_ST_FF_PLAN 1024
 #define FFB_ST_BREAKAWAY 2048
+#define FFB_ST_SETTLE 4096
 
 #define FFB_SF_DAMP_FIRST 1
 #define FFB_SF_FF_PLAN 2
+#define FFB_SF_SETTLE 4
 
 typedef struct FfbCmd {
     volatile uint32_t version;

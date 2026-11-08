@@ -67,6 +67,18 @@ patches the `SetParameters` slot of its constant-force effect. Each call it read
   standing with the servo at 440, or lurched it where it started easily. With the climb to just above its highest
   start, on its model (each stop drawing its own start force) a 0.5 Hz design holds every stage, slow tracking 5 to
   10 mlock rms where the wheel stood at 37 to 48;
+- the settle law, if asked (`servo_flags` bit 2, status bit 4096, off by default; MonoCruise asks for it with
+  `la_wheel_learning`): for a wheel with a breakaway push, the push finishes the move down to a band round the
+  target (`FFB_SETTLE_BAND`, 0.5 mlock plus half the reading's step, which the plugin reads off the smallest recent
+  change) instead of standing off inside 1.5 mlock; within 3 mlock it climbs over `FFB_SETTLE_RAMP_S` (1 s) from
+  nothing rather than from the sliding friction, and lets go over `FFB_SETTLE_DROP_S` (20 ms) when the reading
+  changes, not in one tick. A wheel standing within the band of a still target parks: the output is held as it was
+  and the integral stands until the error leaves the band by its step (at least 1 mlock) or the target moves. Within
+  the cap like every other term. Simulated only (`tools/la_bench/SMOOTH_RESULTS.md`): on the model population it took
+  the learned design from 36 to 49 % of wheels holding their target within the limits; on the light, very sticky
+  model wheel (`sticky`) it hunts, which is why MonoCruise turns it off for a wheel that still hunts at its gentlest
+  design. **Not in the shipped DLL yet**: the source has it, the DLL in `core/sdk_installer/own/` is the layout 5
+  build and ignores the bit;
 - the lead, if asked (layout 5, 0 by default): the wheel and the target are read that many seconds ahead (the wheel
   on at its rate, plus the age of the steering reading, which comes at the game's frame rate, 60 Hz on the R3),
   together at most 0.08 s: where both are when the force reaches the rim. In the model it cut a small step's
@@ -97,7 +109,7 @@ Steering values are `truck.input.steering` units: -1 to 1 of lock, counterclockw
 | 12 | event counter | MonoCruise |
 | 16 | torque (i16, out of 10000, signed like the game's magnitude) | MonoCruise |
 | 18 | game force (i16, the game's magnitude low-passed at 0.1 s) | plugin |
-| 20 | status bits: hooked, force seen, rumbling, dead, torque, servo, steering channel, one-sided servo (128), damping first (256), push ahead and lead (512), the planned push ahead (1024), the breakaway push (2048) | plugin |
+| 20 | status bits: hooked, force seen, rumbling, dead, torque, servo, steering channel, one-sided servo (128), damping first (256), push ahead and lead (512), the planned push ahead (1024), the breakaway push (2048), the settle law (4096) | plugin |
 | 24 | count of constant-force updates seen | plugin |
 | 28 | assist applied now, torque plus servo (i16) | plugin |
 | 30 | servo part applied now (i16) | plugin |
@@ -108,7 +120,7 @@ Steering values are `truck.input.steering` units: -1 to 1 of lock, counterclockw
 | 76 | servo stamp (u32, bumped with each new request) | MonoCruise |
 | 80 | servo integral now (f32), the game's FFB update rate (f32, Hz) | plugin |
 | 88 | game force cancelled now (i16) | plugin |
-| 90 | servo flags (u8): bit 0 damping first, bit 1 the push ahead moves on the plan at 116 | MonoCruise |
+| 90 | servo flags (u8): bit 0 damping first, bit 1 the push ahead moves on the plan at 116, bit 2 the settle law | MonoCruise |
 | 92 | target acceleration (f32, lock/s^2), the rim's inertia, damping and friction to push ahead (f32 each, 0 none), lead (f32, s, at most 0.08) | MonoCruise |
 | 112 | push ahead applied now (i16, the wheel's torque sign) | plugin |
 | 116 | the plan the push ahead moves on with flag bit 1: the target's rate (f32, lock/s) and acceleration (f32, lock/s^2) a wheel delay from now, moved on at that acceleration for at most 0.15 s | MonoCruise |

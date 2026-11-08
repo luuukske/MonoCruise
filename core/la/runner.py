@@ -282,7 +282,7 @@ class AssistRunner:
         return key, AssistTuning(
             arm_kmh=arm, disarm_kmh=max(0.0, arm - _ARM_MARGIN_KMH),
             wheel=WheelTuning(strength=strength, inertia=key[4], cancel_share=key[5], **design_overrides(*design),
-                              **push_ahead_overrides(*ahead), hold=learn, learn=learn),
+                              **push_ahead_overrides(*ahead), hold=learn, learn=learn, settle=learn),
             allow_tmp=key[2], follow_all=key[3], always_on=key[6],
         ), line if key[3] or key[6] else ()
 

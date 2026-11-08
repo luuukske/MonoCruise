@@ -240,14 +240,15 @@ What it learns, and from what (nothing extra is ever pushed; the wheel only move
 | reading rate | the steering frame count, always | reported |
 | reading step (quantum) | the reading's changes with the servo off (a hunting servo reads in big steps only) | the hold's band |
 | game's centring | the game's force against the angle, servo off | reported (the calibration still sets the servo) |
-| start force, its top | the force a standing wheel started on after a slow climb, or the forces it stood against for 0.15 s, while LA steers (hands included, which is what the servo must move) | the friction push and the breakaway push |
-| design step (`rung`) | the hold: a still target the servo flipped round 4 times in 2 s without parking | one step gentler each time, back one step after 10 minutes of servo time without a hunt |
+| start force, its top | the force a standing wheel started on after a slow climb, or the forces (low-passed at 50 ms) it stood against for 0.15 s, while LA steers (hands included, which is what the servo must move); the top at most 1.5 times the middle | the friction push and the breakaway push |
+| design step (`rung`) | the hold: a still target the servo flipped round 4 times in 2 s without parking | one step gentler each time, back one step after 10 minutes of servo time without a hunt; at the sixth, the plugin's settle law off |
 
 Not learned: the rim's own inertia and the delay. With hands on the rim they do not show in normal driving, so the
 design steps down on the hunt they cause instead. Every estimate starts unknown, which leaves the servo exactly as
 configured (the defaults or the wheel check's keys); a step only ever lowers the bandwidth and the design inertia and
 raises the damping (`learned_overrides`), down to 0.5 Hz on 150, and below the second step only once the friction push
-is known, since a gentle servo alone cannot move a sticky wheel. The friction push is 0.6 of the start force (an
+is known or after two more hunts there, since a gentle servo alone cannot move a sticky wheel (but one that keeps
+ringing never stands still long enough to learn its friction). The friction push is 0.6 of the start force (an
 under-push leaves the rest to the feedback), climbing to 1.2 of the way to the top start while the wheel stands; a
 configured push (`la_ff_*`) wins. The model is bounded on every field, saved to `la_wheel_learned` at most once a
 minute, and shared by LA and the lane keeping assist.
@@ -260,7 +261,12 @@ output neither jitters nor flips. The reading or the target leaving the band bri
 ever lowers the gains the actuator asks for, so the caps, the slew and the buzz and ring guards are untouched, and it
 works with the layout 5 plugin as it is (no DLL change). Its limit, in the model: the last 1.5 mlock is the
 integral's alone (the plugin's breakaway push stands off there), so a sticky wheel with a fine encoder is often parked
-1 to 2 mlock short.
+1 to 2 mlock short. The final-error limit is 1.5 mlock (Lukas, 2026-11-08).
+
+A plugin that has the settle law (`plugins/ffb/README.md`, status bit 4096) takes the last mlocks too: MonoCruise
+sets servo flag bit 2 whenever `la_wheel_learning` is on (a layout 5 plugin ignores it), and the breakaway push then
+finishes the move to 0.5 mlock plus half a reading step and parks the wheel there at the FFB rate. Not in the shipped
+DLL yet; simulated only.
 
 ## Adding a path source
 

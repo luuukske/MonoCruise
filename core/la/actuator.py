@@ -55,6 +55,7 @@ class WheelTuning:
     ff_breakaway: float = 0.0
     hold: bool = False
     learn: bool = False
+    settle: bool = False
 
 
 @dataclass(frozen=True)
@@ -295,6 +296,7 @@ class WheelActuator:
             ff_friction=self.tune.ff_friction * ease(authority) * park.gain,
             lead_s=self.tune.lead_s, ff_plan=pushes, plan_rate=plan[0] if pushes else 0.0,
             plan_accel=plan[1] if pushes else 0.0, ff_breakaway=self.tune.ff_breakaway * ease(authority) * park.gain,
+            settle=self.tune.settle,
         )
 
     def _park(self, dt: float, target: float, rate: float, wheel: Wheel, authority: float) -> HoldOut:

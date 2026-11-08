@@ -240,7 +240,7 @@ class SimChannel:
         p = w.params
         return PluginStatus(
             present=True, hooked=True, version=5, steer_ok=True, damping_first=True, push_ahead=True, ff_plan=True,
-            breakaway=True, servoing=bool(servo.direction), ff_applied=round(w.plugin.ff * p.sign),
+            breakaway=True, settle=True, servoing=bool(servo.direction), ff_applied=round(w.plugin.ff * p.sign),
             steer=w.reading,
             steer_rate=w.plugin.rate, steer_frames=w.readings, frames=w.frames, frame_hz=w.frame_hz,
             game_force=round(-p.spring * w.steer * p.sign), applied=round(w.applied),

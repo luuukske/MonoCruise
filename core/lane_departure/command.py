@@ -83,8 +83,10 @@ STATUS_DAMP_FIRST = 256
 STATUS_PUSH_AHEAD = 512
 STATUS_FF_PLAN = 1024
 STATUS_BREAKAWAY = 2048
+STATUS_SETTLE = 4096
 SERVO_DAMP_FIRST = 1
 SERVO_FF_PLAN = 2
+SERVO_SETTLE = 4
 
 
 @dataclass(frozen=True)
@@ -100,6 +102,7 @@ class ServoCommand:
     the push ahead uses ``plan_rate`` and ``plan_accel`` instead: the target's rate and acceleration a wheel delay
     from now, as the commanding feature plans them, so the rim starts and stops on time. ``ff_breakaway`` is the
     friction push while the wheel stands, for a wheel that needs more to start than to slide (status bit 2048).
+    ``settle`` asks the plugin to finish a move on a sticky wheel and park it at the target (status bit 4096).
     """
     target: float = 0.0
     kp: float = 0.0
@@ -120,6 +123,7 @@ class ServoCommand:
     plan_rate: float = 0.0
     plan_accel: float = 0.0
     ff_breakaway: float = 0.0
+    settle: bool = False
 
 
 SERVO_OFF = ServoCommand()
@@ -150,6 +154,7 @@ class PluginStatus:
     push_ahead: bool = False
     ff_plan: bool = False
     breakaway: bool = False
+    settle: bool = False
     steer: float = 0.0
     steer_rate: float = 0.0
     steer_frames: int = 0
@@ -214,6 +219,7 @@ def decode_status(raw: bytes) -> PluginStatus:
             push_ahead=bool(bits & STATUS_PUSH_AHEAD),
             ff_plan=bool(bits & STATUS_FF_PLAN),
             breakaway=bool(bits & STATUS_BREAKAWAY),
+            settle=bool(bits & STATUS_SETTLE),
             ff_applied=_I16.unpack_from(raw, _OFF_FF_APPLIED)[0],
         )
     return PluginStatus(**base)
@@ -277,7 +283,8 @@ def servo_flags(cmd: ServoCommand, fields: tuple) -> int:
     if not fields[4]:
         return 0
     plan = cmd.ff_plan and all(math.isfinite(v) for v in (cmd.plan_rate, cmd.plan_accel))
-    return (SERVO_DAMP_FIRST if cmd.damping_first else 0) | (SERVO_FF_PLAN if plan else 0)
+    return (SERVO_DAMP_FIRST if cmd.damping_first else 0) | (SERVO_FF_PLAN if plan else 0) | (
+        SERVO_SETTLE if cmd.settle else 0)
 
 
 class RumbleChannel:

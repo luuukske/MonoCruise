@@ -41,6 +41,7 @@ class Design:
     lead_s: float = 0.0
     plan_s: float = 0.0
     ff_breakaway: float = 0.0
+    settle: bool = False
 
     @property
     def label(self) -> str:
@@ -49,6 +50,7 @@ class Design:
         base += " ahead" if self.ff_inertia or self.ff_damping or self.ff_friction else ""
         base += f" break{self.ff_breakaway:.0f}" if self.ff_breakaway > self.ff_friction > 0.0 else ""
         base += f" plan{self.plan_s * 1000:.0f}ms" if self.plan_s else ""
+        base += " settle" if self.settle else ""
         return base + (f" lead{self.lead_s * 1000:.0f}ms" if self.lead_s else "")
 
     @property

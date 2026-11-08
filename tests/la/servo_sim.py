@@ -15,6 +15,7 @@ from types import SimpleNamespace
 from core.la.controller import AssistTuning, Gains, LaneAssist, Wheel
 from core.lane_departure.command import (
     SERVO_FF_PLAN,
+    SERVO_SETTLE,
     servo_ahead,
     servo_breakaway,
     servo_fields,
@@ -42,6 +43,12 @@ STUCK_FROM = 1.5
 BREAK_RAMP_S = 0.3
 BREAK_BAND = 0.003
 BREAK_HOLD = 0.0015
+SETTLE_BAND = 0.0005
+SETTLE_RISE = 0.0005
+SETTLE_RAMP_S = 1.0
+SETTLE_DROP_S = 0.02
+SETTLE_STEP_MAX = 0.005
+SETTLE_RELEASE = 0.001
 I_MOVE_RATE = 0.3
 D_LAG_MAX_S = 0.05
 I_SHARE = 1.0
@@ -103,13 +110,18 @@ class Plugin:
     d_ref: float = 0.0
     interval: float = 0.0
     still: float = 0.0
+    step_q: float = 0.0
+    held: bool = False
+    held_u: float = 0.0
+    u_prev: float = 0.0
+    ff_prev: float = 0.0
 
-    def stuck(self) -> float:
+    def stuck(self, ramp: float = BREAK_RAMP_S) -> float:
         """Mirror of ffb_servo_stuck: the breakaway ramp, 0 until the reading stood STUCK_FROM intervals, 1 after
-        BREAK_RAMP_S more."""
+        ``ramp`` more."""
         if self.interval <= 0.0:
             return 0.0
-        return min(1.0, max(0.0, (self.still - STUCK_FROM * self.interval) / BREAK_RAMP_S))
+        return min(1.0, max(0.0, (self.still - STUCK_FROM * self.interval) / ramp))
 
     def _buzz(self, want: float, angle: float) -> None:
         sign = 1 if want > BUZZ_MIN else (-1 if want < -BUZZ_MIN else 0)
@@ -159,6 +171,9 @@ class Plugin:
                 self.interval = self.interval + (self.since - self.interval) * 0.05 if self.interval else self.since
             if self.prev is not None:
                 self.rate += ((steer - self.prev) / self.since - self.rate) * (1.0 - math.exp(-self.since / RATE_TAU_S))
+            if self.prev is not None and steer != self.prev:
+                d = abs(steer - self.prev)
+                self.step_q = min(SETTLE_STEP_MAX, d if self.step_q <= 0.0 else min(d, self.step_q * 1.001))
             if self.prev is None or steer != self.prev:
                 self.still = 0.0
             self.prev = steer
@@ -185,12 +200,33 @@ class Plugin:
             rest = (1.0 - abs(moving)) * math.tanh(err / FF_REST_BAND)
             breakaway = servo_breakaway(servo, fields)
             friction = ff_friction
-            if ff_friction > 0.0 and breakaway > ff_friction:
+            settle = bool(servo_flags(servo, fields) & SERVO_SETTLE)
+            band = SETTLE_BAND + 0.5 * self.step_q
+            if ff_friction > 0.0 and breakaway > ff_friction and settle:
+                near = min(1.0, max(0.0, (abs(err) - band) / SETTLE_RISE))
+                close = abs(err) < BREAK_BAND and abs(moving) < 0.5
+                rest = (1.0 - abs(moving)) * math.copysign(near, err) if close else rest * near
+                base = 0.0 if close else ff_friction
+                ramp = SETTLE_RAMP_S if close else BREAK_RAMP_S
+                friction = base + (breakaway - base) * self.stuck(ramp) * max(abs(moving), near)
+            elif ff_friction > 0.0 and breakaway > ff_friction:
                 near = min(1.0, max(0.0, (abs(err) - BREAK_HOLD) / (BREAK_BAND - BREAK_HOLD)))
                 rest *= near
                 friction += (breakaway - ff_friction) * self.stuck() * max(abs(moving), near)
             ff = ff_inertia * ff_accel + ff_damping * ff_rate + (friction * (moving + rest) if ff_friction > 0.0 else 0.0)
             self.ff = _clamp(ff, cap)
+            if settle:
+                if abs(self.ff) < abs(self.ff_prev) and self.ff * self.ff_prev >= 0.0:
+                    self.ff = self.ff_prev + (self.ff - self.ff_prev) * (1.0 - math.exp(-dt / SETTLE_DROP_S))
+                self.ff_prev = self.ff
+                standing = self.interval > 0.0 and self.still >= STUCK_FROM * self.interval
+                calm = abs(aim_rate) < FF_STILL_RATE and abs(ff_rate) < FF_STILL_RATE
+                if self.held and (abs(err) > band + max(self.step_q, SETTLE_RELEASE) or not calm):
+                    self.held = False
+                elif not self.held and standing and calm and abs(err) <= band:
+                    self.held, self.held_u = True, self.u_prev
+            else:
+                self.held = False
             p = kp * err + self.ff
             d_lag = min(D_LAG_MAX_S, 0.5 * self.interval + RATE_TAU_S) if plan is not None else 0.0
             self.d_ref += (aim_rate - self.d_ref) * (1.0 - math.exp(-dt / d_lag)) if d_lag > 0.0 else aim_rate - self.d_ref
@@ -199,16 +235,18 @@ class Plugin:
             room = cap - abs(d) if first else cap
             pi = p + self.integ if first else p + d + self.integ
             still = plan is None or max(abs(aim_rate), abs(ff_rate)) <= I_MOVE_RATE
-            if still and (abs(pi) < room or pi * err < 0.0):
+            if still and not self.held and (abs(pi) < room or pi * err < 0.0):
                 self.integ = _clamp(self.integ + ki * err * dt, I_SHARE * cap)
             if only and self.integ * only < 0.0:
                 self.integ = 0.0
-            u = _sum(p, d, self.integ, cap, first)
+            u = _clamp(self.held_u, cap) if self.held else _sum(p, d, self.integ, cap, first)
+            self.u_prev = u
             want = 0.0 if only and u * only < 0.0 else direction * u
             self._buzz(want, steer)
         else:
             self.integ = 0.0
             self.d_ref = 0.0
+            self.held, self.u_prev, self.ff_prev = False, 0.0, 0.0
         self.gain = min(1.0, max(0.0, self.gain + (dt / SERVO_IN_S if on else -dt / SERVO_OUT_S)))
         goal = want * self.scale * _ease(self.gain)
         self.value += max(-SERVO_SLEW * dt, min(SERVO_SLEW * dt, goal - self.value))

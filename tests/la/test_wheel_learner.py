@@ -109,3 +109,18 @@ def test_a_saved_model_is_read_back_bounded_and_garbage_is_unknown():
     assert bad.quantum == 0.0 and bad.spring == 0.0 and bad.reading_hz == 0.0 and bad.starts == 0
     assert bad.start_force == FORCE_MAX and bad.rung == RUNG_MAX
     assert WheelModel.from_dict(None) == WheelModel() and WheelModel.from_dict([1, 2]) == WheelModel()
+
+
+def test_a_second_drive_on_the_same_learner_still_counts():
+    p = SIM_WHEELS["sticky"]
+    learner = WheelLearner()
+    manual_drive(p, learner, seconds=20.0)
+    la_drive(p, learner, episodes=20)
+    assert learner.model.starts >= 8, "the drive after the manual one is not skipped as already seen"
+
+
+def test_short_spikes_a_standing_wheel_rode_out_are_not_read_as_its_start():
+    p = SIM_WHEELS["sticky"]
+    learner = WheelLearner()
+    la_drive(p, learner, episodes=20)
+    assert learner.model.start_top <= 1.5 * learner.model.start_force <= 1.5 * 1.3 * p.breakaway

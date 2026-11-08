@@ -88,7 +88,8 @@ def command(design: Design, target: float, direction: int, hold: HoldOut = FREE)
     return ServoCommand(target=target, rate=0.0, kp=kp * factor, kd=kd * factor, ki=ki * hold.integral, cap=design.cap,
                         direction=direction, damping_first=design.damping_first, ff_inertia=design.ff_inertia,
                         ff_damping=design.ff_damping, ff_friction=design.ff_friction * factor, lead_s=design.lead_s,
-                        ff_plan=design.pushes_ahead and design.plan_s > 0.0, ff_breakaway=design.ff_breakaway * factor)
+                        ff_plan=design.pushes_ahead and design.plan_s > 0.0, ff_breakaway=design.ff_breakaway * factor,
+                        settle=design.settle)
 
 
 @dataclass(frozen=True)

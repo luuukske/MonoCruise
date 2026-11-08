@@ -9,11 +9,11 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from dataclasses import asdict
+from dataclasses import asdict, replace
 
 from core.la.hold import HoldTuning
 from core.la.wheel_learner import WheelLearner
-from tools.la_bench.bench import sim_bench
+from tools.la_bench.bench import BenchAbort, sim_bench
 from tools.la_bench.learn_sim import EPISODES, design_for, la_drive, manual_drive
 from tools.la_bench.metrics import summarize
 from tools.la_bench.plant import WheelParams
@@ -26,10 +26,17 @@ TRACK = (ramp(0.06, 0.05), follow(0.03, 0.4))
 
 def tracking(p: WheelParams, design: Design) -> list[float | None]:
     """Error rms on a slow ramp and a slow sine (LA's own target moves at most 0.2 lock/s), the hold not involved."""
-    bench = sim_bench(p)
-    bench.say = lambda _m: None
-    bench.ready()
-    return [summarize(bench.run_stage(st, design, p.sign))["track"]["rms"] for st in TRACK]
+    out: list[float | None] = []
+    for st in TRACK:
+        bench = sim_bench(p)
+        bench.say = lambda _m: None
+        bench.ready()
+        try:
+            run = bench.run_stage(st, design, p.sign)
+            out.append(None if run.get("aborted") else summarize(run)["track"]["rms"])
+        except BenchAbort:
+            out.append(None)
+    return out
 
 
 def reference(p: WheelParams) -> Design:
@@ -39,28 +46,41 @@ def reference(p: WheelParams) -> Design:
                   ff_friction=p.stick, ff_breakaway=p.stick + 1.2 * max(0.0, top - p.stick), plan_s=p.delay_s)
 
 
+def _learn(p: WheelParams, seed: int, settle: bool) -> tuple[WheelLearner, dict[int, Hold]]:
+    """The learner through a manual drive and LA's holds, the hold test at each checkpoint."""
+    learner = WheelLearner()
+    manual_drive(p, learner, seed=seed)
+    learned: dict[int, Hold] = {}
+    done = 0
+    for k in CHECKPOINTS:
+        if k > done:
+            la_drive(p, learner, episodes=k - done, seed=seed + 100 * k, settle=settle)
+            done = k
+        m = learner.model
+        learned[k] = hold_test(p, design_for(m, settle=settle), hold=HoldTuning(), quantum=m.quantum)
+    return learner, learned
+
+
 def evaluate(wheels: list[tuple[str, WheelParams]]) -> dict:
+    """Per wheel: today's default, the learner on the layout 5 plugin, the learner on a plugin with the settle law,
+    and the reference designs on the true rim."""
     rows = []
     for i, (name, p) in enumerate(wheels):
-        learner = WheelLearner()
-        manual_drive(p, learner, seed=i)
-        learned: dict[int, Hold] = {}
-        done = 0
-        for k in CHECKPOINTS:
-            if k > done:
-                la_drive(p, learner, episodes=k - done, seed=i + 100 * k)
-                done = k
-            m = learner.model
-            learned[k] = hold_test(p, design_for(m), hold=HoldTuning(), quantum=m.quantum)
+        plain, learned = _learn(p, i, False)
+        settled, with_settle = _learn(p, i, True)
+        ref = reference(p)
         rows.append({
-            "name": name, "params": asdict(p), "model": learner.model.to_dict(),
+            "name": name, "params": asdict(p), "model": plain.model.to_dict(), "model_settle": settled.model.to_dict(),
             "default": asdict(hold_test(p, Design())),
             "learned": {k: asdict(h) for k, h in learned.items()},
-            "reference": asdict(hold_test(p, reference(p), hold=HoldTuning(), quantum=p.quantum)),
-            "reference_no_hold": asdict(hold_test(p, reference(p))),
-            "tracking": {"default": tracking(p, Design()), "learned": tracking(p, design_for(learner.model))},
+            "learned_settle": {k: asdict(h) for k, h in with_settle.items()},
+            "reference": asdict(hold_test(p, ref, hold=HoldTuning(), quantum=p.quantum)),
+            "reference_settle": asdict(hold_test(p, replace(ref, settle=True), hold=HoldTuning(), quantum=p.quantum)),
+            "reference_no_hold": asdict(hold_test(p, ref)),
+            "tracking": {"default": tracking(p, Design()),
+                         "learned": tracking(p, design_for(settled.model, settle=True))},
         })
-        print(name, "learned ok" if learned[EPISODES].ok else "", flush=True, file=sys.stderr)
+        print(name, "learned ok" if with_settle[EPISODES].ok else "", flush=True, file=sys.stderr)
     return {"rows": rows, "tables": tables(rows)}
 
 
@@ -69,13 +89,17 @@ def tables(rows: list[dict]) -> dict:
         return table([(r["name"], Hold(**get(r))) for r in rows])
 
     out = {"default": tab(lambda r: r["default"]), "reference": tab(lambda r: r["reference"]),
+           "reference_settle": tab(lambda r: r["reference_settle"]),
            "reference_no_hold": tab(lambda r: r["reference_no_hold"])}
     for k in CHECKPOINTS:
         out[f"learned_{k}"] = tab(lambda r, k=k: r["learned"][k])
+        out[f"learned_settle_{k}"] = tab(lambda r, k=k: r["learned_settle"][k])
     for who in ("default", "learned"):
         for i, st in enumerate(TRACK):
             vals = sorted(r["tracking"][who][i] for r in rows if r["tracking"][who][i] is not None)
-            out[f"track_{who}_{st.name}"] = {"median": vals[len(vals) // 2], "p90": vals[int(0.9 * (len(vals) - 1))]}
+            out[f"track_{who}_{st.name}"] = {"median": vals[len(vals) // 2] if vals else None,
+                                             "p90": vals[int(0.9 * (len(vals) - 1))] if vals else None,
+                                             "ran_away": sum(r["tracking"][who][i] is None for r in rows)}
     return out
 
 
@@ -83,9 +107,11 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("which", choices=("held", "tune", "presets"))
     ap.add_argument("--out", required=True)
+    ap.add_argument("--part", type=int, default=0, help="this slice of the wheels (with --of)")
+    ap.add_argument("--of", type=int, default=1)
     args = ap.parse_args(argv)
     tune, held = split(population())
-    wheels = {"held": held, "tune": tune, "presets": presets()}[args.which]
+    wheels = {"held": held, "tune": tune, "presets": presets()}[args.which][args.part::args.of]
     data = evaluate(wheels)
     with open(args.out, "w", encoding="utf-8") as fh:
         json.dump(data, fh, indent=1, default=str)

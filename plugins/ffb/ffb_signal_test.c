@@ -182,7 +182,75 @@ static FfbServoIn servo_in(double target, double rate, int dir) {
     in.ff_accel = 0.0;
     in.d_lag = 0.0;
     in.i_move = 0.0;
+    in.settle = 0;
+    in.still_s = 0.0;
+    in.interval = 0.0;
+    in.step = 0.0;
     return in;
+}
+
+static FfbServoIn settle_in(double target) {
+    FfbServoIn in = servo_in(target, 0.0, 1);
+    in.kp = 6000.0;
+    in.kd = 0.0;
+    in.ki = 4000.0;
+    in.ff_friction = 250.0;
+    in.ff_breakaway = 500.0;
+    in.settle = 1;
+    in.interval = 1.0 / 60.0;
+    return in;
+}
+
+static void test_the_settle_law_parks_a_standing_wheel_and_holds_its_push(void) {
+    FfbServo s;
+    FfbServoIn in = settle_in(0.0003);
+    double first;
+    double now;
+    int i;
+    ffb_servo_init(&s);
+    in.still_s = 1.0;
+    first = ffb_servo_pid(&s, &in, 0.0003, 0.0, 0.0, DT);
+    expect(s.held, "standing 0.3 mlock short of a still target: parked");
+    for (i = 0; i < 240; i++) {
+        now = ffb_servo_pid(&s, &in, 0.0003, 0.0, 0.0, DT);
+    }
+    expect(fabs(now - first) < 1e-9 && s.integ == 0.0, "the push stands as it was and the integral holds");
+    now = ffb_servo_pid(&s, &in, 0.0003, -0.003, 0.0, DT);
+    expect(!s.held, "pushed 3 mlock off: the servo is back");
+    in.settle = 0;
+    ffb_servo_init(&s);
+    ffb_servo_pid(&s, &in, 0.0003, 0.0, 0.0, DT);
+    expect(!s.held, "off without the flag");
+}
+
+static void test_the_settle_law_finishes_inside_the_old_hold_off_and_lets_go_gently(void) {
+    FfbServo s;
+    FfbServoIn in = settle_in(0.001);
+    double before;
+    double after;
+    ffb_servo_init(&s);
+    in.still_s = 2.0;
+    ffb_servo_pid(&s, &in, 0.001, 0.0, 0.0, DT);
+    expect(s.ff > 450.0, "1 mlock short and standing: the push has climbed to the breakaway");
+    in.settle = 0;
+    expect(ffb_servo_ff(&in, 2500.0, 0.001) == 0.0, "the layout 5 law pushes nothing within 1.5 mlock");
+    in.settle = 1;
+    before = s.ff;
+    in.still_s = 0.0;
+    ffb_servo_pid(&s, &in, 0.001, 0.0002, 0.0, DT);
+    after = s.ff;
+    expect(after < before && after > 0.5 * before, "the reading moved: the push lets go over 20 ms, not at once");
+    expect(fabs(ffb_servo_pid(&s, &in, 0.001, 0.0002, 0.0, DT)) <= in.cap, "within the cap");
+}
+
+static void test_the_settle_step_follows_the_smallest_change(void) {
+    double step = 0.0;
+    step = ffb_settle_step(step, 0.002);
+    step = ffb_settle_step(step, 0.0006);
+    expect(fabs(step - 0.0006) < 1e-12, "the smallest change");
+    step = ffb_settle_step(step, 0.004);
+    expect(step > 0.0006 && step < 0.00061, "creeps up slowly");
+    expect(ffb_settle_step(0.0, 1.0) == FFB_SETTLE_STEP_MAX && ffb_settle_step(0.001, NAN) == 0.001, "bounded");
 }
 
 static void test_one_sided_it_never_pushes_the_other_way(void) {
@@ -533,6 +601,9 @@ int main(void) {
     test_zero_intensity_makes_no_sound();
     test_a_stalled_game_cannot_fast_forward_the_wave();
     test_the_sum_with_the_game_force_is_clamped();
+    test_the_settle_law_parks_a_standing_wheel_and_holds_its_push();
+    test_the_settle_law_finishes_inside_the_old_hold_off_and_lets_go_gently();
+    test_the_settle_step_follows_the_smallest_change();
     if (g_fails) {
         fprintf(stderr, "%d failed\n", g_fails);
         return 1;

@@ -35,6 +35,8 @@ RUNG_MAX = 6
 CALM_UP_S = 600.0
 START_WINDOW_S = 0.15
 START_FLAT = 0.2
+FORCE_TAU_S = 0.05
+TOP_SHARE = 1.5
 
 
 @dataclass(frozen=True)
@@ -135,6 +137,7 @@ class WheelLearner:
         self._starts: deque[float] = deque(maxlen=64)
         self._resisted: deque[float] = deque(maxlen=128)
         self._held_max = 0.0
+        self._f_lp = 0.0
         self._slides: deque[tuple[float, float]] = deque(maxlen=n)
         self._spring = [0.0] * 6
         self._seq: int | None = None
@@ -168,7 +171,10 @@ class WheelLearner:
             self._forces.clear()
             return
         if on:
-            self._forces.append((t, abs(out)))
+            gap = t - self._forces[-1][0] if self._forces else 0.0
+            a = 1.0 - math.exp(-gap / FORCE_TAU_S) if 0.0 < gap < STALL_S else 1.0
+            self._f_lp += (abs(out) - self._f_lp) * a
+            self._forces.append((t, self._f_lp))
             while self._forces and t - self._forces[0][0] > START_WINDOW_S:
                 self._held_max = max(self._held_max, self._forces.popleft()[1])
         else:
@@ -231,10 +237,12 @@ class WheelLearner:
             m = replace(m, quantum=quantum_of(list(self._steps)), quantum_n=len(self._steps))
         starts, held = list(self._starts), list(self._resisted)
         if len(starts) >= tn.starts_min:
-            m = replace(m, start_force=_quantile(starts, 0.5), starts=len(starts),
-                        start_top=max(_quantile(starts, 0.9), _quantile(held, 0.9) if held else 0.0))
+            mid = _quantile(starts, 0.5)
+            top = max(_quantile(starts, 0.9), _quantile(held, 0.9) if held else 0.0)
+            m = replace(m, start_force=mid, starts=len(starts), start_top=min(top, TOP_SHARE * mid))
         elif len(held) >= tn.resisted_min:
-            m = replace(m, start_force=_quantile(held, 0.75), start_top=_quantile(held, 0.9), starts=len(held))
+            mid = _quantile(held, 0.75)
+            m = replace(m, start_force=mid, start_top=min(_quantile(held, 0.9), TOP_SHARE * mid), starts=len(held))
         if len(self._slides) >= tn.slides_min:
             m = self._fit_slides(m)
         n, sx, sy, sxx, sxy, seen = self._spring
@@ -280,11 +288,14 @@ def learned_overrides(tune, model: WheelModel, pushes_set: bool = False) -> dict
     """``WheelTuning`` fields from what was learned, on top of ``tune`` (the configured design): ``rung`` steps
     gentler, never stiffer, and a friction push from the starts when none is configured (the slides' damping is not
     pushed: their fit read it up to four times high). Unknown: nothing.
-    Below RUNG_BARE only with a friction push: a gentle servo alone cannot move a sticky wheel at all."""
+    Below RUNG_BARE only with a friction push: a gentle servo alone cannot move a sticky wheel at all. Still hunting
+    at the last rung turns the plugin's settle law off: that wheel's slips are longer than its band."""
     out: dict = {}
     pushes = pushes_set or model.starts >= LearnTuning.starts_min
     k = model.rung if pushes or model.rung <= RUNG_BARE else max(RUNG_BARE, model.rung - RUNG_PATIENCE)
     k = min(k, DESIGN_RUNGS)
+    if model.rung >= RUNG_MAX:
+        out["settle"] = False
     if k > 0:
         out.update(bandwidth_hz=min(tune.bandwidth_hz, max(BANDWIDTH_FLOOR, tune.bandwidth_hz * RUNG_BANDWIDTH ** k)),
                    inertia=min(tune.inertia, max(INERTIA_FLOOR, tune.inertia * RUNG_INERTIA ** k)),
@@ -292,8 +303,6 @@ def learned_overrides(tune, model: WheelModel, pushes_set: bool = False) -> dict
     if not pushes or pushes_set:
         return out
     friction = SLIDE_SHARE * model.start_force
-    if model.slides >= LearnTuning.slides_min and model.slide_force > 0.0:
-        friction = min(model.slide_force, friction)
     out.update(ff_friction=friction, plan_s=PLAN_S)
     if model.start_top > STICKY * friction:
         out["ff_breakaway"] = friction + BREAKAWAY_SHARE * (model.start_top - friction)

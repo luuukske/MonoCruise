@@ -105,6 +105,7 @@ static volatile float g_steer;
 static volatile float g_steer_rate;
 static volatile float g_steer_rate_fast;
 static volatile float g_steer_interval;
+static volatile float g_settle_step;
 static uint32_t g_stamp_last;
 static LARGE_INTEGER g_stamp_at;
 static double g_frame_hz;
@@ -479,6 +480,10 @@ static double servo_delta(int live, double dt) {
         in.ff_friction = ffb_finite((double)g_map->ff_friction);
         in.ff_breakaway = ffb_finite((double)g_map->ff_breakaway);
         in.stuck = ffb_servo_stuck(steer_still(), (double)g_steer_interval);
+        in.settle = (g_map->servo_flags & FFB_SF_SETTLE) != 0;
+        in.still_s = steer_still();
+        in.interval = (double)g_steer_interval;
+        in.step = (double)g_settle_step;
         age = target_age(g_map->servo_stamp);
         ffb_servo_aim(in.target, (double)g_map->servo_rate, in.accel, age + ahead, &target, &in.rate);
         ffb_servo_ff_motion(&in, (g_map->servo_flags & FFB_SF_FF_PLAN) != 0, (double)g_map->plan_rate,
@@ -953,7 +958,8 @@ static void publish_status(void) {
     if (g_dead) {
         bits |= FFB_ST_DEAD;
     }
-    g_map->status = bits | FFB_ST_ONE_SIDED | FFB_ST_DAMP_FIRST | FFB_ST_PUSH_AHEAD | FFB_ST_FF_PLAN | FFB_ST_BREAKAWAY;
+    g_map->status = bits | FFB_ST_ONE_SIDED | FFB_ST_DAMP_FIRST | FFB_ST_PUSH_AHEAD | FFB_ST_FF_PLAN | FFB_ST_BREAKAWAY
+                    | FFB_ST_SETTLE;
 }
 
 static void WINAPI on_frame(unsigned int event, const void *info, void *ctx) {
@@ -1037,6 +1043,9 @@ static void WINAPI on_steering(const char *name, unsigned int index, const void 
     }
     if (v != prev || g_steer_moved_at.QuadPart == 0) {
         g_steer_moved_at = now;
+    }
+    if (last.QuadPart && v != prev) {
+        g_settle_step = (float)ffb_settle_step((double)g_settle_step, fabs((double)v - (double)prev));
     }
     last = now;
     prev = v;

@@ -146,6 +146,13 @@ static double ffb_torque_step(FfbTorque *s, double target, int on, double dt) {
 #define FFB_BREAK_RAMP_S 0.3
 #define FFB_BREAK_BAND 0.003
 #define FFB_BREAK_HOLD 0.0015
+/* The settle law (servo flag 4, status 4096): the push finishes a move down to a band round the target, then parks. */
+#define FFB_SETTLE_BAND 0.0005
+#define FFB_SETTLE_RISE 0.0005
+#define FFB_SETTLE_RAMP_S 1.0
+#define FFB_SETTLE_DROP_S 0.02
+#define FFB_SETTLE_STEP_MAX 0.005
+#define FFB_SETTLE_RELEASE 0.001
 #define FFB_I_MOVE_RATE 0.3
 #define FFB_D_LAG_MAX_S 0.05
 #define FFB_I_SHARE 1.0
@@ -173,6 +180,10 @@ typedef struct FfbServo {
     double peak;
     double ff;
     double d_ref;
+    int held;
+    double held_u;
+    double u_prev;
+    double ff_prev;
 } FfbServo;
 
 /* What MonoCruise asks for: ``target`` and ``rate`` in counterclockwise lock, gains per lock, ``dir`` the torque sign
@@ -201,6 +212,10 @@ typedef struct FfbServoIn {
     double ff_accel;
     double d_lag;
     double i_move;
+    int settle;
+    double still_s;
+    double interval;
+    double step;
 } FfbServoIn;
 
 static void ffb_servo_init(FfbServo *s) {
@@ -218,6 +233,10 @@ static void ffb_servo_init(FfbServo *s) {
     s->peak = 0.0;
     s->ff = 0.0;
     s->d_ref = 0.0;
+    s->held = 0;
+    s->held_u = 0.0;
+    s->u_prev = 0.0;
+    s->ff_prev = 0.0;
     for (i = 0; i < FFB_BUZZ_FLIPS; i++) {
         s->flips[i] = 0.0;
     }
@@ -271,13 +290,27 @@ static double ffb_servo_ahead(double lead, double reading_age) {
 
 /* The breakaway ramp: 0 while the wheel's reading changed within FFB_STUCK_FROM steering readings, then up to 1 over
    FFB_BREAK_RAMP_S. Read off the angle, not its rate: a coarse encoder reads a slow slide as steps with still readings. */
-static double ffb_servo_stuck(double still_s, double interval) {
+static double ffb_servo_stuck_over(double still_s, double interval, double ramp) {
     double n;
     if (!(interval > 0.0) || !(still_s >= 0.0)) {
         return 0.0;
     }
-    n = (still_s - FFB_STUCK_FROM * interval) / FFB_BREAK_RAMP_S;
+    n = (still_s - FFB_STUCK_FROM * interval) / ramp;
     return n > 0.0 ? (n < 1.0 ? n : 1.0) : 0.0;
+}
+
+static double ffb_servo_stuck(double still_s, double interval) {
+    return ffb_servo_stuck_over(still_s, interval, FFB_BREAK_RAMP_S);
+}
+
+/* The reading's step as the settle law sees it: the smallest change lately, creeping up 0.1 % a change, bounded. */
+static double ffb_settle_step(double step, double change) {
+    double grown = step * 1.001;
+    if (!(change > 0.0)) {
+        return step;
+    }
+    step = step > 0.0 ? (change < grown ? change : grown) : change;
+    return step < FFB_SETTLE_STEP_MAX ? step : FFB_SETTLE_STEP_MAX;
 }
 
 /* The force the rim needs to move as asked: its inertia times ``ff_accel``, its damping times ``ff_rate`` and its
@@ -299,7 +332,18 @@ static double ffb_servo_ff(const FfbServoIn *in, double cap, double err) {
         double moving = tanh(ffb_finite(in->ff_rate) / FFB_FF_STILL_RATE);
         double friction = in->ff_friction;
         double rest = (1.0 - fabs(moving)) * tanh(ffb_finite(err) / FFB_FF_REST_BAND);
-        if (in->ff_breakaway > friction) {
+        if (in->ff_breakaway > friction && in->settle) {
+            double band = FFB_SETTLE_BAND + 0.5 * in->step;
+            double near = (fabs(ffb_finite(err)) - band) / FFB_SETTLE_RISE;
+            int close = fabs(ffb_finite(err)) < FFB_BREAK_BAND && fabs(moving) < 0.5;
+            double base = close ? 0.0 : friction;
+            double stuck = ffb_servo_stuck_over(in->still_s, in->interval, close ? FFB_SETTLE_RAMP_S : FFB_BREAK_RAMP_S);
+            double gate;
+            near = near > 0.0 ? (near < 1.0 ? near : 1.0) : 0.0;
+            gate = fabs(moving) > near ? fabs(moving) : near;
+            rest = close ? (1.0 - fabs(moving)) * copysign(near, ffb_finite(err)) : rest * near;
+            friction = base + (ffb_finite(in->ff_breakaway) - base) * stuck * gate;
+        } else if (in->ff_breakaway > friction) {
             double stuck = in->stuck > 0.0 ? (in->stuck < 1.0 ? in->stuck : 1.0) : 0.0;
             double off = (fabs(ffb_finite(err)) - FFB_BREAK_HOLD) / (FFB_BREAK_BAND - FFB_BREAK_HOLD);
             double gate;
@@ -311,6 +355,37 @@ static double ffb_servo_ff(const FfbServoIn *in, double cap, double err) {
         ff += friction * (moving + rest);
     }
     return ffb_clamp(ff, cap);
+}
+
+static void ffb_settle_reset(FfbServo *s) {
+    s->held = 0;
+    s->u_prev = 0.0;
+    s->ff_prev = 0.0;
+}
+
+/* The settle law's part of a tick: the friction push lets go over FFB_SETTLE_DROP_S instead of at once, and a wheel
+   standing within the band of a still target parks: the output is held as it was and the integral stands. */
+static void ffb_settle_note(FfbServo *s, const FfbServoIn *in, double e, double dt) {
+    double band = FFB_SETTLE_BAND + 0.5 * in->step;
+    double release = in->step > FFB_SETTLE_RELEASE ? in->step : FFB_SETTLE_RELEASE;
+    int standing;
+    int calm;
+    if (!in->settle) {
+        s->held = 0;
+        return;
+    }
+    if (fabs(s->ff) < fabs(s->ff_prev) && s->ff * s->ff_prev >= 0.0) {
+        s->ff = s->ff_prev + (s->ff - s->ff_prev) * (1.0 - exp(-dt / FFB_SETTLE_DROP_S));
+    }
+    s->ff_prev = s->ff;
+    standing = in->interval > 0.0 && in->still_s >= FFB_STUCK_FROM * in->interval;
+    calm = fabs(ffb_finite(in->rate)) < FFB_FF_STILL_RATE && fabs(ffb_finite(in->ff_rate)) < FFB_FF_STILL_RATE;
+    if (s->held && (fabs(e) > band + release || !calm)) {
+        s->held = 0;
+    } else if (!s->held && standing && calm && fabs(e) <= band) {
+        s->held = 1;
+        s->held_u = s->u_prev;
+    }
 }
 
 /* With the plan the push ahead moves the rim on time, so the feedback must not also chase what the wheel reading
@@ -364,10 +439,12 @@ static double ffb_servo_pid(FfbServo *s, const FfbServoIn *in, double target, do
     if (!in->dir || !(in->kp >= 0.0) || !(in->kd >= 0.0) || !(in->ki >= 0.0)) {
         s->integ = 0.0;
         s->d_ref = 0.0;
+        ffb_settle_reset(s);
         return 0.0;
     }
     e = target - angle;
     s->ff = ffb_servo_ff(in, cap, e);
+    ffb_settle_note(s, in, e, dt);
     p = in->kp * e + s->ff;
     if (in->d_lag > 0.0) {
         s->d_ref += (in->rate - s->d_ref) * (1.0 - exp(-dt / in->d_lag));
@@ -378,13 +455,15 @@ static double ffb_servo_pid(FfbServo *s, const FfbServoIn *in, double target, do
     room = in->damp_first ? cap - fabs(d) : cap;
     u = in->damp_first ? p + s->integ : p + d + s->integ;
     moving = in->i_move > 0.0 && (fabs(in->rate) > in->i_move || fabs(ffb_finite(in->ff_rate)) > in->i_move);
-    if (!moving && (fabs(u) < room || u * e < 0.0)) {
+    if (!moving && !s->held && (fabs(u) < room || u * e < 0.0)) {
         s->integ = ffb_clamp(s->integ + in->ki * e * dt, FFB_I_SHARE * cap);
     }
-    u = ffb_servo_sum(p, d, s->integ, cap, in->damp_first);
+    if (in->only && s->integ * in->only < 0.0) {
+        s->integ = 0.0;
+    }
+    u = s->held ? ffb_clamp(s->held_u, cap) : ffb_servo_sum(p, d, s->integ, cap, in->damp_first);
+    s->u_prev = u;
     if (in->only) {
-        s->integ = s->integ * in->only < 0.0 ? 0.0 : s->integ;
-        u = ffb_servo_sum(p, d, s->integ, cap, in->damp_first);
         return u * in->only < 0.0 ? 0.0 : (double)in->dir * u;
     }
     return (double)in->dir * u;
@@ -475,6 +554,7 @@ static double ffb_servo_step(FfbServo *s, double want, int on, double angle, dou
         ffb_buzz_note(s, want, angle);
     } else {
         s->integ = 0.0;
+        ffb_settle_reset(s);
     }
     s->gain += on ? dt / FFB_SERVO_IN_S : -dt / FFB_SERVO_OUT_S;
     s->gain = s->gain < 0.0 ? 0.0 : (s->gain > 1.0 ? 1.0 : s->gain);

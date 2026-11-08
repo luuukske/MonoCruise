@@ -58,7 +58,8 @@ def test_the_switch_turns_the_hold_and_the_learned_design_on_and_off(monkeypatch
     monkeypatch.setattr(settings, "la_wheel_learning", False, raising=False)
     off = cls(debug_root=tmp_path)._tuning()[1].wheel
     assert on.hold and on.learn and not off.hold and not off.learn
-    assert replace(on, hold=False, learn=False) == off, "nothing else in the tuning moves"
+    assert on.settle and not off.settle
+    assert replace(on, hold=False, learn=False, settle=False) == off, "nothing else in the tuning moves"
 
 
 def test_the_runner_feeds_the_trace_to_the_learner_and_hands_the_assist_its_model(monkeypatch, settings, tmp_path):

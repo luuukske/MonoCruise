@@ -51,6 +51,28 @@ Newest last. Every measured effect is on simulated wheels.
     own breakaway hold-off (`FFB_BREAK_HOLD`), instead of 0.5: with the wheels' true parameters about 65 % of the
     tuning wheels parked 0.5 to 1.5 mlock off, inside the band where the layout 5 law leaves only the integral. And
     the plugin's C law may change behind a new status bit (the shipped DLL keeps working, Lukas rebuilds it).
+12. **Ladder patience without a friction push.** Without a learned push the design stays at most two steps down (a
+    gentle servo alone cannot move a sticky wheel), but two more hunts there take it further, one step per hunt.
+    Why: wheels that rang at the second step never stood still long enough to learn their friction, so they rang
+    for good. Effect (tuning subset of 60, full learning loop): rough wheels 22 to 11, pass share 0.40 either way.
+    Cost: such a wheel can end parked short until its friction is learned.
+13. **The friction push is 0.6 of the start force, the slide fit is no longer used.** Why: the steady-slide fit read
+    a wheel sliding on 271 as 3 and on 212 as 123, which made the breakaway push climb from almost nothing to the
+    top start and drop back every cycle (single-tick jumps of 0.5 to 1.0 of the breakaway). Effect: neutral on the
+    pass share (0.383 to 0.40 on the subset), fewer jumps.
+14. **A settle law in the plugin** (`plugins/ffb/ffb_signal.h`, servo flag bit 2, status bit 4096; no layout change,
+    the 128-byte block keeps its fields). The breakaway push finishes the move down to 0.5 mlock plus half a reading
+    step instead of standing off inside 1.5 mlock, climbs over 1 s from nothing near the target, lets go over 20 ms
+    instead of in one tick, and parks a wheel standing in that band at the FFB rate. Why: on the tuning set the
+    learned design left 95 of 160 wheels more than 1.5 mlock off, most of them in the 1.5 to 3 mlock zone where the
+    layout 5 push is only partly on. Effect (saved learned models, tuning set): pass 0.362 to 0.487 (the release at
+    30 ms gave 0.469, 60 ms 0.463, 12 ms 0.431). Cost: on the light, very sticky preset (`sticky`) each start throws
+    the rim 8 to 15 mlock and the law hunts; hence decision 15. C law, Python mirror and parity tests changed together;
+    the C test builds with gcc and passes. **The DLL is not rebuilt** (no MSVC here): `core/sdk_installer/own/` and
+    its SHA in `own.py` are unchanged, the shipped layout 5 DLL ignores the flag bit, so nothing changes in game until
+    Lukas rebuilds it.
+15. **The learner turns the settle law off for a wheel that still hunts at its gentlest design** (rung 6, the hunt
+    count's top). Ten minutes of calm servo time step it back, so it is tried again about every ten minutes.
 
 ## Feature merit check
 
