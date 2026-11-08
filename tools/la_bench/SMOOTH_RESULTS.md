@@ -73,6 +73,16 @@ Newest last. Every measured effect is on simulated wheels.
     Lukas rebuilds it.
 15. **The learner turns the settle law off for a wheel that still hunts at its gentlest design** (rung 6, the hunt
     count's top). Ten minutes of calm servo time step it back, so it is tried again about every ten minutes.
+16. **Fixes found on the tuning set, 2026-11-08.** (a) The learner skips samples no newer than the last (so LA and
+    LKA can share one); the simulated drives restarted their clock at 0, which dropped most of the LA phase (no starts
+    learned at all): the sim now continues the clock. (b) The forces a standing wheel "resisted" included short
+    spikes it rode out by less than a reading step and forces from just before it stopped (832 read on a 480 wheel):
+    now a 50 ms low-pass of the force, counted only after the last reading change, recorded every second a wheel
+    stands (a wheel that never moves taught nothing before), and the top start is the most it resisted. (c) The
+    quantum needs 60 reading steps, not 200: coarse encoders made too few in a minute (20 of 160 read as fine).
+    (d) Two more design steps, down to a design inertia of 50 (light rims with 45 to 60 ms of delay rang at 150);
+    settle off after eight hunts. Effect, tuning set, learned + settle law: 66 to 76 of 160; quantum right on 153 of
+    160 (was 140).
 
 ## Feature merit check
 
@@ -121,4 +131,125 @@ pass share too) and the five presets do not regress against the handoff baseline
 
 ## Results
 
-(pending)
+All simulated, on the bench condition (standing, hands off). Run with `python -m tools.la_bench.smooth_eval held
+--out <file>` (and `tune`, `presets`; `--part k --of n` splits a run). Each wheel gets a 60 s manual drive (hands on the
+rim, servo off), then 30 LA holds of 4 s each (still targets 5 to 30 mlock off, the servo on and nothing else pushed),
+the learner fed the plugin's trace samples throughout; then the 0.02 lock step test on what it learned.
+
+Columns: **default** is what a driver gets today without the wheel check (2 Hz on 650, no push); **learned, layout 5**
+is the learner and the target hold with the plugin as shipped; **learned + settle law** adds the plugin's new settle
+law (decision 14, needs the rebuilt DLL); **reference** is the tuning grid's most robust design given the true rim's
+friction, delay and damping (what a perfect wheel check would know), with the hold.
+
+### Held-out set (40 wheels, every fifth of the 200; evaluated once, on the final configuration)
+
+| metric | default (today, no check) | learned, layout 5 plugin | learned + settle law | reference (true rim) + hold | reference + settle law |
+|---|---|---|---|---|---|
+| pass | 0/40 (0 %) | 15/40 (38 %) | 18/40 (45 %) | 17/40 (42 %) | 25/40 (62 %) |
+| smooth (jitter, jumps, flips all in) | 0/40 | 22/40 | 30/40 | 29/40 | 32/40 |
+| jitter > 0.05 | 40 | 17 | 9 | 11 | 8 |
+| jumps > 0.5 | 39 | 12 | 5 | 7 | 4 |
+| flips > 1 | 40 | 3 | 3 | 4 | 4 |
+| final > 1.5 mlock | 33 | 22 | 21 | 21 | 13 |
+| jitter median / p90 | 0.673 / 1.161 | 0.001 / 0.108 | 0.000 / 0.067 | 0.000 / 0.225 | 0.000 / 0.106 |
+| jump median / p90 | 2.290 / 3.59 | 0.013 / 0.77 | 0.000 / 0.56 | 0.000 / 0.74 | 0.000 / 0.46 |
+| flips median / p90 / worst | 6 / 19 / 42 | 0 / 1 / 8 | 0 / 1 / 6 | 0 / 0 / 32 | 0 / 1 / 16 |
+| final mlock median / p90 | 138.34 / 825.6 | 1.94 / 19.9 | 1.64 / 18.3 | 1.53 / 3.8 | 0.77 / 3.3 |
+| overshoot median / p90 | 19.14 / 66.41 | 0.00 / 1.14 | 0.02 / 1.00 | 0.00 / 1.15 | 0.03 / 1.46 |
+
+Convergence (after the manual drive and that many LA holds; no hold at 0, so 0 is the default design plus the hold):
+
+| LA holds | layout 5 | settle law |
+|---|---|---|
+| 0 | 3/40 | 2/40 |
+| 8 | 15/40 | 19/40 |
+| 16 | 16/40 | 22/40 |
+| 30 | 15/40 | 18/40 |
+
+### Tuning set (160 wheels), the same configuration
+
+| metric | default | learned, layout 5 | learned + settle law | reference + hold | reference + settle law |
+|---|---|---|---|---|---|
+| pass | 4/160 (2 %) | 61/160 (38 %) | 76/160 (48 %) | 77/160 (48 %) | 89/160 (56 %) |
+| smooth (jitter, jumps, flips all in) | 4/160 | 106/160 | 131/160 | 138/160 | 124/160 |
+| final > 1.5 mlock | 141 | 85 | 77 | 82 | 58 |
+
+How the tuning set moved through the run (learned + settle law where it exists): 2 % default; 26 % with the first
+learner and the hold at the 0.5 mlock limit; 38 % at the 1.5 mlock limit; 41 % with the settle law; 48 % after the
+start-force and ladder fixes (decisions 12 to 15 and the last commit).
+
+### The five presets against the handoff baseline
+
+The handoff baseline is the wheel check's own design for each preset (`run_check` on the model, full grid), held
+without the hold.
+
+| preset | handoff check design (no hold) | today's default | learned, layout 5 | learned + settle law |
+|---|---|---|---|---|
+| `r3` | verified, `bw1.44 z0.7 J598.845 dfirst ahead plan37ms`; pass: jitter 0.002, jump 0.01, flips 0, final 0.07, over 0.36 | fail: jitter 1.999, jump 6.43, flips 6, final 66.23, over 3.68 | pass: jitter 0.000, jump 0.00, flips 0, final 1.25, over 0.00 | pass: jitter 0.000, jump 0.00, flips 0, final 1.44, over 0.00 |
+| `bare` | verified, `bw0.5 z1 J578.597 dfirst ahead plan33ms`; fail: jitter 0.000, jump 0.00, flips 0, final 1.66, over 0.00 | fail: jitter 2.023, jump 6.58, flips 5, final 251.31, over 25.87 | pass: jitter 0.000, jump 0.00, flips 0, final 1.23, over 0.00 | pass: jitter 0.000, jump 0.00, flips 0, final 0.89, over 0.00 |
+| `geared` | not verified, `bw0.5 z1.4 J50 dfirst`; fail: jitter 0.000, jump 0.00, flips 0, final 19.00, over 0.00 | pass: jitter 0.000, jump 0.00, flips 0, final 0.00, over 0.55 | pass: jitter 0.000, jump 0.00, flips 0, final 0.09, over 0.00 | pass: jitter 0.000, jump 0.00, flips 0, final 0.00, over 0.00 |
+| `sticky` | verified, `bw1.32 z0.7 J153.194 dfirst ahead break537 plan28ms`; pass: jitter 0.001, jump 0.00, flips 0, final 0.66, over 0.16 | fail: jitter 0.323, jump 1.79, flips 12, final 2.88, over 9.18 | pass: jitter 0.000, jump 0.00, flips 0, final 1.04, over 0.00 | pass: jitter 0.000, jump 0.00, flips 0, final 0.73, over 0.00 |
+| `old` | not verified, `bw2.5 z0.7 J100.207 dfirst ahead break584 plan16ms`; pass: jitter 0.001, jump 0.00, flips 0, final 0.00, over 6.55 | fail: jitter 1.254, jump 2.87, flips 10, final 7.14, over 15.04 | fail: jitter 0.000, jump 0.00, flips 0, final 2.18, over 0.11 | fail: jitter 0.000, jump 0.00, flips 0, final 3.78, over 0.23 |
+
+Against the handoff baseline: `bare` and `geared` now pass where the check's design did not (the check did not verify
+`geared` at all); `r3` and `sticky` still pass, smoother (no overshoot) but parked further off (1.44 against 0.07 and
+0.73 against 0.66 mlock); `old` is smooth but parked 2.2 to 3.8 mlock off, a regression on final error against a check
+design that was not verified and overshot 6.5 times the step. Per preset the result depends on the learning path: an
+earlier run of the same code with other seeds parked `old` at 0.13 and missed `bare`.
+
+### What the learner learns, and how fast (held-out set, simulated)
+
+- quantum within 5 % (or both fine): 38/40; fine read as coarse 0; coarse read as fine 2
+- reading rate within 5 % of the model's tick-quantised rate: 40/40
+- game spring learned on 40/40, learned/true median 1.000, p10 0.995, p90 1.002
+- start force learned on 38/40, learned/true breakaway median 0.77, p10 0.52, p90 0.99
+- rung after the drive: {2: 1, 3: 2, 4: 7, 5: 9, 6: 8, 7: 1, 8: 12}
+- tracking slow ramp 0.06 at 0.05/s: default rms median 27.2 mlock (21 ran away), learned median 31.2 mlock p90 41.1 (0 ran away)
+- tracking slow sine 0.03 at 0.4 Hz: default rms median 35.2 mlock (20 ran away), learned median 16.5 mlock p90 23.0 (0 ran away)
+
+- Reading rate and quantum: from the first minute of manual driving (60 reading steps). The game's centring: exact on
+  the model, where it is a pure spring; in the game it depends on speed and cornering and the existing calibration
+  still sets the servo.
+- Start force: from LA's own holds, ready after 8 to 16 holds of 4 s (about a minute of LA steering at still targets);
+  it reads low (median 0.77 of the model's breakaway), the safe side: an under-push leaves the rest to the feedback.
+- Design step: the bench condition makes the default design hunt on almost every wheel, so most wheels step down
+  within the first holds; pass shares peak after 8 to 16 holds and the ladder's later steps cost a little (45 % at 30
+  holds against 55 % at 16 on the held-out set with the settle law).
+- Inertia and delay: not learned (decision 7).
+
+### Tracking cost
+
+Error rms with the learned design (settle law) against the default, on a slow ramp and a slow sine (the hold not
+involved): see the last two lines above. The default ran away (the bench aborted) on about half the wheels; the
+learned design never did, and on the wheels where both ran its slow-ramp error is similar (27 against 31 mlock rms
+median) and its slow-sine error lower. Fast moves were not measured.
+
+### Exit reason
+
+Deadline (15:00 UTC on 2026-11-08, the end Lukas set when he came back), unsatisfactory: 18 of 40 held-out wheels
+meet every limit (the brief asks for all), and `old` regresses on final error against the handoff baseline. Not
+stuck: every step of the run improved the tuning set, and no cap, threshold, default or safety check was changed.
+
+### Known limits (simulated)
+
+- Final error: about half the held-out wheels park more than 1.5 mlock off, a few of them never reach the target (p90
+  18 mlock): a light, delayed rim that keeps ringing at every design step never stands still long enough to learn its
+  friction, and without the friction push the gentle design cannot move a sticky wheel.
+- On the light, very sticky preset (`sticky`) the settle law hunts; the learner turns it off after eight hunts.
+- The model has no hands in the step test and a standing spring; the game's spring at speed was not modelled
+  credibly (decision 10).
+- Results per wheel depend on the learning path (seeds): treat single-wheel results as noisy, the shares as the result.
+
+### What only Lukas can confirm on the real wheel
+
+1. Rebuild `plugins/ffb` with MSVC (`plugins/ffb/README.md`, Build), copy it to `core/sdk_installer/own/` and put its
+   git blob SHA in `core/sdk_installer/own.py`; the game log or the bench should then show status bit 4096 (settle).
+   Until then the settle law is source only and MonoCruise's flag bit is ignored.
+2. With `la_wheel_learning` on (default), after a drive `config.json` should carry `la_wheel_learned`: a reading rate
+   near the game's frame rate, a quantum (0.00058 on the old wheel), a spring, and after some LA time a start force.
+3. Whether the parked wheel feels right with hands resting: the hold freezes the push where the wheel stopped; a hand
+   moving it more than about 1 mlock brings the servo back within 50 ms.
+4. Whether the design ladder steps down on a good wheel in normal LA driving (log line "servo hunted at a still
+   target"); if it does, the R3's feel changes, and `la_wheel_learning: false` restores today's servo exactly.
+5. The lane keeping assist's pulses: they move the target, so the hold should rarely park during one; check that
+   pulses feel the same.
