@@ -279,6 +279,10 @@ class LaneAssist:
         """Below 1 after the ring guard cut the pull."""
         return self._wheel.ring_scale
 
+    @property
+    def wheel(self) -> WheelActuator:
+        return self._wheel
+
     def update(self, f: Frame | None, gains: Gains | None, wheel: Wheel, tmp: bool = False,
                path: WantedPath = LANE, engage: int = SIDE_NONE, hand: HandPush | None = None) -> AssistOutput:
         """One tick. ``gains`` is None while the calibration is learning; ``wheel.ok`` needs a version 4 plugin.
@@ -484,7 +488,7 @@ class LaneAssist:
             reason = "pulse" if self._auth > 0.0 else "standby"
         only = (1 if self._pulse_side == SIDE_RIGHT else -1) if tn.pulse and self._pulse_side != SIDE_NONE else 0
         servo = self._wheel.commands(gains, self._target, self._target_rate, self._auth, wheel, self._speed, only,
-                                     (self._plan_rate, self._plan_accel))
+                                     (self._plan_rate, self._plan_accel), dt=dt)
         if self._frozen is not None and servo.cap:
             servo = replace(servo, cap=min(servo.cap, round(self._frozen * ease(self._auth))))
         return AssistOutput(
@@ -789,7 +793,7 @@ class LaneAssist:
         self._lat_hold = 0.0
         if self._auth <= 0.0:
             self._target = wheel.steer if wheel.ok else None
-        servo = self._wheel.commands(gains, self._target, 0.0, self._auth, wheel, self._speed)
+        servo = self._wheel.commands(gains, self._target, 0.0, self._auth, wheel, self._speed, dt=dt)
         return AssistOutput(
             servo=servo, authority=self._auth, reason=reason, bias_m=self._bias,
             target=self._target if self._target is not None else 0.0, steer=wheel.steer, speed_kmh=kmh,

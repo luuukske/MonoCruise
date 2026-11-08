@@ -28,6 +28,10 @@ BREAKAWAY_STILL = 3
 BREAKAWAY_STARTS = 8
 QUANTUM_MIN = 1e-4
 SPREAD_SEED = 20261106
+STALL_SEED = 20261107
+STICK_SPEED_RATE = 0.1
+CONTACT_HZ = 40.0
+CONTACT_DAMPING = 0.5
 
 
 @dataclass(frozen=True)
@@ -56,6 +60,12 @@ class WheelParams:
     reading_hz: float = 0.0
     breakaway: float = 0.0
     breakaway_spread: float = 0.0
+    dwell_s: float = 0.0
+    backlash: float = 0.0
+    motor_share: float = 0.2
+    stick_speed: float = 0.0
+    stall_every_s: float = 0.0
+    stall_s: float = 0.0
 
 
 class SimWheel:
@@ -82,12 +92,32 @@ class SimWheel:
         self._draws = random.Random(SPREAD_SEED)
         self.start_force = params.breakaway
         self.standing = True
+        self.stood_at = -math.inf
+        self.rim = steer0
+        self.rim_rate = 0.0
+        self._stalls = random.Random(STALL_SEED)
+        self.stall_until = 0.0
+        self.external = 0.0
+        self.next_stall = self._stalls.expovariate(1.0 / params.stall_every_s) if params.stall_every_s > 0.0 else math.inf
 
     def _stood(self) -> None:
         p = self.params
-        if not self.standing and p.breakaway_spread > 0.0:
-            self.start_force = p.breakaway * (1.0 + p.breakaway_spread * self._draws.uniform(-1.0, 1.0))
+        if not self.standing:
+            self.stood_at = self.time
+            if p.breakaway_spread > 0.0:
+                self.start_force = p.breakaway * (1.0 + p.breakaway_spread * self._draws.uniform(-1.0, 1.0))
         self.standing = True
+
+    def _start_force(self) -> float:
+        p = self.params
+        if p.dwell_s <= 0.0:
+            return max(p.stick, self.start_force)
+        built = 1.0 - math.exp(-(self.time - self.stood_at) / p.dwell_s) if self.standing else 0.0
+        return p.stick + max(0.0, self.start_force - p.stick) * built
+
+    def _slide(self, rate: float) -> float:
+        p = self.params
+        return p.stick + p.stick_speed * math.tanh(abs(rate) / STICK_SPEED_RATE) if p.stick_speed else p.stick
 
     @property
     def time(self) -> float:
@@ -103,25 +133,68 @@ class SimWheel:
 
     def _advance(self, ccw: float) -> None:
         p, h = self.params, self.h
+        if p.backlash > 0.0:
+            self._advance_play(ccw)
+            return
         force = ccw - p.spring * self.steer - p.damping * self.rate
         if p.cog:
             force += p.cog * math.sin(2.0 * math.pi * self.steer / p.cog_period)
+        if self.external:
+            force += self.external
         if p.stick > 0.0:
-            if abs(self.rate) < STILL and abs(force) <= max(p.stick, self.start_force):
+            if abs(self.rate) < STILL and abs(force) <= self._start_force():
                 self.rate = 0.0
                 self._stood()
                 return
             self.standing = False
-            force -= math.copysign(p.stick, self.rate if abs(self.rate) >= STILL else force)
+            force -= math.copysign(self._slide(self.rate), self.rate if abs(self.rate) >= STILL else force)
         new = self.rate + force / p.inertia * h
         self.rate = 0.0 if p.stick > 0.0 and self.rate * new < 0.0 else new
         self.steer += self.rate * h
+        self.rim, self.rim_rate = self.steer, self.rate
+
+    def _advance_play(self, ccw: float) -> None:
+        """Motor and rim with ``backlash`` of play between them, a stiff damped contact at either end of it."""
+        p, h = self.params, self.h
+        jm, jr = p.motor_share * p.inertia, (1.0 - p.motor_share) * p.inertia
+        k = jm * (2.0 * math.pi * CONTACT_HZ) ** 2
+        gap = self.steer - self.rim
+        pen = abs(gap) - 0.5 * p.backlash
+        contact = 0.0
+        if pen > 0.0:
+            contact = math.copysign(k * pen, gap) + 2.0 * CONTACT_DAMPING * math.sqrt(k * jm) * (self.rate - self.rim_rate)
+            contact = contact if contact * gap > 0.0 else 0.0
+        motor = ccw - p.spring * self.steer - p.motor_share * p.damping * self.rate - contact
+        if p.cog:
+            motor += p.cog * math.sin(2.0 * math.pi * self.steer / p.cog_period)
+        self.rate += motor / jm * h
+        self.steer += self.rate * h
+        force = contact - (1.0 - p.motor_share) * p.damping * self.rim_rate + self.external
+        if p.stick > 0.0:
+            if abs(self.rim_rate) < STILL and abs(force) <= self._start_force():
+                self.rim_rate = 0.0
+                self._stood()
+                return
+            self.standing = False
+            force -= math.copysign(self._slide(self.rim_rate), self.rim_rate if abs(self.rim_rate) >= STILL else force)
+        new = self.rim_rate + force / jr * h
+        self.rim_rate = 0.0 if p.stick > 0.0 and self.rim_rate * new < 0.0 else new
+        self.rim += self.rim_rate * h
+
+    def _stalled(self) -> bool:
+        if self.time >= self.next_stall:
+            p = self.params
+            self.stall_until = self.time + p.stall_s * self._stalls.uniform(0.5, 1.0)
+            self.next_stall = self.stall_until + self._stalls.expovariate(1.0 / p.stall_every_s)
+        return self.time < self.stall_until
 
     def substep(self, servo: ServoCommand = SERVO_OFF, torque: float = 0.0) -> None:
         if self.n % self.substeps == 0:
             hz = self.params.reading_hz
             # Within half a tick: at an FFB rate of 120.6 two ticks fall 0.1 ms short of 1/60 s and it read at 40 Hz.
             fresh = not hz or self.held_reading is None or self.time - self.read_at >= 1.0 / hz - 0.5 / self.frame_hz
+            if fresh and self.params.stall_every_s > 0.0 and self.held_reading is not None:
+                fresh = not self._stalled()
             if fresh:
                 self.held_reading, self.read_at = self._read(), self.time
                 self.readings += 1

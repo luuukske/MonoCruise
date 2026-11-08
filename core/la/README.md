@@ -226,6 +226,42 @@ other way is a `conflict`. Disagreeing, it is dropped with a warning and the cal
 steering gain carried to another truck is off by a few percent at most on the drives so far; the bend scale and
 the correction take that up.
 
+## Wheel learning and the target hold
+
+Simulated only so far (`tools/la_bench/SMOOTH_RESULTS.md`); nothing here has run on a real wheel. With
+`la_wheel_learning` on (the default) the servo needs no wheel check: `core/la/wheel_learner.py` learns the wheel from
+the plugin's trace block (every FFB update: the reading, the game's force, what went to the wheel, the servo's part,
+the steering frame count) while the driver drives, and `core/la/hold.py` keeps the servo quiet at the target.
+
+What it learns, and from what (nothing extra is ever pushed; the wheel only moves as the driver or LA moves it):
+
+| estimate | from | used for |
+|---|---|---|
+| reading rate | the steering frame count, always | reported |
+| reading step (quantum) | the reading's changes with the servo off (a hunting servo reads in big steps only) | the hold's band |
+| game's centring | the game's force against the angle, servo off | reported (the calibration still sets the servo) |
+| start force, its top | the force a standing wheel started on after a slow climb, or the forces it stood against for 0.15 s, while LA steers (hands included, which is what the servo must move) | the friction push and the breakaway push |
+| design step (`rung`) | the hold: a still target the servo flipped round 4 times in 2 s without parking | one step gentler each time, back one step after 10 minutes of servo time without a hunt |
+
+Not learned: the rim's own inertia and the delay. With hands on the rim they do not show in normal driving, so the
+design steps down on the hunt they cause instead. Every estimate starts unknown, which leaves the servo exactly as
+configured (the defaults or the wheel check's keys); a step only ever lowers the bandwidth and the design inertia and
+raises the damping (`learned_overrides`), down to 0.5 Hz on 150, and below the second step only once the friction push
+is known, since a gentle servo alone cannot move a sticky wheel. The friction push is 0.6 of the start force (an
+under-push leaves the rest to the feedback), climbing to 1.2 of the way to the top start while the wheel stands; a
+configured push (`la_ff_*`) wins. The model is bounded on every field, saved to `la_wheel_learned` at most once a
+minute, and shared by LA and the lane keeping assist.
+
+The target hold runs at MonoCruise's 20 Hz on the plugin's reading. A wheel whose reading stays within half a reading
+step plus 0.25 mlock of a still target for 0.15 s (after 1.5 s within 1.5 mlock, the plugin's own breakaway hold-off),
+or rattles over at most 3 mlock round it for 0.5 s (a motor bouncing in its play), has its gains and friction pushes
+faded to nothing over 0.15 s: the plugin's integral then stands still and keeps the force that parked the wheel, so the
+output neither jitters nor flips. The reading or the target leaving the band brings the servo back over 0.05 s. It only
+ever lowers the gains the actuator asks for, so the caps, the slew and the buzz and ring guards are untouched, and it
+works with the layout 5 plugin as it is (no DLL change). Its limit, in the model: the last 1.5 mlock is the
+integral's alone (the plugin's breakaway push stands off there), so a sticky wheel with a fine encoder is often parked
+1 to 2 mlock short.
+
 ## Adding a path source
 
 The lane follower is one path source. A later one (lane departure prevention, collision avoidance with a wanted
@@ -388,6 +424,8 @@ line crossed keeps the lane it left as the reference (see the lane under the tru
 | `la_min_speed_kmh` | 60 | arm speed |
 | `la_force_per_ms2`, `la_kappa_per_steer` | 0 | 0 learns them; any other value is used as is, sign included |
 | `la_saved_calibration` | {} | written by MonoCruise: the last live calibration, used at the next start once the drive confirms its sign (Calibration) |
+| `la_wheel_learning` | true | learn the wheel from normal driving and park the servo at a still target (Wheel learning). LA and the lane keeping assist; false runs the servo exactly as configured |
+| `la_wheel_learned` | {} | written by MonoCruise: what the wheel learner knows, kept for the next start; delete it to learn afresh |
 | `la_tmp_enabled` | false | allow on TruckersMP |
 | `la_follow_all` | false | test: keep it on through junctions, forks, merges and lane switches |
 | `la_always_on` | false | test: never hand back to the driver and no bend limit; hands-on check off |

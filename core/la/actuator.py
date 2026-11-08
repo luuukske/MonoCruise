@@ -9,8 +9,10 @@ from __future__ import annotations
 
 import math
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
+from core.la.hold import HoldOut, TargetHold
+from core.la.wheel_learner import WheelModel, learned_overrides
 from core.lane_departure.command import LEAD_MAX_S, SERVO_CAP_UNITS, SERVO_OFF, ServoCommand
 
 STRENGTH_MAX = 2.0
@@ -51,6 +53,8 @@ class WheelTuning:
     lead_s: float = 0.0
     plan_s: float = 0.0
     ff_breakaway: float = 0.0
+    hold: bool = False
+    learn: bool = False
 
 
 @dataclass(frozen=True)
@@ -125,7 +129,11 @@ def ease(u: float) -> float:
 
 class WheelActuator:
     def __init__(self, tuning: WheelTuning | None = None) -> None:
-        self.tune = tuning or WheelTuning()
+        self.base = tuning or WheelTuning()
+        self.tune = self.base
+        self.model = WheelModel()
+        self.hunts = 0
+        self._hold = TargetHold()
         self._scale = 1.0
         self._flips: deque[float] = deque()
         self._sign = 0
@@ -137,6 +145,15 @@ class WheelActuator:
         self._still_t = 0.0
         self._held_at = -math.inf
         self._last_steer: float | None = None
+
+    def learned(self, model: WheelModel) -> None:
+        """What the wheel learner knows now; with ``learn`` it steps the design and adds the friction push."""
+        if model == self.model:
+            return
+        self.model = model
+        if self.base.learn:
+            pushes = bool(self.base.ff_inertia or self.base.ff_damping or self.base.ff_friction)
+            self.tune = replace(self.base, **learned_overrides(self.base, model, pushes_set=pushes))
 
     @property
     def ring_scale(self) -> float:
@@ -250,7 +267,7 @@ class WheelActuator:
 
     def commands(self, gains: Gains | None, target: float | None, rate: float, authority: float,
                  wheel: Wheel, speed_ms: float = 0.0, only: int = 0,
-                 plan: tuple[float, float] | None = None) -> ServoCommand:
+                 plan: tuple[float, float] | None = None, dt: float = 0.0) -> ServoCommand:
         """The servo request: hold ``target`` moving at ``rate``; ``cancel_share`` of the game's steady force goes.
         ``only`` +1 or -1 lets it push only that way (counterclockwise positive), never back.
 
@@ -259,18 +276,32 @@ class WheelActuator:
         return further, closed-loop model 2026-11-06). The push ahead fades in with the authority like the gains.
         """
         if gains is None or not gains.force_per_ms2 or not wheel.ok or target is None or authority <= 0.0:
+            self._hold.reset()
             return SERVO_OFF
         kp, kd, ki = self.gains(authority, gains.spring(speed_ms))
         if kp <= 0.0:
+            self._hold.reset()
             return SERVO_OFF
         tn = self.tune
+        park = self._park(dt, target, rate, wheel, authority)
+        kp, kd, ki = kp * park.gain, kd * park.gain, ki * park.integral
         pushes = bool(tn.ff_inertia or tn.ff_damping or tn.ff_friction)
         plan = plan if plan is not None else (rate, 0.0)
         return ServoCommand(
             target=target, rate=rate, kp=kp, kd=kd, ki=ki, cap=round(self.cap(authority)),
             direction=1 if gains.force_per_ms2 > 0.0 else -1, cancel=self.tune.cancel_share * ease(authority), only=only,
             damping_first=self.tune.damping_first, ff_inertia=self.tune.ff_inertia * ease(authority),
-            ff_damping=self.tune.ff_damping * ease(authority), ff_friction=self.tune.ff_friction * ease(authority),
+            ff_damping=self.tune.ff_damping * ease(authority),
+            ff_friction=self.tune.ff_friction * ease(authority) * park.gain,
             lead_s=self.tune.lead_s, ff_plan=pushes, plan_rate=plan[0] if pushes else 0.0,
-            plan_accel=plan[1] if pushes else 0.0, ff_breakaway=self.tune.ff_breakaway * ease(authority),
+            plan_accel=plan[1] if pushes else 0.0, ff_breakaway=self.tune.ff_breakaway * ease(authority) * park.gain,
         )
+
+    def _park(self, dt: float, target: float, rate: float, wheel: Wheel, authority: float) -> HoldOut:
+        """The target hold (``hold``, core/la/hold.py), at full authority only; a hunt it reports is counted."""
+        if not self.tune.hold or authority < 1.0:
+            self._hold.reset()
+            return HoldOut()
+        out = self._hold.update(dt, target, rate, wheel.steer, self.model.quantum, wheel.push)
+        self.hunts += out.hunted
+        return out

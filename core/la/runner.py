@@ -15,7 +15,8 @@ from pathlib import Path
 
 from core.lane_departure.command import SERVO_OFF, VERSION, PluginStatus, ServoCommand
 from core.lane_departure.detector import Frame
-from core.lane_departure.ffb_trace import TraceLog
+from core.la.wheel_learner import WheelModel, shared_learner
+from core.lane_departure.ffb_trace import TraceLog, TraceReader
 from core.sending_thread.debug_csv import TickDebugLog
 from core.settings import Settings
 
@@ -33,6 +34,7 @@ _CAL_LOG_S = 60.0
 _CAL_FLAP_S = 10.0
 _CAL_SAVE_S = 60.0
 _CAL_SAVE_CHANGE = 0.03
+_LEARN_SAVE_S = 60.0
 _STEER_STALE_S = 0.3
 _ARM_MARGIN_KMH = 10.0
 _IDLE = frozenset({"speed", "no_map", "no_data", "paused", "off"})
@@ -122,6 +124,11 @@ class AssistRunner:
         root = debug_root or Path(__file__).resolve().parents[2]
         self._debug = TickDebugLog(root, self.DEBUG_NAME, _DEBUG_HEADER, 0.05, 2.0, _DEBUG_MAX_BYTES)
         self._trace = TraceLog(root, self.TRACE_NAME, self.LABEL)
+        self._learner = shared_learner(getattr(Settings, "la_wheel_learned", None))
+        self._reader = TraceReader()
+        self._hunts_seen = 0
+        self._learned_at = time.monotonic()
+        self._learned_kept: WheelModel | None = None
 
     @property
     def output(self) -> AssistOutput:
@@ -135,6 +142,7 @@ class AssistRunner:
     def reset(self) -> None:
         """Back to silence; the calibration survives a toggle and is kept for the next start."""
         self._assist = LaneAssist(self._assist.tune)
+        self._hunts_seen = 0
         self._out = AssistOutput()
         self._hand.reset()
         self._push = HandPush()
@@ -148,7 +156,9 @@ class AssistRunner:
         if not repeat:
             wheel = self._wheel(status)
             gains = self._gains(frame, status, wheel)
+            self._learn(status)
             self._out = self._assist.update(frame, gains, wheel, tmp, engage=engage, hand=self._push)
+            self._note_hunts()
             self._note(status)
         self._watch_push(status)
         self._account(self._out, status)
@@ -158,6 +168,40 @@ class AssistRunner:
     def close(self) -> None:
         self._debug.close()
         self._trace.close()
+        self._reader.close()
+
+    def _learn(self, status: PluginStatus) -> None:
+        """Feeds the wheel learner the plugin's trace (every FFB update since the last tick) and hands the assist what it
+        knows; saved for the next start at most once a minute. A failure here never stops the assist."""
+        if not getattr(Settings, "la_wheel_learning", True):
+            return
+        try:
+            learner = self._learner
+            learner.direction = self._out.servo.direction if status.servo_capable else 0
+            for s in self._reader.read().samples:
+                learner.feed(s.t, s.steer, s.game, s.out, s.servo, s.steer_seq, s.flags)
+            self._assist.wheel.learned(learner.model)
+            self._keep_learned(learner.model)
+        except Exception:
+            logger.warning("%s wheel learner failed; the servo runs as configured", self.LABEL, exc_info=True)
+
+    def _note_hunts(self) -> None:
+        hunts = self._assist.wheel.hunts
+        for _ in range(max(0, hunts - self._hunts_seen)):
+            self._learner.note_hunt()
+            logger.info("%s servo hunted at a still target: one design step gentler (step %d)", self.LABEL,
+                        self._learner.model.rung)
+        self._hunts_seen = hunts
+
+    def _keep_learned(self, model: WheelModel) -> None:
+        now = time.monotonic()
+        if model == self._learned_kept or now - self._learned_at < _LEARN_SAVE_S:
+            return
+        self._learned_at, self._learned_kept = now, model
+        try:
+            Settings.save(values={"la_wheel_learned": model.to_dict()})
+        except Exception:
+            logger.debug("la_wheel_learned save failed", exc_info=True)
 
     def _watch_push(self, status: PluginStatus) -> None:
         """The driver's push from the plugin's readings, every tick; it needs the wheel's torque direction.
@@ -214,6 +258,7 @@ class AssistRunner:
             logger.info(*line)
         self._key = key
         self._assist = LaneAssist(tuning)
+        self._hunts_seen = 0
         self._hand = HandPushEstimator(PushTuning(inertia=tuning.wheel.inertia))
 
     def _tuning(self) -> tuple[tuple, AssistTuning, tuple]:
@@ -226,17 +271,18 @@ class AssistRunner:
                   bool(getattr(Settings, "la_damping_first", False)), _setting("la_servo_cap", 0.0))
         ahead = (_setting("la_ff_inertia", 0.0), _setting("la_ff_damping", 0.0), _setting("la_ff_friction", 0.0),
                  _setting("la_servo_lead_s", 0.0), _setting("la_ff_plan_s", 0.0), _setting("la_ff_breakaway", 0.0))
+        learn = bool(getattr(Settings, "la_wheel_learning", True))
         key = (arm, strength, bool(getattr(Settings, "la_tmp_enabled", False)),
                bool(getattr(Settings, "la_follow_all", False)), max(50.0, min(20000.0, inertia)), cancel,
-               bool(getattr(Settings, "la_always_on", False)), *design, *ahead)
+               bool(getattr(Settings, "la_always_on", False)), *design, *ahead, learn)
         line = ("LA settings: from %.0f km/h, strength %.2f, TruckersMP %s, follow everywhere %s, wheel inertia %.0f, "
                 "game force cancelled %.2f, always on (test, no hand-backs) %s, servo design %.2f Hz, damping %.2f, "
                 "damping first %s, servo cap %.0f (0 is 3000), push ahead inertia %.0f, damping %.0f, friction %.0f, "
-                "lead %.3f s, plan %.3f s, breakaway %.0f", *key)
+                "lead %.3f s, plan %.3f s, breakaway %.0f, wheel learning %s", *key)
         return key, AssistTuning(
             arm_kmh=arm, disarm_kmh=max(0.0, arm - _ARM_MARGIN_KMH),
             wheel=WheelTuning(strength=strength, inertia=key[4], cancel_share=key[5], **design_overrides(*design),
-                              **push_ahead_overrides(*ahead)),
+                              **push_ahead_overrides(*ahead), hold=learn, learn=learn),
             allow_tmp=key[2], follow_all=key[3], always_on=key[6],
         ), line if key[3] or key[6] else ()
 
