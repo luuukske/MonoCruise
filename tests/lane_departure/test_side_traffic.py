@@ -16,6 +16,7 @@ from core.road_layout.ego_route import route_behind
 SPEED = 25.0
 EGO_S = 100.0
 HALF_W, FRONT, REAR = 1.265, 3.333, 3.333
+EXIT_S = st.SideTuning().exit_s
 
 
 def lane_point(s: float, d: float = 0.0, radius: float | None = None):
@@ -109,8 +110,15 @@ def test_oncoming_traffic_counts_inside_two_and_a_half_seconds():
 
 
 def test_an_oncoming_car_passing_beside_us_is_beside_until_it_is_about_to_leave():
-    assert judge(Car(EGO_S + FRONT + 1.0, -4.5, oncoming=True, speed=10.0)).left.kind == BESIDE, "0.31 s to go"
-    assert judge(Car(EGO_S, -4.5, oncoming=True)).left is None, "0.13 s from leaving at 50 m/s closing"
+    # A bare cab's zone is crossed in about 0.4 s at this closing speed, so the rig has a trailer.
+    trailer = TrailerBody(ahead_m=-10.0, right_m=0.0, yaw_rel_rad=0.0, half_length_m=6.8)
+    rear = EGO_S - 16.8 - ZONE_REAR
+    closing = SPEED + 10.0
+    staying = Car(rear + 1.5 * EXIT_S * closing - 2.25, -4.5, oncoming=True, speed=10.0)
+    assert judge(staying, trailers=[trailer]).left.kind == BESIDE, f"{1.5 * EXIT_S:.1f} s to go"
+    leaving = Car(rear + 0.5 * EXIT_S * closing - 2.25, -4.5, oncoming=True, speed=10.0)
+    assert judge(leaving, trailers=[trailer]).left is None, \
+        f"{0.5 * EXIT_S:.1f} s from leaving at {closing:.0f} m/s closing"
 
 
 def test_parked_skipped_and_crossing_traffic_is_ignored():
@@ -230,16 +238,20 @@ ZONE_FRONT = 2.0
 def test_a_car_we_pass_about_to_drop_off_the_trailer_no_longer_counts():
     trailer = TrailerBody(ahead_m=-10.0, right_m=0.0, yaw_rel_rad=0.0, half_length_m=6.8)
     rear = EGO_S - 16.8 - ZONE_REAR
-    leaving = Car(rear + 0.5 - 2.25, 4.5, speed=SPEED - 5.0)
-    assert judge(leaving, trailers=[trailer]).right is None, "0.1 s from the end of the zone"
-    staying = Car(rear + 2.0 - 2.25, 4.5, speed=SPEED - 5.0)
-    assert judge(staying, trailers=[trailer]).right.kind == BESIDE, "0.4 s from it"
+    rel = 5.0
+    leaving = Car(rear + 0.5 * EXIT_S * rel - 2.25, 4.5, speed=SPEED - rel)
+    assert judge(leaving, trailers=[trailer]).right is None, f"{0.5 * EXIT_S:.1f} s from the end of the zone"
+    staying = Car(rear + 2.0 * EXIT_S * rel - 2.25, 4.5, speed=SPEED - rel)
+    assert judge(staying, trailers=[trailer]).right.kind == BESIDE, f"{2.0 * EXIT_S:.1f} s from it"
 
 
 def test_a_car_passing_us_about_to_clear_the_bumper_no_longer_counts():
     front = EGO_S + FRONT + ZONE_FRONT
-    assert judge(Car(front - 0.5 + 2.25, 4.5, speed=SPEED + 5.0)).right is None
-    assert judge(Car(front - 2.0 + 2.25, 4.5, speed=SPEED + 5.0)).right.kind == BESIDE
+    rel = 5.0
+    leaving = Car(front - 0.5 * EXIT_S * rel + 2.25, 4.5, speed=SPEED + rel)
+    assert judge(leaving).right is None, f"{0.5 * EXIT_S:.1f} s from clearing the zone"
+    staying = Car(front - 2.0 * EXIT_S * rel + 2.25, 4.5, speed=SPEED + rel)
+    assert judge(staying).right.kind == BESIDE, f"{2.0 * EXIT_S:.1f} s from it"
 
 
 def test_a_car_at_our_speed_at_the_edge_of_the_zone_still_counts():
@@ -250,8 +262,11 @@ def test_a_leaving_car_is_released_at_once_but_a_flicker_is_still_held():
     traffic = SideTraffic()
     route = make_route()
     front = EGO_S + FRONT + ZONE_FRONT
-    traffic.update(0.0, ego(), [Car(front - 2.0 + 2.25, 4.5, speed=SPEED + 5.0)], frozenset(), route, None)
-    released = traffic.update(0.05, ego(), [Car(front - 0.5 + 2.25, 4.5, speed=SPEED + 5.0)], frozenset(), route, None)
-    assert released.right is None
-    traffic.update(1.0, ego(), [Car(EGO_S, 4.5)], frozenset(), route, None)
-    assert traffic.update(1.05, ego(), [], frozenset(), route, None).right.kind == BESIDE
+    rel = 5.0
+    staying = Car(front - 2.0 * EXIT_S * rel + 2.25, 4.5, speed=SPEED + rel)
+    leaving = Car(front - 0.5 * EXIT_S * rel + 2.25, 4.5, speed=SPEED + rel)
+    assert traffic.update(0.0, ego(), [staying], frozenset(), route, None).right.kind == BESIDE
+    released = traffic.update(0.05, ego(), [leaving], frozenset(), route, None)
+    assert released.right is None, "inside the hold, but seen leaving"
+    assert traffic.update(1.0, ego(), [staying], frozenset(), route, None).right.kind == BESIDE
+    assert traffic.update(1.05, ego(), [], frozenset(), route, None).right.kind == BESIDE, "gone from the list: held"
