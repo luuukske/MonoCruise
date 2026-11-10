@@ -76,6 +76,38 @@ def test_a_wheel_let_go_after_a_hold_snaps_over_without_cutting_the_servo():
     assert act.ring_scale < 0.05, "a wheel that swings without a hold still takes it out at once"
 
 
+def test_a_ring_cut_takes_the_friction_pushes_down_with_the_gains():
+    act = WheelActuator(WheelTuning(ff_friction=150.0, ff_breakaway=300.0))
+    before = act.commands(GAINS, 0.01, 0.0, 1.0, Wheel(ok=True))
+    t = _guard_run(act, 0.0, 0.6, lambda t: 0.06 * math.sin(2.0 * math.pi * 2.0 * t), lambda t: 0.06 * math.sin(t * 13.0))
+    _guard_run(act, t, 3.0, lambda t: 0.0, lambda t: 0.0)
+    after, scale = act.commands(GAINS, 0.01, 0.0, 1.0, Wheel(ok=True)), act.ring_scale
+    assert 0.0 < scale < 0.2, "cut to zero, a few seconds into coming back"
+    assert after.kp == pytest.approx(before.kp * scale)
+    assert after.ff_friction == pytest.approx(before.ff_friction * scale), "2026-11-09 model of the old wheel: the push alone kept it swinging"
+    assert after.ff_breakaway == pytest.approx(before.ff_breakaway * scale)
+
+
+def test_a_ring_cut_leaves_the_integral_whole_down_to_its_floor_and_fades_it_below():
+    spring = 20000.0
+    full = WheelActuator(WheelTuning()).gains(1.0, spring)
+    act = WheelActuator(WheelTuning())
+    t = 0.0
+    for buzz in (1.0, 0.7, 0.6):
+        act.guard(t, 0.05, 0.0, Wheel(ok=True, buzz=buzz), 1.0)
+        t += 0.05
+    mild = act.gains(1.0, spring)
+    assert 0.6 < act.ring_scale < 0.7 and mild[0] < full[0] and mild[1] < full[1], "the cut still softens kp and kd"
+    assert mild[2] == pytest.approx(full[2]), "2026-11-09: the cut integral could not carry the game's centring"
+    assert act.lag_s(GAINS, 25.0) == pytest.approx(WheelActuator(WheelTuning()).lag_s(GAINS, 25.0))
+    for buzz in (0.5, 0.4, 0.3, 0.2):
+        act.guard(t, 0.05, 0.0, Wheel(ok=True, buzz=buzz), 1.0)
+        t += 0.05
+    deep = act.gains(1.0, spring)
+    assert act.ring_scale < WheelTuning().ring_ki_full_from
+    assert deep[2] == pytest.approx(full[2] * act.ring_scale / WheelTuning().ring_ki_full_from), "an uncut one ran away"
+
+
 def test_the_slow_overshoot_of_a_big_return_is_no_ring():
     act = WheelActuator(WheelTuning())
     t = _guard_run(act, 0.0, 1.0, lambda t: 0.03, lambda t: 0.1 * t)

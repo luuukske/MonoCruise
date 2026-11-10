@@ -9,6 +9,8 @@ wins. The design inertia is searched from the fitted one up: on the R3 a design 
 
 from __future__ import annotations
 
+import math
+from bisect import bisect_right
 from dataclasses import dataclass, replace
 
 from tools.la_bench.bench import sim_bench
@@ -38,6 +40,7 @@ SERVO_CAP = 3000.0
 RAMP_TRACK_MAX = 0.015
 NEIGHBOUR_TRACK_MAX = 0.03
 STILL_RATE = 0.005
+CHATTER_STAGE = ramp(0.15, 0.2, 0.1)
 MOVING_RATE = 0.03
 
 
@@ -117,12 +120,28 @@ def neighbours(p: WheelParams, ahead: bool = False, measured: bool = False) -> l
     return out
 
 
-def evaluate(params: WheelParams, design: Design, frame_hz: float, track_max: float = RAMP_TRACK_MAX) -> dict:
+def chatter(run: dict) -> float:
+    """The median change of the servo's force from one wheel reading to the next while the target moves: the crunch
+    of a servo whose gains amplify the reading's jitter (the R3 on 2026-11-09 felt it at 148 and 241, not at 42 and 85)."""
+    sent, samples = run["sent"], run["samples"]
+    times = [s[0] for s in sent]
+    moving = [s for s in samples if abs(sent[max(0, bisect_right(times, s[0]) - 1)][2]) > 0.0]
+    steps = sorted(abs(b[4] - a[4]) for a, b in zip(moving, moving[1:]))
+    return steps[len(steps) // 2] if steps else 0.0
+
+
+def evaluate(params: WheelParams, design: Design, frame_hz: float, track_max: float = RAMP_TRACK_MAX,
+             chatter_max: float | None = None) -> dict:
     bench = sim_bench(params, frame_hz)
     bench.say = lambda _msg: None
     bench.ready()
-    out = {"ok": True, "over": 0.0, "rise_s": None, "lag_s": None}
+    out = {"ok": True, "over": 0.0, "rise_s": None, "lag_s": None, "chatter": None}
     stages = (STICKY_STAGES if sticky(params) else AHEAD_STAGES) if design.pushes_ahead else STAGES
+    if chatter_max is not None:
+        out["chatter"] = chatter(bench.run_stage(CHATTER_STAGE, design, params.sign))
+        if out["chatter"] > chatter_max:
+            out["ok"] = False
+            return out
     for stage in stages:
         run = bench.run_stage(stage, design, params.sign)
         s = summarize(run)
@@ -138,7 +157,8 @@ def evaluate(params: WheelParams, design: Design, frame_hz: float, track_max: fl
     return out
 
 
-def holds(plants: list[WheelParams], design: Design, frame_hz: float) -> tuple[bool, list[dict]]:
+def holds(plants: list[WheelParams], design: Design, frame_hz: float,
+          chatter_max: float | None = None) -> tuple[bool, list[dict]]:
     """Whether a design holds up on the fitted rim (first) and its neighbours; stops at the first that it fails.
 
     On a sticky rim the neighbours may track worse (NEIGHBOUR_TRACK_MAX): they are there to catch rings, and the old
@@ -147,7 +167,8 @@ def holds(plants: list[WheelParams], design: Design, frame_hz: float) -> tuple[b
     res: list[dict] = []
     loose = sticky(plants[0])
     for i, plant in enumerate(plants):
-        res.append(evaluate(plant, design, frame_hz, NEIGHBOUR_TRACK_MAX if i and loose else RAMP_TRACK_MAX))
+        res.append(evaluate(plant, design, frame_hz, NEIGHBOUR_TRACK_MAX if i and loose else RAMP_TRACK_MAX,
+                            chatter_max if i == 0 else None))
         limit = NOMINAL_OVERSHOOT if i == 0 else MAX_OVERSHOOT
         if not res[-1]["ok"] or res[-1]["over"] > limit:
             return False, res
@@ -156,7 +177,8 @@ def holds(plants: list[WheelParams], design: Design, frame_hz: float) -> tuple[b
 
 def choose_design(params: WheelParams, frame_hz: float = 120.0, bandwidths=BANDWIDTHS, dampings=DAMPINGS,
                   scales=INERTIA_SCALES, ahead: bool = False, breakaway: bool = False,
-                  extra: tuple[WheelParams, ...] = (), measured: bool = False) -> Choice:
+                  extra: tuple[WheelParams, ...] = (), measured: bool = False, friction_share: float = 1.0,
+                  chatter_max: float | None = None) -> Choice:
     """The fastest design that holds up on the fitted rim and its neighbours, searched over the design inertia too.
 
     ``ahead`` designs it with the push ahead on the plan (the plugin's layout 5 with status bit 1024), from the fit.
@@ -165,7 +187,7 @@ def choose_design(params: WheelParams, frame_hz: float = 120.0, bandwidths=BANDW
     """
     plants = neighbours(params, ahead, measured) + list(extra)
     shares = BREAKAWAY_SHARES if ahead and breakaway and sticky(params) else (0.0,)
-    pushes = [push_ahead_of(params, breakaway_share=s) if ahead else {} for s in shares]
+    pushes = [push_ahead_of(params, friction_share, s) if ahead else {} for s in shares]
     best = None
     tried: set[float] = set()
     for scale in scales:
@@ -178,7 +200,7 @@ def choose_design(params: WheelParams, frame_hz: float = 120.0, bandwidths=BANDW
             for z in dampings:
                 for push in pushes:
                     design = Design(bandwidth_hz=bw, damping=z, inertia=inertia, damping_first=True, **push)
-                    ok, res = holds(plants, design, frame_hz)
+                    ok, res = holds(plants, design, frame_hz, chatter_max)
                     if not ok:
                         continue
                     held = True
@@ -191,6 +213,27 @@ def choose_design(params: WheelParams, frame_hz: float = 120.0, bandwidths=BANDW
     if best is None:
         return Choice(max(50.0, min(20000.0, params.inertia)), bandwidths[0], dampings[-1], None, None, 1.0, limited=True)
     return best[1]
+
+
+def fast_design(params: WheelParams, push: dict, frame_hz: float, chatter_max: float | None,
+                bandwidths=BANDWIDTHS, damping: float = 0.7, kp_floor: float = 0.0) -> tuple[Choice, float | None]:
+    """The fastest bandwidth, designed on the rim's own inertia, whose force chatter stays under ``chatter_max`` and
+    that holds on the rim and its neighbours; seconds where ``choose_design`` takes minutes. Also its chatter.
+    The full search's stiffer design inertias crunched on the R3 (2026-11-09); ``kp_floor`` raises the design
+    inertia only as far as a sticky wheel needs to move a small step past its breakaway."""
+    plants = neighbours(params, ahead=True, measured=True)
+
+    def inertia_at(bw: float) -> float:
+        return min(INERTIA_SCALES[-1] * params.inertia, max(params.inertia, kp_floor / (2.0 * math.pi * bw) ** 2))
+
+    for bw in sorted(bandwidths, reverse=True):
+        design = Design(bandwidth_hz=bw, damping=damping, inertia=inertia_at(bw), damping_first=True, **push)
+        ok, res = holds(plants, design, frame_hz, chatter_max)
+        if ok:
+            return Choice(design.inertia, bw, damping, res[0]["rise_s"], res[0]["lag_s"], max(r["over"] for r in res),
+                          **push), res[0]["chatter"]
+    low = min(bandwidths)
+    return Choice(inertia_at(low), low, damping, None, None, 1.0, limited=True, **push), None
 
 
 def smoothness(runs: list[dict], stick: float | None = None) -> dict:

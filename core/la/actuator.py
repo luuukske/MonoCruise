@@ -37,6 +37,7 @@ class WheelTuning:
     ring_window_s: float = 2.0
     ring_cut: float = 0.5
     ring_floor: float = 0.0
+    ring_ki_full_from: float = 0.3
     buzz_cut: float = 0.8
     buzz_drop: float = 0.05
     ring_recover_s: float = 30.0
@@ -56,6 +57,7 @@ class WheelTuning:
     hold: bool = False
     learn: bool = False
     settle: bool = False
+    calibrated: bool = False
 
 
 @dataclass(frozen=True)
@@ -154,7 +156,7 @@ class WheelActuator:
         self.model = model
         if self.base.learn:
             pushes = bool(self.base.ff_inertia or self.base.ff_damping or self.base.ff_friction)
-            self.tune = replace(self.base, **learned_overrides(self.base, model, pushes_set=pushes))
+            self.tune = replace(self.base, **learned_overrides(self.base, model, pushes, self.base.calibrated))
 
     @property
     def ring_scale(self) -> float:
@@ -172,18 +174,26 @@ class WheelActuator:
         """``(kp, kd, ki)``: with the game's own spring, a second-order response at ``bandwidth_hz`` on ``inertia``.
 
         The game's centring answers the wheel angle almost at once, so the servo adds only what is missing (at least
-        ``own_floor`` of it). Strength and the ring guard scale the total; damping and integral follow the total.
+        ``own_floor`` of it). Strength and the ring guard scale the total; damping and integral follow the total, except
+        that a ring cut leaves the integral whole down to ``ring_ki_full_from`` and fades it below (core/la/README.md).
         """
         tn = self.tune
         w = 2.0 * math.pi * tn.bandwidth_hz
-        total = tn.inertia * w * w * self.strength() * self._scale
+        design = tn.inertia * w * w * self.strength()
+        total = design * self._scale
         if total <= 0.0:
             return 0.0, 0.0, 0.0
+        own, kd, ki = self._design(total, game_spring)
+        if self._scale < 1.0 and tn.ring_ki_full_from > 0.0:
+            ki = max(ki, self._design(design, game_spring)[2] * min(1.0, self._scale / tn.ring_ki_full_from))
+        level = ease(authority)
+        return own * level, kd * level, ki * level
+
+    def _design(self, total: float, game_spring: float) -> tuple[float, float, float]:
+        tn = self.tune
         own = max(tn.own_floor * total, total - abs(game_spring))
         stiff = own + min(abs(game_spring), total)
-        level = ease(authority)
-        kd = 2.0 * tn.damping * math.sqrt(stiff * tn.inertia)
-        return own * level, kd * level, stiff * math.sqrt(stiff / tn.inertia) * tn.integral_share * level
+        return own, 2.0 * tn.damping * math.sqrt(stiff * tn.inertia), stiff * math.sqrt(stiff / tn.inertia) * tn.integral_share
 
     def lag_s(self, gains: Gains | None, speed_ms: float) -> float | None:
         """How far the wheel trails a moving target: the game's spring the integral must carry, over its gain.
@@ -288,14 +298,16 @@ class WheelActuator:
         kp, kd, ki = kp * park.gain, kd * park.gain, ki * park.integral
         pushes = bool(tn.ff_inertia or tn.ff_damping or tn.ff_friction)
         plan = plan if plan is not None else (rate, 0.0)
+        # The ring guard cuts the friction pushes with the gains: alone they push like a relay and kept a slick rim swinging.
+        friction = ease(authority) * park.gain * self._scale
         return ServoCommand(
             target=target, rate=rate, kp=kp, kd=kd, ki=ki, cap=round(self.cap(authority)),
             direction=1 if gains.force_per_ms2 > 0.0 else -1, cancel=self.tune.cancel_share * ease(authority), only=only,
             damping_first=self.tune.damping_first, ff_inertia=self.tune.ff_inertia * ease(authority),
             ff_damping=self.tune.ff_damping * ease(authority),
-            ff_friction=self.tune.ff_friction * ease(authority) * park.gain,
+            ff_friction=self.tune.ff_friction * friction,
             lead_s=self.tune.lead_s, ff_plan=pushes, plan_rate=plan[0] if pushes else 0.0,
-            plan_accel=plan[1] if pushes else 0.0, ff_breakaway=self.tune.ff_breakaway * ease(authority) * park.gain,
+            plan_accel=plan[1] if pushes else 0.0, ff_breakaway=self.tune.ff_breakaway * friction,
             settle=self.tune.settle,
         )
 

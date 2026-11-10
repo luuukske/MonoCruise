@@ -29,6 +29,7 @@ BREAKAWAY_STARTS = 8
 QUANTUM_MIN = 1e-4
 SPREAD_SEED = 20261106
 STALL_SEED = 20261107
+JITTER_SEED = 20261109
 STICK_SPEED_RATE = 0.1
 CONTACT_HZ = 40.0
 CONTACT_DAMPING = 0.5
@@ -66,6 +67,7 @@ class WheelParams:
     stick_speed: float = 0.0
     stall_every_s: float = 0.0
     stall_s: float = 0.0
+    reading_jitter_s: float = 0.0
 
 
 class SimWheel:
@@ -96,6 +98,7 @@ class SimWheel:
         self.rim = steer0
         self.rim_rate = 0.0
         self._stalls = random.Random(STALL_SEED)
+        self._jitter = random.Random(JITTER_SEED)
         self.stall_until = 0.0
         self.external = 0.0
         self.next_stall = self._stalls.expovariate(1.0 / params.stall_every_s) if params.stall_every_s > 0.0 else math.inf
@@ -128,8 +131,10 @@ class SimWheel:
         return self.held_reading if self.held_reading is not None else self._read()
 
     def _read(self) -> float:
-        q = self.params.quantum
-        return round(self.steer / q) * q if q else self.steer
+        q, jit = self.params.quantum, self.params.reading_jitter_s
+        # The game read the wheel up to reading_jitter_s before the FFB update: high gains turn that into chatter.
+        x = self.steer - self.rate * self._jitter.uniform(0.0, jit) if jit > 0.0 else self.steer
+        return round(x / q) * q if q else x
 
     def _advance(self, ccw: float) -> None:
         p, h = self.params, self.h

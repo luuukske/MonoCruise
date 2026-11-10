@@ -291,14 +291,17 @@ DESIGN_RUNGS = 6
 SLIDE_SHARE = 0.6
 
 
-def learned_overrides(tune, model: WheelModel, pushes_set: bool = False) -> dict:
+def learned_overrides(tune, model: WheelModel, pushes_set: bool = False, calibrated: bool = False) -> dict:
     """``WheelTuning`` fields from what was learned, on top of ``tune`` (the configured design): ``rung`` steps
     gentler (bandwidth and design inertia, the damping ratio as configured), never stiffer, and a friction push from
     the starts when none is configured (the slides' damping is not pushed: their fit read it up to four times high).
     Unknown: nothing.
     Below RUNG_BARE only with a friction push: a gentle servo alone cannot move a sticky wheel at all. Still hunting
-    at the last rung turns the plugin's settle law off: that wheel's slips are longer than its band."""
+    at the last rung turns the plugin's settle law off: that wheel's slips are longer than its band. A ``calibrated``
+    wheel (its design from the wheel calibration) never steps: the steps wrecked three drives on the old wheel."""
     out: dict = {}
+    if calibrated:
+        model = replace(model, rung=0)
     pushes = pushes_set or model.starts >= LearnTuning.starts_min
     k = model.rung if pushes or model.rung <= RUNG_BARE else max(RUNG_BARE, model.rung - RUNG_PATIENCE)
     k = min(k, DESIGN_RUNGS)

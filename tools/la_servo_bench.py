@@ -11,6 +11,7 @@ and rates are runtime fields of the command block, so a new design needs no game
   python tools/la_servo_bench.py fit FILE                     inertia, damping, friction, spring, delay of the rim
   python tools/la_servo_bench.py predict FILE --bandwidth 1.5 2 2.5     other designs on the fitted rim
   python tools/la_servo_bench.py speed --rim CHECK.json        how fast it moves the wheel, and what the rim allows
+  python tools/la_servo_bench.py calibrate                    the short wheel calibration (about 14 s, ends in a relay)
 
 See core/la/README.md, "Bench".
 """
@@ -199,6 +200,10 @@ def _config_design() -> dict:
 def _rim(args) -> WheelParams | None:
     if args.rim:
         data = _load(args.rim)
+        if "samples" in data and "trials" in data:
+            from tools.la_bench import calibrate as cb
+
+            return cb.rim_of(cb.replay(data))
         raw = data.get("wheel") or (data.get("fit") or {}).get("params")
         return WheelParams(**raw) if raw else None
     return SIM_WHEELS.get(args.simulate) if args.simulate else None
@@ -311,6 +316,87 @@ def cmd_predict(args) -> int:
     return 0
 
 
+def cmd_calibrate(args) -> int:
+    """The short calibration on the wheel, on a model wheel with --simulate, or a saved run analysed again: measure,
+    design in the model, then check the design on the wheel and step it down or up."""
+    from core.la.design_check import DesignCheck
+    from core.lane_departure.ffb_trace import TraceReader
+    from tools.la_bench import calibrate as cb
+
+    if args.replay:
+        profile = cb.replay(_load(args.replay))
+        print(cb.describe(profile))
+        return _calibrate_design(cb, profile, args, None)
+    if args.simulate:
+        cal, wheel, seconds = cb.run_sim(replace(SIM_WHEELS[args.simulate], reading_hz=args.reading_hz))
+        print(f"{args.simulate}: {cal.state} in {seconds:.1f} s {cal.failure}")
+        if cal.profile:
+            print(cb.describe(cal.profile))
+
+        def check(tune):
+            ck = DesignCheck(tune, cal._direction)
+            cb.drive_sim(ck, wheel)
+            return ck.result
+
+        return _calibrate_design(cb, cal.profile, args, check) if cal.state == "done" else 1
+    print("truck standing, hands off the rim, LA, the lane keeping assist and the rumble off")
+    channel, reader = RumbleChannel(), TraceReader()
+    try:
+        with _fine_timer():
+            cal = cb.run_live(channel, reader)
+            data = {"meta": {"format": FORMAT, "utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                             "note": args.note}, **cb.record(cal)}
+            out = Path(args.out) if args.out else OUT_DIR / f"la_calibrate_{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}.json"
+            _save(out, data)
+            print(f"{cal.state} {cal.failure}; saved {out.relative_to(ROOT) if out.is_relative_to(ROOT) else out.name}")
+            if cal.profile:
+                print(cb.describe(cal.profile))
+            if cal.state != "done":
+                return 1
+
+            def check(tune):
+                ck = DesignCheck(tune, cal._direction)
+                cb.drive_live(ck, channel, reader)
+                if ck.state == "failed":
+                    print(f"  check stopped: {ck.failure}")
+                return ck.result
+
+            return _calibrate_design(cb, cal.profile, args, check)
+    finally:
+        channel.stop()
+        channel.close()
+        reader.close()
+
+
+def _calibrate_design(cb, profile, args, check) -> int:
+    """The design for a calibrated rim, checked on the wheel when ``check`` runs one, and with --save written to
+    config.json."""
+    if args.no_design or profile is None:
+        return 0
+    if not profile.pinned:
+        print("no design: inertia and delay were not pinned; run it again")
+        return 1
+    friction = f"slow moves meet {profile.slow_friction:.0f}" if profile.slow_friction else "no creep: half the slides'"
+    print(f"reading jitter {profile.jitter_s * 1000:.1f} ms, friction push: {friction}")
+    t0 = time.perf_counter()
+    choice, chatter = cb.design(profile)
+    model = f"{choice.bandwidth_hz:.2f} Hz on {choice.inertia:.0f}, model chatter {chatter or 0:.0f}"
+    print(f"model design ({time.perf_counter() - t0:.1f} s): {model}" + (", nothing held" if choice.limited else ""))
+    if check is not None:
+        best, _ = cb.verify(choice, check, breakaway=profile.breakaway)
+        if best is None:
+            print("no design held on the wheel: nothing saved, the servo stays as configured")
+            return 1
+        choice = replace(best, limited=False)
+    print("design: " + json.dumps(choice.config()))
+    if args.save and not choice.limited:
+        cb.save(profile, choice)
+        print("saved to config.json with the profile; the learner's design steps are off while it is there")
+    elif not args.save:
+        print("--save writes these keys and the profile to config.json")
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -331,6 +417,15 @@ def main() -> int:
     p.add_argument("--note", default="", help="free text kept in the recording, e.g. the wheel's own settings")
     p.add_argument("--out", help="where to write the recording")
     p.set_defaults(fn=cmd_check)
+    p = sub.add_parser("calibrate", help="the short wheel calibration: open-loop pushes, a relay, a rim fit, about 14 s")
+    p.add_argument("--simulate", choices=sorted(SIM_WHEELS), help="calibrate a model wheel, no game")
+    p.add_argument("--reading-hz", type=float, default=60.0, help="with --simulate: how often the game reads the wheel")
+    p.add_argument("--replay", help="analyse a saved calibration again")
+    p.add_argument("--no-design", action="store_true", help="measure only, no servo design")
+    p.add_argument("--save", action="store_true", help="write the design and the profile to config.json")
+    p.add_argument("--note", default="", help="free text kept in the recording, e.g. the wheel and its settings")
+    p.add_argument("--out", help="where to write the recording")
+    p.set_defaults(fn=cmd_calibrate)
     p = sub.add_parser("report", help="metrics per run")
     p.add_argument("file")
     p.add_argument("--json", action="store_true")
@@ -360,7 +455,7 @@ def main() -> int:
     p.add_argument("--law", choices=("plain", "damping-first"), default=cfg.get("law", "plain"))
     p.add_argument("--rates", type=float, nargs="+", default=list(RAMP_RATES), help="ramp rates, lock per second")
     p.add_argument("--steps", type=float, nargs="+", default=list(STEP_SIZES), help="step sizes, lock")
-    p.add_argument("--rim", help="a check or fitted capture file: the rim the ceiling is worked out on")
+    p.add_argument("--rim", help="a check, calibration or fitted capture file: the rim the ceiling is worked out on")
     p.add_argument("--push-ahead", action="store_true",
                    help="push the --rim fit's inertia, damping and friction ahead, on the plan its delay early (layout 5)")
     p.add_argument("--ff-inertia", type=float, default=cfg.get("ff_inertia", 0.0), help="la_ff_inertia")

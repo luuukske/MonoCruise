@@ -304,6 +304,25 @@ to 2.3 s; a driver holding 80 to 90 % of a bend's steering goes 0.03 to 0.06 m p
 15 m out within 16 s, at the model's spring and at the game's): nothing straightens the wheel. These are
 the model's numbers, not the game's, whose centring at speed is about twice the model's.
 
+**On worse wheels** (`tools/la_bench/pulse_eval.py`, 2026-11-08, simulated only): the same loop on the bench's model
+wheels (`tools/la_bench/population.py`) at road speed, the game's centring reaching the rim through the wheel's delay,
+resting hands as 700 of inertia, 3000 of damping and 150 of friction. On today's design the held-out wheels cross the
+far line after a pulse in 119 of 120 runs, the wheel stays a median 46 mlock past where the pulse wants it (the target
+walks home, friction holds the wheel), and in 93 of 120 the push lets go and comes back more than once in a pulse.
+Friction keeps the wheel the pulse turned where it is against the game's centring and one way only cannot take it back;
+at twice the model's centring (nearer the game's) the far-line swing falls to 0.1 to 0.3 m on the R3 and bare model
+wheels, not on the geared, sticky and old ones. The learner's gentle design is worse for a pulse: its push stays under a
+sticky wheel's breakaway, the driver's push estimate reads the standing wheel as hands and the pulse hands back (no
+correction in 96 of 120 runs), so LKA keeps its own design; the hold and settle flag change nothing on the presets. A
+capped unwind toward straight ahead took the far-line crossings from 119 to 94 of 120 and was declined (Lukas,
+2026-11-08: one way only). Within one way, measured on the presets and dropped: a lower lateral (1.0) or edge-stop (2.5)
+demand, the plugin's old 30000 slew, no integral, a 1500 cap, and letting go once past the target (the damping against
+the wheel's return also stops a light wheel ringing past centre). None narrowed the swing and all but the first added
+runaways: the swing is the wheel's friction against the game's centring. On coarse encoders (0.58 to 2 mlock steps) the
+damping reads each step as a burst of speed and the push jumps by about 500 at the reading rate; a rate filter slowed by
+the plugin's measured step (`step_q`) leaves continuous wheels unchanged and cut the chatter in about half the held-out
+runs, but moved the swing both ways and ran 8 to 11 runs off that had stayed on. Not built.
+
 **Against real systems** (a Haiku review, 2026-11-02, of UN R79, Euro NCAP and maker manuals; summaries,
 not the standards' text). Known gaps, open:
 

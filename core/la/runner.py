@@ -15,6 +15,7 @@ from pathlib import Path
 
 from core.lane_departure.command import SERVO_OFF, VERSION, PluginStatus, ServoCommand
 from core.lane_departure.detector import Frame
+from core.la.wheel_calibration import WheelProfile
 from core.la.wheel_learner import WheelModel, shared_learner
 from core.lane_departure.ffb_trace import TraceLog, TraceReader
 from core.sending_thread.debug_csv import TickDebugLog
@@ -64,6 +65,11 @@ def _setting(name: str, default: float) -> float:
     except (AttributeError, TypeError, ValueError):
         return default
     return value if math.isfinite(value) else default
+
+
+def _calibrated() -> bool:
+    """A saved wheel calibration that pinned the rim (``la_wheel_profile``)."""
+    return WheelProfile.from_dict(getattr(Settings, "la_wheel_profile", None)).pinned
 
 
 def _show(value: float | None) -> float:
@@ -187,6 +193,12 @@ class AssistRunner:
 
     def _note_hunts(self) -> None:
         hunts = self._assist.wheel.hunts
+        if self._assist.wheel.base.calibrated:
+            if hunts > self._hunts_seen:
+                logger.info("%s servo hunted at a still target; the wheel is calibrated, so its design stays",
+                            self.LABEL)
+            self._hunts_seen = hunts
+            return
         for _ in range(max(0, hunts - self._hunts_seen)):
             self._learner.note_hunt()
             logger.info("%s servo hunted at a still target: one design step gentler (step %d)", self.LABEL,
@@ -272,17 +284,19 @@ class AssistRunner:
         ahead = (_setting("la_ff_inertia", 0.0), _setting("la_ff_damping", 0.0), _setting("la_ff_friction", 0.0),
                  _setting("la_servo_lead_s", 0.0), _setting("la_ff_plan_s", 0.0), _setting("la_ff_breakaway", 0.0))
         learn = bool(getattr(Settings, "la_wheel_learning", True))
+        calibrated = _calibrated()
         key = (arm, strength, bool(getattr(Settings, "la_tmp_enabled", False)),
                bool(getattr(Settings, "la_follow_all", False)), max(50.0, min(20000.0, inertia)), cancel,
-               bool(getattr(Settings, "la_always_on", False)), *design, *ahead, learn)
+               bool(getattr(Settings, "la_always_on", False)), *design, *ahead, learn, calibrated)
         line = ("LA settings: from %.0f km/h, strength %.2f, TruckersMP %s, follow everywhere %s, wheel inertia %.0f, "
                 "game force cancelled %.2f, always on (test, no hand-backs) %s, servo design %.2f Hz, damping %.2f, "
                 "damping first %s, servo cap %.0f (0 is 3000), push ahead inertia %.0f, damping %.0f, friction %.0f, "
-                "lead %.3f s, plan %.3f s, breakaway %.0f, wheel learning %s", *key)
+                "lead %.3f s, plan %.3f s, breakaway %.0f, wheel learning %s, calibrated wheel %s", *key)
         return key, AssistTuning(
             arm_kmh=arm, disarm_kmh=max(0.0, arm - _ARM_MARGIN_KMH),
             wheel=WheelTuning(strength=strength, inertia=key[4], cancel_share=key[5], **design_overrides(*design),
-                              **push_ahead_overrides(*ahead), hold=learn, learn=learn, settle=learn),
+                              **push_ahead_overrides(*ahead), hold=learn, learn=learn, settle=learn,
+                              calibrated=calibrated),
             allow_tmp=key[2], follow_all=key[3], always_on=key[6],
         ), line if key[3] or key[6] else ()
 

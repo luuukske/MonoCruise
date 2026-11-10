@@ -105,6 +105,27 @@ wheel chasing it read as a ring, halved the servo and then cut it to zero; the t
 minutes with no force to speak of. Replayed on drives 7 to 10 that leaves only the buzz cuts; the light rim with no
 hands still rings round its target in the model and is still cut.
 
+A cut takes the friction push and the breakaway push down with the gains (2026-11-09). Before, they stayed whole
+while kp, kd and ki came back from zero, and a friction push with next to no servo under it pushes toward the
+target like a relay. On a model fitted to the old wheel's drive that day (rim 104, damping 315, sliding 77,
+breakaway 139, 21 ms, steps of 0.00058 at 60 Hz, the game's centring at 8000 to 20000 per lock) the push alone kept a
+rim with 30 % less friction swinging 0.05 of lock at 1.6 Hz until it reached full lock; with the pushes cut, none
+of the 7 runs that did that ran away, and the rest tracked as before. The push ahead on the target's own motion
+(`ff_inertia`, `ff_damping`) is not cut: it pushes only while the target moves.
+
+A cut leaves the integral whole down to `ring_ki_full_from` (0.3) and fades it to nothing below (Lukas approved
+2026-11-09); kp and kd are cut as before. The game's centring pulls toward straight ahead, not the target, so the
+integral carries every angle off centre and the wheel trails by about the game's spring over ki (`lag_s`). Cut with
+the stiffness, ki fell as its 1.5th power: on the old wheel's second drive that day four ring cuts left 16 to 35 %,
+ki went from 166000 to about 36000, the wheel trailed its target 0.4 to 0.7 s, and the lane wove 1.5 to 3 m either
+side at 0.3 Hz; the weave guard fired 18 times and could not stop it, since the stop before the line drove the
+swing. In a closed-loop model of that wheel (lane, truck, LA with its guards, plugin mirror, the fitted rim, game
+centring at 90 km/h, 15 runs each) a cut to 0.3 with light hands swapped sides 64 times with the cut integral and
+none with it whole, and hands off with no forced cut 8 runs went past 2 m against 1. The ring guard's own cuts
+stayed as often as before. Do not leave the integral whole all the way down: with kp and kd cut to zero it steered
+alone and 10 of 15 hands-off runs ran away. Predicting the correction a wheel lag ahead and cancelling half the
+game's force were tried as well: the first helped less on its own, the second made the weave worse.
+
 ## The target angle
 
 ```
@@ -268,6 +289,221 @@ A plugin that has the settle law (`plugins/ffb/README.md`, status bit 4096) take
 sets servo flag bit 2 whenever `la_wheel_learning` is on (a layout 5 plugin ignores it), and the breakaway push then
 finishes the move to 0.5 mlock plus half a reading step and parks the wheel there at the FFB rate. Not in the shipped
 DLL yet; simulated only.
+
+## Wheel calibration (in progress)
+
+Learning the wheel while driving went wrong on the old Thrustmaster three drives running (2026-11-08/09): the hunt
+check read its 0.58 mlock reading steps as hunting and stepped the design to rung 2 or 3, and the soft design that
+left trailed its target by 0.5 s at 60 km/h (the game's spring over the integral) and the lane wove 3 m. The
+calibration measures the rim instead, standing, in about 14 s: `core/la/wheel_calibration.py`, pure logic fed the
+plugin's trace samples, asking for one open-loop torque per 20 Hz step.
+
+Truck parked, hands off the rim, the wheel within 0.25 lock of centre. Six trials, their ways alternating so the
+wheel ends near where it started: the torque climbs at 400 per second until the wheel moves 2 mlock (its start),
+then holds half that push (to see whether it keeps sliding), then 1.25 and 1.6 times it, switched 25 % up and down
+every step (a smooth hold hid the delay on a heavy rim: the R3 model read 8 ms for 36). Each hold ends after 0.4 s or
+0.12 lock of travel. A hold of more than the start that stops within 10 mlock is play in the drive, taken up: the
+push climbs again from there. One least-squares fit over every trial's readings from its start until the wheel stops
+or turns back, push = inertia * accel + damping * rate + sliding friction + spring * angle, integrated twice so the
+readings are never differentiated, with one start rate per trial, scanned over the delay from 0 to 80 ms: inertia,
+damping, sliding friction, spring and delay. The push is the trace's `out`, the game's own force included, so the
+game's standing friction (about 550 while the wheel moves, 2026-11-06) does not count as the rim's; the profile keeps
+the calibration's own push at the start beside it. A fit outside its bounds, or off by more than 25 %, is no fit.
+
+Model wheels (`tests/la/test_wheel_calibration.py`): the old, sticky, drive-fitted old (inertia 104, damping 315,
+sliding 77, breakaway 139, 21 ms), R3 read at 60 Hz and bare rim with 4 mlock of play all come back within 10 % and
+9 ms, in 10 to 13 s, the wheel ending within 0.08 lock of where it began. Two model features it does not fit: a
+friction that rises with speed reads as damping (R3 model: 1636 for 630, 60 ms for 36), and a geared wheel's teeth
+leave a rough fit (inertia 479 for 600, damping 1606 for 900). The bench recordings of 2026-11-06 hold the assist
+only, not the game's force, so they cannot test it.
+
+On the old wheel (2026-11-09, two runs) the game's own force while the wheel moved was small (at most 85) and the fit
+was off by 0.5 to 0.7 %, against well under 0.1 % on the models even with 0 to 8 ms of reading jitter: lumps of 2 to 6
+mlock the model has no term for. Damping (705, 766) and sliding friction (213, 189) held across runs and every delay
+and force smoothing tried, but the error only slid toward one end of the delay scan, so inertia (41 to 139) and delay
+were not pinned. A delay is now taken only from a clear dip inside the scan (5 % below both ends); otherwise the fit
+at 20 ms gives the damping and friction and leaves inertia and delay unknown (`WheelProfile.pinned`). The drive's
+closed-loop fit read damping 315 and sliding 77 on the same wheel, so standing and driving still disagree. The
+reading rate is the median gap between readings: the trace still held samples from before the game came back to the
+front, and the span read 26 and 37 for 62.
+
+So a relay ends the run (Lukas, 2026-11-09): the plugin's servo saturated round the resting angle (P only, full
+push from 0.5 mlock of error, its target 2 mlock off so the first push starts the swing) at 1.3 times the median
+start push, for 1 s or until the wheel is 30 mlock from where it stood. It swings at the rate where the delay costs
+the most phase, and its readings join the fit in 0.25 s windows, the friction following the way the wheel moved
+reading to reading, the stretches where it stuck left out. The plugin's buzz guard halves it after four swings; the
+fit reads the force that went to the wheel, so that costs only swing size. On the model wheels with 0 to 8 ms of
+reading jitter it gives the fit a sharp dip (the real-like model, inertia 104, damping 750, sliding 200, breakaway
+460, 25 ms, small cogs: off by 0.54 % at no delay, 0.21 % at 30 ms, 0.75 % at 80 ms), and the delay comes out 2 to 7
+ms long (the jitter's own 4 ms), the inertia within 5 %, the swing 11 to 38 mlock from peak to peak (the sticky model
+61: the travel is checked at 20 Hz). At twice the start the old wheel's model swung 76 mlock; at 1.1 times some
+wheels never started. A wheel with play leaves the relay out of the fit, since every turn crosses the play (the bare
+rim with 4 mlock fit off by 0.54 % with it); play is the middle of the holds over the start, since one hold that
+stuck and climbed again (2.9 mlock on the old wheel) left the relay out the first time.
+
+The relay's readings in the fit were not enough on the wheel: over four runs on the old wheel (2026-11-09 18:14 to
+18:18) the fit's dip sat at 24, 44, 44 and 52 ms, with inertia 105 down to 69, sliding along the same inertia against
+delay ridge, while the relay itself repeated (half swings 0.13 to 0.20 s, 8 to 30 mlock, peak push 600 to 700, 50 to
+75 ms from each push flip to the swing's peak). So the delay now comes from the relay's swings: for each delay of the
+scan the fit's rim at that delay runs the relay in a model (`simulate_relay`: the plugin's saturated P at its FFB rate
+faded in over 0.3 s, readings held at the game's rate in the wheel's steps, the rim starting on the trials' breakaway),
+and the delay whose model swings as the wheel did over the 0.65 s after the first push flip wins, when it matches 1.5
+times better than either end of the scan. The four runs then read inertia 105, 99, 87 and 101, delay 24, 24, 34 and 24
+ms (the drive's fit 104 and 21), damping 760, 789, 896 and 561, sliding 180, 257, 240 and 282, the relay matching 1.8
+to 4.4 times better than at the ends (`tests/la/data/old_wheel_calibrations_2026-11-09.json`). On the model wheels
+with reading jitter the delay comes out within 7 ms and the inertia within 10 %, and a 40 ms model reads 38. Damping
+and friction stay two to three times the drive's fit, as on every standing run.
+
+`python tools/la_servo_bench.py calibrate` runs it on the wheel (the same setup as the wheel check: truck standing,
+LA, the lane keeping assist and the rumble off) and saves every trace sample to `tools/la_bench_out/`;
+`calibrate --replay FILE` analyses a saved run again, `--simulate NAME` runs a model wheel. Nothing leaves the
+machine.
+
+The design: a pinned profile becomes a model rim (`calibrate.rim_of`: its inertia, damping, sliding friction,
+breakaway and its spread, spring, delay, reading rate and steps) and the wheel check's search (`design.choose_design`,
+push ahead and breakaway push on, the friction treated as measured) picks the fastest design that holds on it and its
+neighbours, about two and a half minutes. `calibrate --save` writes its `la_*` keys and the profile
+(`la_wheel_profile`) to config.json and starts the learner's design steps over; while a pinned profile is saved the
+learner never steps the design (`learned_overrides(calibrated=True)`; a hunt is logged, nothing more), since the
+steps took the old wheel's design to rung 2 or 3 on three drives. The hold, the reading step and the settle law stay.
+Delete `la_wheel_profile` to go back to learning.
+
+On the old wheel's four runs (median rim: inertia 100, damping 760, sliding 240, breakaway 420, spread 15 %, 26 ms) the
+search picked 1.75 Hz on 150, damping 0.7, push ahead inertia 100, damping 760, friction 240 a delay early, breakaway
+push up to 580. In LA's lane model at the game's spring for 90 and 60 km/h, kicked every 12 s by a drift of 0.4 or 1.2
+m/s, hands off and light, on the calibrated rim and on the drive's fit (damping 315, sliding 77), 2026-11-09:
+
+| design | worst offset, calibrated rim | worst, drive's rim | sign flips | ring cuts | weave cuts |
+|---|---|---|---|---|---|
+| the config of that day (2.3 Hz on 184, friction push 150) | 0.92 m | 3.54 m | 11 | 13 | 13 |
+| the same at rung 2 (the drive that ran off) | ran away | 5.38 m | 90 | 0 | 25 |
+| the calibration's design | 0.93 m | 0.86 m | 0 | 12 | 2 |
+| the design for the drive's fit (2.0 Hz on 104, friction 77) | 2.30 m | 1.05 m | 150 | 0 | 59 |
+
+The calibration's ring cuts all come on the drive's rim, where a friction push of 240 over-pushes one sliding on 77;
+a push of 0.6 times the measured friction cut them to 2 but the calibrated rim then flipped sides 8 times, so the
+design keeps the measured push. Which rim is the truth while driving is still open. Not done: the lane correction
+slowed to the servo's lag at the game's spring, and the in-app start (parked, hands off, saved per wheel, for the lane
+keeping assist too).
+
+On the wheel (2026-11-09 18:48 and 18:50, speed bench, standing) the `--save` run's design (it read 16 ms where the
+other runs read 24 to 34, so 2.5 Hz on 107) and the 1.75 Hz design both did better than any design before (Lukas)
+but jittered on a moving target and near rest: the 0.1 lock/s ramp tracked 4.5 and 3.4 mlock rms, the wheel stopping
+and jumping 10 mlock ahead; the 0.02 step overshot 104 and 71 %, ringing about 10 mlock either side at 4 Hz, the
+push swinging between +1000 and -1000 (P 360 and a breakaway push climbed to 580 at the start), until the buzz guard
+halved it on the 0.2 lock/s ramp and the step; then the wheel stood 3 to 5 mlock off while the integral built to 500.
+The calibrated rim in the model gave 0 to 19 % on that step and 1.0 mlock on that ramp, and a closed-loop fit of the
+eight bench runs (inertia 142, damping 1648, sliding 121, 34 ms) still gave 11 to 32 % and 1.1 to 2.1 mlock: the wheel
+does something no rim of this model does. A force deadband (small pushes doing nothing, which would read as friction
+standing and vanish under the game's centring at speed) was fitted beside the friction on the five relay runs and
+read anywhere from -275 to +324: not separable from this data. Which part of the push makes the overreaction is the
+next thing to find on the wheel: the breakaway push, the friction push, or the feedback alone.
+
+It is the friction push. Three short benches at 1.75 Hz on 150 (2026-11-09 20:35 to 20:37, ramps 0.1 to 0.4 lock/s,
+steps 0.02 and 0.05, half lock at 0.5 lock/s):
+
+| push ahead | ramps | 0.02 step | buzz guard cuts |
+|---|---|---|---|
+| friction 240, breakaway push 580 (18:50) | 0.2 not followed | 71 % over, rang | ramp, step, half lock |
+| friction 240, no breakaway push | 0.1 not followed | 90 % over, rang | every run |
+| friction 120, no breakaway push | all followed, at most 1 % over | 17 % over, clean, 90 % in 0.42 s | half lock only |
+| none (feedback alone) | all followed, 8 to 9 % over, 0.1 lock/s 6.2 mlock rms against 4.1 | 8 % over, 0.56 s | none |
+
+The calibration reads the friction on fast slides (0.3 to 0.5 lock/s); at slow moves the wheel slides on less (the
+drive's fit read 77), and the full push over-pushed at every slow start and stop. The design now pushes half the
+measured sliding friction and no breakaway push (`calibrate.FRICTION_SHARE`, `choose_design(friction_share=0.5,
+breakaway=False)`); the wheel check keeps the full push. Every run still stood 1 to 3.5 mlock off the target after
+a small step with the settle law off, as the bench runs; LA's hold and the settle law handle that part on a drive.
+
+The Moza R3 (2026-11-09 21:52, simulated inertia as Lukas drives it) calibrated to inertia 426, damping 512, sliding
+137, 20 ms, close to its earlier bench fits, but the design picked (1.75 Hz on 638) felt crunchy, "as if driving over
+gravel", and shook coming to the target; it rang on the 0.4 lock/s ramp, the 0.02 step (27 %) and half lock. The
+crunch is force chatter: the servo's force changed by a median 148 and 241 from one reading to the next on the 0.1 and
+0.2 lock/s ramps, against 42 and 85 for the 1.25 Hz on 528 design Lukas found the smoothest on 2026-11-06. The model
+showed none of it (3 to 23) because it reads the wheel perfectly; with the game's reading up to 4 ms older than the
+FFB update reports (`WheelParams.reading_jitter_s`, uniform) it gives 120 and 235 for the calibrated design and 68 and
+129 for the smooth one, the same order as the wheel. The calibration's design now models that jitter and rejects a
+design whose median force change per reading on a 0.2 lock/s ramp passes 150 on the calibrated rim
+(`design.chatter`, `choose_design(chatter_max=...)`; the wheel check keeps neither). It then picks 1.25 Hz on 426 for
+the R3 and 2.0 Hz on 105 (friction push 90) for the old wheel's 18:14 run. On the old wheel every bench design read
+108 to 127 at 0.2 lock/s on the wheel: its trouble was the friction push, not chatter.
+
+### Any wheel (first test, 2026-11-09)
+
+Three numbers above were fitted to these two wheels (half the friction, 4 ms of jitter) and the design search took two
+and a half minutes, so the calibration now measures what it assumed and checks its design on the wheel (Lukas:
+"read all information needed for smooth operation on ANY wheel", the long search "a tiny issue for a release"):
+
+1. **Slow friction (creep).** After the six trials a gentle servo (1.5 Hz on the trials' rough inertia, at least
+   100, critically damped, a friction push of 0.6 of the fast slides' friction so a sticky wheel moves at all) walks
+   the target 0.06 lock out at 0.05 lock/s, holds 0.3 s and walks back: the push it took while moving, both ways
+   averaged so a steady offset cancels, less the damping, is the friction a slow move meets (`slow_friction`).
+   Model wheels read it within 20 % of their friction at 0.05 lock/s (the drive-fitted old wheel 73 for 77, the R3
+   201 to 221 for 190, one whose friction rises with speed 132 for 146), where the fast slides read up to 1.6 times it.
+2. **Reading jitter.** From the trials' slides: each reading against a quadratic through its six neighbours, the
+   reading steps' own share taken out, over the squared rate (`jitter_s`). Model wheels read back their jitter within
+   1.5 ms; the real R3 reads 6.8 ms and the old wheel 7 to 12 (its lumps count in), where 4 ms reproduced the R3's
+   chatter: the model starts a little cautious there, which the check makes up for.
+3. **Design in seconds.** The model rim (`calibrate.rim_of`) has the measured jitter and a friction that rises from
+   the creep's to the fast slides' (`stick_speed`); the push ahead is the rim's inertia and damping and the creep's
+   friction a delay early, no breakaway push. `design.fast_design` takes the fastest bandwidth on the rim's own inertia
+   at damping 0.7 whose model chatter stays under 150 and that holds on the rim and its neighbours: 1.2 to 2.4 s.
+4. **Design check on the wheel** (`core/la/design_check.py`, about 3 s each): out 0.06 lock at 0.2 lock/s and back,
+   a 0.02 step and back, holds between. It fails on force chatter over 130 (the median change per reading on the
+   slow moves; the R3 crunched at 241, was smooth at 73), overshoot past the step over 35 %, or three swings past
+   it; the model's design goes 20 % gentler while it fails and 25 % faster while it passes with room (chatter under
+   0.7 of the limit, overshoot under 15 %), at most four checks, and the fastest that passed is the design. If none
+   passed, nothing is saved. How far off it comes to rest is reported, not judged: a sticky wheel rests further off
+   at a lower bandwidth, so stepping down cannot fix it (the sticky model wheel rested 10 mlock off).
+
+About 15 s of calibration, 2 s of design and 3 to 12 s of checks. On the model wheels: the R3 1.25 Hz, clean at once;
+the old wheel's model 2.5 Hz in the model, 44 % over on the check, 2.0 Hz clean; the sticky model nothing in the
+model, 0.5 and 0.62 Hz clean, 0.78 Hz 58 % over. The chatter limit is the one number from feel (Lukas on the R3,
+force units are a share of each wheel's own full force).
+
+First runs on the R3 (2026-11-09 22:31 and 22:32): the jitter read 10.3 and 4.6 ms, so the model started at 0.5 and
+1.25 Hz, and the checks ended at 0.78 Hz (resting 7 to 8 mlock off) and 1.0 Hz (1.25 Hz failed on chatter 166, where
+the speed bench had measured 73 for that design). Two fixes. The jitter is now the median scatter, not the mean,
+scaled to read the model wheels back (`jitter_scale`): the R3's three runs read 2.1 to 2.7 ms (4.6 to 10.3 by the
+mean), the old wheel's five 3.7 to 6.6. The check's ramps were 0.06 lock with sharp corners, and their stops counted
+in the chatter: they are now the speed bench's, 0.15 lock at 0.2 lock/s with 0.1 s rounded corners, and in the model
+the check reads within 10 % of the bench (92 against 99 at 1.0 Hz, 111 against 127 at 1.25 Hz). A check now takes
+about 4 s.
+
+The chatter limit was then set on the wheel (2026-11-09 22:43 to 22:47, the R3, Lukas away, the game left running):
+the check run three times each on the design Lukas felt smooth (1.25 Hz on 426), on the crunchy one (1.75 Hz on 638)
+and on the calibration's 1.5 Hz. Per reading the force change scattered too much to judge on (smooth 73 to 113, 1.5 Hz
+102 to 142, crunchy 150 to 250); per FFB update, what the motor gets, it repeats and separates: smooth 53 to 56, 1.5
+Hz 79 to 86, 1.88 Hz 95, crunchy 116 to 137. The check now measures it per FFB update with the limit at 90. Two
+calibrations after it ended at 1.6 Hz (chatter 83, 3 % over, resting 0.1 mlock off) and 1.5 Hz (76, 0 %, 0.4) from
+rims that read inertia 441 and 443 but damping 283 and 496 and delays of 12 and 14 ms (the runs before read 343 to 359,
+792 to 873 and 36 ms): the R3's fit still wanders from run to run, and the check keeps the design steady anyway.
+The speed bench on that 1.5 Hz design: every ramp to 0.8 lock/s followed (at most 4 % over), steps of 0.02, 0.05 and
+0.1 lock to 90 % in 0.21, 0.20 and 0.23 s (7, 17 and 14 % over; the smooth 1.25 Hz took 0.71, 0.31 and 0.27 s), half
+lock at 2 lock/s in 0.37 to 0.39 s, no buzz cut, chatter per reading 46 and 93 on the 0.1 and 0.2 lock/s ramps (1.25
+Hz 36 and 73, crunchy 149 and 241). Lukas felt it: "nice, not perfect, but good enough for a release on the R3".
+
+Then the old wheel (2026-11-09 22:55 to 23:12, the agent alone). The first run designed 1.4 Hz on its rim of 89 with
+a friction push of 264, and the check passed it; a grid of 16 checks showed why that was wrong: below a stiffness of
+about 16000 per lock (1.4 Hz on 89 or 150, 1.75 Hz on 89) the wheel never moved for the 0.02 step at all, so it
+"overshot 0 %" and the check called it clean, and with 180 or more of friction push at 1.75 Hz on 150 it overshot 27
+to 69 % and rang. On a sticky wheel a small step needs the feedback's push (kp times the step) and the friction push to
+beat the breakaway; below that it waits for the integral and then lurches, the jitter Lukas felt. So:
+
+- the friction push is cut on a sticky wheel by its sliding over its breaking force (`calibrate.push_of`): the creep
+  reads the push a slow move takes (250 to 500 on the old wheel, sliding or stuck), most of which is stick-slip;
+- the design inertia is raised to the stiffness that moves a 0.02 step past the breakaway with that push
+  (`kp_floor_of`, `fast_design(kp_floor=...)`), and kept there when the check goes gentler (`_floored`);
+- the check runs steps of 0.02 and 0.05, and fails a design that follows the small step less than 70 % of the way:
+  that one goes stiffer (half again on its design inertia), not gentler, unless it rings;
+- the old wheel's fitted sliding friction read 210 to 372 from run to run, so once a design passes the check runs it
+  again with half the friction push and keeps the half if it overshoots at least 5 points less.
+
+Its last runs kept 2.0 Hz on 70 with a push of 126 (the half: 5 % against 14 %) and 2.0 Hz on 97 with 146 (the half
+overshot more). The speed bench on 2.0 Hz on 97, push 146: ramps of 0.1, 0.2 and 0.4 lock/s followed (at most 2 %
+over), the 0.02 step 15 % over in 0.29 s, half lock at 0.5 lock/s followed, no buzz cut in any run (the hand-found
+1.75 Hz on 150 with a push of 120 cut on half lock); the 0.05 step's swing through zero overshot 49 % (25 % by hand),
+a move the check does not run. Not felt by Lukas yet.
 
 ## Adding a path source
 

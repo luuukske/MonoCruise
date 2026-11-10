@@ -176,6 +176,8 @@ class Settings(metaclass=_SingletonMeta):
     la_wheel_learning: bool = True
     # What the wheel learner learned, kept locally for the next start; delete it to learn afresh.
     la_wheel_learned: dict = field(default_factory=dict)
+    # The wheel calibration (tools/la_servo_bench.py calibrate --save); while it is set the learner never steps the design.
+    la_wheel_profile: dict = field(default_factory=dict)
     # Off on TruckersMP until moderation has answered for a steering torque (they cleared the rumble).
     la_tmp_enabled: bool = False
     # Test: keep steering through junctions, forks and merges; bends limited by lateral acceleration only.
