@@ -2,7 +2,18 @@
 
 from __future__ import annotations
 
+import sys
+from types import ModuleType, SimpleNamespace
+
 import pytest
+
+try:
+    import pygame  # noqa: F401
+except ImportError:
+    # CI has no pygame (requirements-test.txt); the config tick never opens a joystick.
+    _stub = ModuleType("pygame")
+    _stub.joystick = SimpleNamespace(get_count=lambda: 0, Joystick=None)
+    sys.modules["pygame"] = _stub
 
 from core.main_pedal_thread.pedal_axes import PedalAxes
 from core.main_pedal_thread.thread import MainPedalThread
