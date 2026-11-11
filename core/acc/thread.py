@@ -13,6 +13,7 @@ from core.settings import Settings
 from core.thread_management.base_thread import BaseThread, ThreadData
 from core.thread_management.registry import registry
 
+from .close_follow import CloseFollow
 from .road_model import RoadModel
 from .tracker import ACCTracker, LeadInfo, effective_score
 
@@ -44,6 +45,9 @@ class ACCData(ThreadData):
     blinker_lane_offset_m: float = 0.0
     blinker_committed: bool = False
 
+    # Driver has followed closer than 0.5 s for a while (README §11). Display only.
+    close_follow_warn: bool = False
+
     # Monotonic time this snapshot corresponds to (= radar t_mono).
     t_mono: float = 0.0
 
@@ -67,14 +71,17 @@ class ACCThread(BaseThread):
         super().__init__(name="acc_thread")
         self.data = ACCData()
         self._tracker = ACCTracker()
+        self._close_follow = CloseFollow()
         self._last_snapshot_t: float = 0.0
 
     def setup(self) -> None:
         logger.debug("acc setup complete")
 
     def teardown(self) -> None:
+        self._close_follow.reset()
         with self.data._lock:
             self.data.enabled = False
+            self.data.close_follow_warn = False
             self.data.has_lead = False
             self.data.leads = []
             self.data.indicated_lead = None
@@ -145,6 +152,7 @@ class ACCThread(BaseThread):
 
         snap = self._read_radar()
         if snap is None:
+            self._close_follow.reset()
             self._publish(enabled, [], None, self._last_snapshot_t)
             return
 
@@ -186,8 +194,16 @@ class ACCThread(BaseThread):
             )
         except Exception:
             logger.exception("acc tracker update failed; holding previous leads")
+            self._close_follow.reset()
             self._publish(enabled, [], None, t_radar)
             return
+
+        if not enabled:
+            self._close_follow.reset()
+        elif leads:
+            self._close_follow.step(t_radar, leads[0].dist_m, espeed, leads[0].rel_speed_ms)
+        else:
+            self._close_follow.step(t_radar, None, espeed)
 
         self._publish(
             enabled, leads, self._tracker.last_indicated_lead, t_radar,
@@ -251,6 +267,7 @@ class ACCThread(BaseThread):
             self.data.ego_lat_vel_ms = self._tracker.last_ego_lat_vel_ms
             self.data.blinker_lane_offset_m = self._tracker.last_lane_offset_m
             self.data.blinker_committed = self._tracker.last_blinker_committed
+            self.data.close_follow_warn = self._close_follow.warn and primary is not None
             self.data.has_lead = primary is not None
             self.data.lead_id = primary.vehicle.id if primary is not None else -1
             self.data.lead_dist_m = primary.dist_m if primary is not None else 0.0

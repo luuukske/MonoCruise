@@ -573,13 +573,16 @@ class MonoCruiseWindow(QMainWindow):
 
         acc_locked = False
         acc_truck = False
+        close_warn = False
         lead_speed: int | None = None
         try:
             acc = registry.get_thread("acc_thread")
             if acc is not None and acc.is_alive():
                 with acc.data._lock:
                     has_lead = bool(acc.data.has_lead)
+                    close_warn = bool(getattr(acc.data, "close_follow_warn", False))
                     primary = acc.data.leads[0] if (has_lead and acc.data.leads) else None
+                close_warn = close_warn and primary is not None
                 if primary is not None:
                     acc_locked = True
                     acc_truck = self._classify_lead_as_truck(primary.vehicle)
@@ -644,6 +647,7 @@ class MonoCruiseWindow(QMainWindow):
         update_snap = (
             text, display_mode, cruise_enabled, aeb_cue, acc_on,
             acc_locked, acc_truck, gap_level, lead_speed, unit, lane_state, lane_side, lane_alert,
+            close_warn,
         )
         if self._cc_panel_update_snap != update_snap:
             self._cc_panel_update_snap = update_snap
@@ -661,6 +665,7 @@ class MonoCruiseWindow(QMainWindow):
                 lane_state=lane_state,
                 lane_side=lane_side,
                 lane_alert=lane_alert,
+                close_warn=close_warn,
             )
 
         if should_show:

@@ -52,7 +52,7 @@ All methods below are safe to call from any thread **unless noted otherwise**.
   - `cc_panel(text_content, cc_mode="Cruise control", cc_enabled=True, x_co=100, y_co=100, acc_enabled=False, scale_mult=1)`
 
 - **Update state**
-  - `update(new_text=None, cc_mode=None, cc_enabled=None, acc_locked=None, distance_to_lead=None, AEB_warn=None, complete_update=False, acc_enabled=None, acc_truck=None, lead_vehicle_speed=..., speed_unit=None, lane_state=None, lane_side=None, lane_alert=None)`
+  - `update(new_text=None, cc_mode=None, cc_enabled=None, acc_locked=None, distance_to_lead=None, AEB_warn=None, complete_update=False, acc_enabled=None, acc_truck=None, lead_vehicle_speed=..., speed_unit=None, lane_state=None, lane_side=None, lane_alert=None, close_warn=None)`
   - Only provided fields are changed; omitted fields keep their previous values.
   - `complete_update=True` forces a full recalculation (useful if you changed multiple coupled fields or want to be extra safe after a state resync).
   - Coalesced: safe to invoke on every loop iteration; pending keys merge until the next GUI flush.
@@ -141,6 +141,17 @@ panel.update(AEB_warn=False)  # blink may continue briefly (cooldown)
 ## ACC distance lines and vehicle cutout
 
 Lines are cached per distance setting. Vehicle cutout uses DestinationOut on an offscreen buffer each frame; pixmaps at max scale, drawn at animated scale. Bbox from settled targets keeps cache keys stable.
+
+## Close-follow warning
+
+`update(close_warn=True)` draws the tracked vehicle in the warning orange (`WARN_COLOR`, shared with the lane
+lines) in the closest slot, where gap 1 draws it. The distance lines keep showing the wanted gap, partly behind
+the vehicle. The flag comes from `ACCData.close_follow_warn` (`core/acc/README.md` section 11).
+
+- Only while the distance lines show and a vehicle is tracked. No lines (ACC option off, speed limiter mode) or
+  an AEB flash: nothing changes.
+- The vehicle jumps to the slot, no glide: the warning is part of the vehicle animation's layout key.
+- Cost: one more tinted icon and one more cached line layer. The cutout masks are the tracked vehicle's own.
 
 ## Lane lines (LDW / LKA)
 

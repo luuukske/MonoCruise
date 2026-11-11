@@ -189,7 +189,7 @@ def test_a_warning_is_orange_and_an_alert_red(qapp):
     y = corner.extent - 2
     corner.set_weights(1.0, 0.0)
     warn = QColor.fromRgba(_render(corner).pixel(1, y))
-    assert (warn.red(), warn.green() > 100, warn.blue() < 60) == (255, True, True)
+    assert warn.name() == lc.WARN_COLOR.lower()
     corner.set_weights(0.0, 1.0)
     alert = QColor.fromRgba(_render(corner).pixel(1, y))
     assert (alert.red(), alert.green(), alert.blue()) == (255, 0, 0)

@@ -1427,10 +1427,13 @@ class _PanelWidget(QWidget):
                     lines_distance = p._distance_to_lead
                     lines_truck = p._acc_truck
                     draw_vehicle = False
+                # Shown only with the distance lines, so only while the ACC option is on.
+                close_veh = p._close_warn and draw_vehicle
+                veh_pm = self._tinted(icon, QColor(WARN_COLOR)) if close_veh else tinted
                 self._paint_icon_lines(
-                    pa, tinted, icon_x, icon_y, icon_sz, sc, ic,
+                    pa, veh_pm, icon_x, icon_y, icon_sz, sc, ic,
                     lines_distance, lines_truck, draw_vehicle,
-                    p._last_locked_acc_truck,
+                    p._last_locked_acc_truck, close_veh,
                 )
             else:
                 pa.drawPixmap(int(icon_x), int(icon_y), tinted)
@@ -1459,8 +1462,11 @@ class _PanelWidget(QWidget):
         acc_truck: bool,
         draw_vehicle: bool = True,
         last_locked_truck: bool | None = None,
+        close_warn: bool = False,
     ):
         n = max(1, min(4, distance_to_lead))
+        # Close-follow warning: the vehicle takes the closest slot, the lines keep the wanted gap.
+        n_veh = 1 if close_warn else n
         lw = int(4 * sc)
         ls = int(3 * sc)
         num_lines = 4
@@ -1474,10 +1480,10 @@ class _PanelWidget(QWidget):
         else:
             car_up_lines = int(6 * sc) if not acc_truck or not draw_vehicle else 0
 
-        sh = self._compute_sh(area_sz, n, lw, ls, sc, acc_truck)
+        sh = self._compute_sh(area_sz, n_veh, lw, ls, sc, acc_truck)
 
         lines_start_rel = area_sz - lines_h_block - 1
-        center_y_icon = (area_sz - lines_h_icon - 1) / 2
+        center_y_icon = (area_sz - (n_veh * lw + (n_veh - 1) * ls) - 1) / 2
         iy = int(center_y_icon - sh / 2) + int((1.5 + 8 * (not acc_truck)) * sc)
         ix = (area_sz - sh) // 2
 
@@ -1590,7 +1596,8 @@ class _PanelWidget(QWidget):
             ix_max = (area_sz - sh_max) // 2
             vx = float(ax + ix_max)
             target_vy = float(ay + iy - car_up_v_draw)
-            layout_key = ("tracked", acc_truck, dpr)
+            # The warning is part of the key so the vehicle jumps to its slot instead of gliding.
+            layout_key = ("tracked", acc_truck, dpr, close_warn)
             p = self._p
             if p._vehicle_anim_layout_key != layout_key:
                 p._vehicle_anim_layout_key = layout_key
@@ -1739,6 +1746,7 @@ class cc_panel:
         self._acc_locked = False
         self._last_locked_acc_truck: bool | None = None
         self._distance_to_lead = 2
+        self._close_warn = False
         self._lane_state = "off"
         self._lane_side = 0
         self._lane_alert = False
@@ -1833,6 +1841,7 @@ class cc_panel:
         lane_state: str | None = None,
         lane_side: int | None = None,
         lane_alert: bool | None = None,
+        close_warn: bool | None = None,
     ):
         """Update the display. Thread-safe, never drops changes. Safe to call at high..."""
         d: dict = {}
@@ -1862,6 +1871,8 @@ class cc_panel:
             d["lane_side"] = lane_side
         if lane_alert is not None:
             d["lane_alert"] = bool(lane_alert)
+        if close_warn is not None:
+            d["close_warn"] = bool(close_warn)
         if complete_update:
             d["_complete_update"] = True
         if not d:
@@ -1965,6 +1976,7 @@ if __name__ == "__main__":
         "lane_state": "off",
         "lane_side": 0,
         "lane_alert": False,
+        "close_warn": False,
     }
 
     LEAD_SPEEDS = [None, 110.0]
@@ -1988,6 +2000,7 @@ if __name__ == "__main__":
         print("  v = lead_vehicle_speed (cycle: None/60/80/96/110)")
         print("  k = lane lines (cycle off/disabled/standby)   w = lane warning (cycle none/left/right)")
         print("  r = lane warning is an alert (unsafe lane, blinking red)")
+        print("  c = close-follow warning (orange vehicle in the closest slot)")
         print("  h = help   q = quit")
         print(f"\n  Now: mode={state['cc_mode']!r} enabled={state['cc_enabled']} "
               f"locked={state['acc_locked']} acc={state['acc_enabled']} truck={state['acc_truck']} "
@@ -2050,6 +2063,9 @@ if __name__ == "__main__":
             elif key == "r":
                 state["lane_alert"] = not state["lane_alert"]
                 print(f"  lane_alert = {state['lane_alert']}")
+            elif key == "c":
+                state["close_warn"] = not state["close_warn"]
+                print(f"  close_warn = {state['close_warn']}")
             else:
                 print("  Unknown key. Press h for help.")
                 continue

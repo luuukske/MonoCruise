@@ -14,6 +14,7 @@ renames it to the released version and starts a fresh `[Unreleased]` above it.
 ### Added
 - **Lane departure warning and lane keeping (beta)**: a new Lane departure option under Emergency Braking rumbles a force feedback wheel when you drift over a lane line (Warn), or also steers you back with a short nudge (Steer), and MonoCruise installs its game plugin for it when you pick one. With ACC on, the cruise control panel shows lane lines beside the distance lines (white when watching, dimmed while paused, red on the side it just acted on), and the live bottom bar turns that bottom corner of the screen red.
 - **Map data for ACC, AEB and lane departure**: MonoCruise now reads the lane layout from the map files already in your ETS2, ATS or TruckersMP install. it reads this data in real time, and does not impact the FPS that much, because of the real time map extraction. that way the whole map doesn't need to be read first.
+- **Close-follow warning on the cruise control panel**: with ACC on, the vehicle on the panel turns orange and moves to the closest position when you follow the vehicle ahead very closely for a few seconds, whether cruise control is engaged or not. It goes back to normal once you leave more room.
 
 ### Fixed
 - **Lane sat off to the side where the centre gap changes**: centred in the right lane, the lane line could sit about a lane toward the middle or the shoulder, then line up again just ahead. It now follows the lane through that change, including where both stretches carry on as themselves.
