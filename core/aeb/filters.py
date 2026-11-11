@@ -1024,6 +1024,11 @@ class CornerEntryStationaryFilter:
                 return _PASS
             return _suppress("CornerEntryStationaryFilter")
 
+        # On ego's road path the map already placed the body in ego's lane round the bend,
+        # which is what Mode B guesses against (README road-bent trajectories).
+        if getattr(ctx.ego_arc, "bent", False):
+            return _PASS
+
         # In-lane: require geometric consistency with a curved road continuation.
         lat_signed = -ctx.dx * ctx.ego_fwd_z + ctx.dz * ctx.ego_fwd_x
         if abs(lat_signed) < cal.corner_entry_min_lateral:

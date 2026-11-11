@@ -738,6 +738,13 @@ straight-line path.
   is Mode A. Follow-threat ids do pass it: a stopped in-path cut-in can sit in
   `OPPOSITE_OR_OUTER` while occupying the corridor (clip `c3c7a529`, d_abs ~4 m
   at bite).
+- **Mode B passes on ego's road path** (`ctx.ego_arc.bent`, Road-bent
+  trajectories). The plain pipeline judged the target first, and the map has
+  already placed it in ego's lane round the bend, which is what Mode B guesses
+  against. Since `056fd20` (floor 0.005) Mode B fired there and the R 150 scenes
+  lost all their map gain. The exception cost nothing on the corpus (2026-11-10,
+  10555 clips on the map: 42 changed, 18 brake earlier, 23 warn only, none
+  later or removed, labelled cost unchanged).
 - **A braked-for body still in ego's lane is never dropped** (Mode A, both
   stages). The lane bucket keys off the reference point, so a long or angled
   body whose centre reads `OPPOSITE_OR_OUTER` can still reach ego's lane. A
