@@ -43,6 +43,7 @@ from .aeb_capacity import (
     truck_key,
 )
 from .debug_csv import BrakeDebugLog, GasLearnDebugLog, open_debug_csv
+from .recent_brake import RecentBrakeOutputs
 from .hold_controller import (
     HoldController,
     STATE_HOLDING,
@@ -442,7 +443,7 @@ class SendingThread(BaseThread):
         self._brake_active: bool = False
         self._brake_last_active_at: float = 0.0
         # Ring buffer of the last 3 brake outputs sent to the game (oldest first).
-        self._recent_brake_outputs: list[float] = [0.0, 0.0, 0.0]
+        self._recent_brake_outputs = RecentBrakeOutputs()
         # Auto-neutral state: True while neutral has been commanded and the
         self._autoneutral_neutral: bool = False
         self._autoneutral_last_press_mono: float = 0.0
@@ -1382,14 +1383,12 @@ class SendingThread(BaseThread):
             )
             controller.aforward = a
             controller.abackward = sent_b
-            self._recent_brake_outputs.append(sent_b)
-            if len(self._recent_brake_outputs) > 3:
-                self._recent_brake_outputs = self._recent_brake_outputs[-3:]
+            self._recent_brake_outputs.push(time.monotonic(), sent_b)
             self._tick_bool_presses(controller)
             with self.data._lock:
                 self.data.aforward = a
                 self.data.abackward = logical_b
-                self.data.recent_brake_outputs = tuple(self._recent_brake_outputs)
+                self.data.recent_brake_outputs = self._recent_brake_outputs.values()
                 self.data.hazardsActive = tel_hazards
             self._tick_hazards(controller, tel_hazards)
             return
@@ -1664,10 +1663,8 @@ class SendingThread(BaseThread):
             aeb_axis.applied(sent_b), now_ctrl,
         )
 
-        # Push the actual brake value sent this tick into the ring buffer so
-        self._recent_brake_outputs.append(sent_b)
-        if len(self._recent_brake_outputs) > 3:
-            self._recent_brake_outputs = self._recent_brake_outputs[-3:]
+        # CC compares the game's lagging brake reading against this window.
+        self._recent_brake_outputs.push(now_ctrl, sent_b)
 
         # Coast-down sample: only logs when final outputs and driver inputs are zero.
         self._log_coast_step(
@@ -1813,7 +1810,7 @@ class SendingThread(BaseThread):
             self.data.hold_active = hold_out.active
             self.data.hold_state = hold_out.state
             self.data.auto_neutral_holding = self._auto_neutral_owns_gearbox()
-            self.data.recent_brake_outputs = tuple(self._recent_brake_outputs)
+            self.data.recent_brake_outputs = self._recent_brake_outputs.values()
             self.data.hazardsActive = tel_hazards
             self.data.decel_active = False
             self.data.decel_brake_output = 0.0

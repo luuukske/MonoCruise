@@ -695,7 +695,11 @@ recovered: if AEB is enabled, warn once an hour.
 `SendingThreadData.abackward` stays logical so the viz bar does not show the
 remapped axis. `recent_brake_outputs` and the AEB observer use the sent value,
 because `gameBrake` and the plant see that. CC's game-brake disengage compare
-reads that ring buffer. `max_brake_ms2` on `SendingThreadData` is in tune units;
+reads that window (`recent_brake.py`). It is 0.5 s of sent values by time, not a
+tick count: `gameBrake` trails the sent pedal by 50 to 110 ms, and the old three
+ticks (30 ms at 100 Hz) let every fast release by ACC or AEB read as the driver
+braking in game, which disengaged CC (81 times in the brake debug log). Do not
+shorten it below the game's lag. `max_brake_ms2` on `SendingThreadData` is in tune units;
 `aeb_max_brake_ms2` is what AEB reads.
 
 ### AEB capacity per truck (`aeb_capacity.py`)

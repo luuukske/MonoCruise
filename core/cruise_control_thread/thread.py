@@ -393,7 +393,7 @@ class CruiseControlThread(BaseThread):
             return None
 
     def _read_recent_commanded_brake_max(self) -> float:
-        """Max brake value sent to the game over the last few ticks. See `core/cruise_control_thread/README.md`."""
+        """Max brake value sent to the game over the last 0.5 s. See `core/cruise_control_thread/README.md`."""
         try:
             st = registry.get_thread("sending_thread")
         except KeyError:

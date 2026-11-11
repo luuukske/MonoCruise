@@ -27,7 +27,7 @@ class LongCtx:
     # Raw physical brake pedal value (pre-OPD). Distinguishes user-pressed
     # See `core/longitudinal/README.md`.
     user_raw_brake: float = 0.0
-    # Maximum brake value sent to the game over the last few ticks. Lets the
+    # Maximum brake value sent to the game over the last 0.5 s.
     # See `core/longitudinal/README.md`.
     commanded_brake_recent_max: float = 0.0
 

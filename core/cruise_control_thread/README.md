@@ -12,6 +12,9 @@ handle mode-flip PID reset, CC-only disengage, dispatch by `Settings.cc_mode`, p
 
 CC-only disengage: raw/game brake thresholds (threshold for raw can be set to zero in settings),
 retarder, motor brake, park/reverse, disarm-on-stop, crash speed drop.
+The game-brake test is `gameBrake` more than 0.2 above the highest pedal MonoCruise
+sent in the last 0.5 s (`core/sending_thread/README.md`): the game's reading lags, so
+a shorter window read ACC's or AEB's own fast brake release as an in-game brake.
 Neutral does not disengage: positive CC/ACC bids are clamped to 0 while
 `gear_dashboard == 0`, with a popup after 2 s continuous N. Skip the clamp while
 `auto_neutral_holding` so auto-neutral can see the launch bid and shift to drive.

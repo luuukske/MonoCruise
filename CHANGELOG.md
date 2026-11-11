@@ -27,6 +27,7 @@ renames it to the released version and starts a fresh `[Unreleased]` above it.
 - **AEB missed some vehicles heading straight for you**: a TruckersMP car crossing your path, an oncoming car drifting into your lane, or a vehicle beside you veering in could be written off as passing clear. AEB now also checks the line each vehicle is really closing on and brakes when it is coming at you up close.
 - **AEB was late for a stopped car round a bend**: AEB only saw a stopped or crashed vehicle in your lane once your truck had turned into the bend. With the map files it now looks ahead along your lane while you follow it and brakes earlier; everything else it brakes for is unchanged.
 - **ACC accelerated in steps when pulling away**: at every gear change, the truck ahead's or your own, ACC eased off or kicked back in, so pulling away in a jam felt wobbly. ACC now rides through gear changes smoothly, and still reacts straight away when the truck ahead brakes.
+- **Cruise control switched off after ACC or AEB braked**: when ACC or AEB let go of a firm brake quickly, MonoCruise mistook its own braking for you braking in game and turned cruise control off. It now only switches off for your own brake.
 
 ## [1.1.4-preview.1] - 2026-11-04
 ### Added
