@@ -194,7 +194,9 @@ def test_the_check_steps_a_rough_design_down_and_a_clean_one_up():
         return [round(c.bandwidth_hz, 2) for c, _ in tried]
 
     best, tried = verify(Choice(100.0, 2.5, 0.7, None, None, 0.0), wheel(1.7), say=lambda _m: None)
-    assert best.bandwidth_hz == pytest.approx(1.6) and bandwidths(tried) == [2.5, 2.0, 1.6]
+    assert best.bandwidth_hz == pytest.approx(1.6) and bandwidths(tried) == [2.5, 2.0, 1.6, 1.79]
+    best, tried = verify(Choice(100.0, 2.5, 0.7, None, None, 0.0), wheel(1.8), say=lambda _m: None)
+    assert best.bandwidth_hz == pytest.approx(1.79), "the middle of the last pass and the last fail gets one run"
     best, tried = verify(Choice(100.0, 0.8, 0.7, None, None, 0.0), wheel(1.3), say=lambda _m: None)
     assert best.bandwidth_hz == pytest.approx(1.25) and bandwidths(tried) == [0.8, 1.0, 1.25]
     best, _ = verify(Choice(100.0, 0.5, 0.7, None, None, 0.0), wheel(0.3), say=lambda _m: None)
@@ -220,3 +222,48 @@ def test_half_the_friction_push_is_kept_when_the_wheel_overshoots_clearly_less_w
     assert best.ff_friction == pytest.approx(130.5) and len(tried) == 2, "2026-11-09: 261 overshot 30 % on the old wheel"
     kp = best.inertia * (2.0 * 3.141592653589793 * best.bandwidth_hz) ** 2
     assert kp >= (466.0 - 130.5) / 0.02 - 1.0, "half the push needs the stiffness to move a small step past the breakaway"
+
+
+
+R3_PROFILE = WheelProfile(direction=1, reading_hz=60.6, breakaway=17.0, breakaway_top=52.0, slide=121.7, damping=636.0,
+                          inertia=414.3, spring=656.0, delay_s=0.02, ffb_hz=122.4, slow_friction=124.6, jitter_s=0.0034)
+
+
+def test_on_the_road_the_wheel_trails_by_the_game_s_spring_over_the_integral():
+    """2026-11-11: the calibration's 1.4 Hz on 415 gave lane keeping a third of the gains it had on 2.0 Hz on 650."""
+    from tools.la_bench import road
+
+    before, after = road.lags(WheelTuning()), road.lags(WheelTuning(inertia=415.0, bandwidth_hz=1.4))
+    assert before[90.0] == pytest.approx(0.20, abs=0.02) and before[130.0] == pytest.approx(0.29, abs=0.02)
+    assert after[90.0] == pytest.approx(0.64, abs=0.03) and after[130.0] > 1.2
+    assert "soft for lane keeping" in road.describe(WheelTuning(inertia=415.0, bandwidth_hz=1.4))
+    assert "soft" not in road.describe(WheelTuning())
+    assert road.spring_per_v2({"force_per_ms2": -669.5, "kappa_per_steer": 0.1825}) == pytest.approx(122.2, abs=0.1)
+    assert road.spring_per_v2(None) == road.spring_per_v2({"force_per_ms2": "x"}) == road.SPRING_PER_V2
+
+
+def test_the_design_s_chatter_is_judged_on_its_road_gains_and_it_still_holds_standing():
+    from tools.la_bench import road
+    from tools.la_bench.calibrate import design
+
+    standing, felt_standing = design(R3_PROFILE)
+    on_road, felt_road = design(R3_PROFILE, road.SPRING_PER_V2)
+    assert not standing.limited and not on_road.limited
+    assert on_road.bandwidth_hz > standing.bandwidth_hz, "standing chatter held back a design that is smooth at speed"
+    assert felt_road < felt_standing and on_road.worst_overshoot <= 0.6
+
+
+def test_the_check_runs_its_slow_ramps_on_the_road_gains_and_its_steps_on_the_standing_ones():
+    from core.la.actuator import WheelActuator
+    from core.la.design_check import DesignCheck, _schedule
+    from tools.la_bench import road
+
+    tune = WheelTuning(inertia=414.0, bandwidth_hz=2.0, damping_first=True)
+    spring = road.spring_at(60.0)
+    ck = DesignCheck(tune, 1, road_spring=spring)
+    ramps_s = sum(d for d, _, _ in _schedule(ck.check)[:4])
+    ramp, held = ck._command(0.0, 0.0, 0.0, 0.5 * ramps_s), ck._command(0.0, 0.0, 0.0, ramps_s + 0.1)
+    assert ramp.kp == pytest.approx(WheelActuator(tune).gains(1.0, spring)[0]) and ramp.kp < 0.6 * held.kp
+    assert held.kp == pytest.approx(WheelActuator(tune).gains(1.0)[0])
+    plain = DesignCheck(tune, 1)
+    assert plain._command(0.0, 0.0, 0.0, 0.5 * ramps_s).kp == held.kp, "without a road spring: as before"

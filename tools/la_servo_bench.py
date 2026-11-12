@@ -197,6 +197,18 @@ def _config_design() -> dict:
     return out
 
 
+def _road_spring_per_v2() -> float:
+    """The game's centring from the live calibration a drive saved (config.json, read only), else the test truck's."""
+    from tools.la_bench import road
+
+    try:
+        with open(ROOT / "config.json", encoding="utf-8") as fh:
+            saved = json.load(fh).get("la_saved_calibration")
+    except (OSError, ValueError):
+        saved = None
+    return road.spring_per_v2(saved)
+
+
 def _rim(args) -> WheelParams | None:
     if args.rim:
         data = _load(args.rim)
@@ -323,6 +335,9 @@ def cmd_calibrate(args) -> int:
     from core.lane_departure.ffb_trace import TraceReader
     from tools.la_bench import calibrate as cb
 
+    from tools.la_bench import road
+
+    ramp_spring = road.spring_at(road.CHATTER_KMH, _road_spring_per_v2())
     if args.replay:
         profile = cb.replay(_load(args.replay))
         print(cb.describe(profile))
@@ -334,7 +349,7 @@ def cmd_calibrate(args) -> int:
             print(cb.describe(cal.profile))
 
         def check(tune):
-            ck = DesignCheck(tune, cal._direction)
+            ck = DesignCheck(tune, cal._direction, road_spring=ramp_spring)
             cb.drive_sim(ck, wheel)
             return ck.result
 
@@ -355,7 +370,7 @@ def cmd_calibrate(args) -> int:
                 return 1
 
             def check(tune):
-                ck = DesignCheck(tune, cal._direction)
+                ck = DesignCheck(tune, cal._direction, road_spring=ramp_spring)
                 cb.drive_live(ck, channel, reader)
                 if ck.state == "failed":
                     print(f"  check stopped: {ck.failure}")
@@ -378,9 +393,12 @@ def _calibrate_design(cb, profile, args, check) -> int:
         return 1
     friction = f"slow moves meet {profile.slow_friction:.0f}" if profile.slow_friction else "no creep: half the slides'"
     print(f"reading jitter {profile.jitter_s * 1000:.1f} ms, friction push: {friction}")
+    from tools.la_bench import road
+
+    per_v2 = _road_spring_per_v2()
     t0 = time.perf_counter()
-    choice, chatter = cb.design(profile)
-    model = f"{choice.bandwidth_hz:.2f} Hz on {choice.inertia:.0f}, model chatter {chatter or 0:.0f}"
+    choice, chatter = cb.design(profile, per_v2)
+    model = f"{choice.bandwidth_hz:.2f} Hz on {choice.inertia:.0f}, model chatter at {road.CHATTER_KMH:.0f} km/h {chatter or 0:.0f}"
     print(f"model design ({time.perf_counter() - t0:.1f} s): {model}" + (", nothing held" if choice.limited else ""))
     if check is not None:
         best, _ = cb.verify(choice, check, breakaway=profile.breakaway)
@@ -388,7 +406,22 @@ def _calibrate_design(cb, profile, args, check) -> int:
             print("no design held on the wheel: nothing saved, the servo stays as configured")
             return 1
         choice = replace(best, limited=False)
-    print("design: " + json.dumps(choice.config()))
+    print(f"game's centring {per_v2:.0f} per lock per (m/s)^2; standing design alone: "
+          + road.describe(cb.tuning_of(choice, choice.bandwidth_hz), per_v2))
+    if not args.no_road:
+        t0 = time.perf_counter()
+        print("design for the road, in the model, fastest first:")
+        choice = cb.with_road(profile, choice, per_v2, print)
+        if choice.road_bandwidth_hz:
+            print(f"road design ({time.perf_counter() - t0:.0f} s): {choice.road_bandwidth_hz:.2f} Hz on "
+                  f"{choice.road_inertia:.0f}, damping {choice.road_damping:.2f}; with it: "
+                  + road.describe(cb.tuning_of(choice, choice.bandwidth_hz), per_v2))
+        else:
+            soft = road.lags(cb.tuning_of(choice, choice.bandwidth_hz), per_v2, (road.LAG_SOFT_KMH,))[road.LAG_SOFT_KMH]
+            print("no faster design for the road holds on this rim in the model, so the standing design is used at "
+                  "every speed: " + ("it is soft for lane keeping, run the calibration again" if soft > road.LAG_SOFT_S
+                                     else "it is fast enough on the road as it is"))
+    print("design: " + json.dumps({**choice.config(), **choice.road_config()}))
     if args.save and not choice.limited:
         cb.save(profile, choice)
         print("saved to config.json with the profile; the learner's design steps are off while it is there")
@@ -425,6 +458,7 @@ def main() -> int:
     p.add_argument("--save", action="store_true", help="write the design and the profile to config.json")
     p.add_argument("--note", default="", help="free text kept in the recording, e.g. the wheel and its settings")
     p.add_argument("--out", help="where to write the recording")
+    p.add_argument("--no-road", action="store_true", help="no design for the road (its model search takes a minute or two)")
     p.set_defaults(fn=cmd_calibrate)
     p = sub.add_parser("report", help="metrics per run")
     p.add_argument("file")

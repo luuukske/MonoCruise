@@ -308,8 +308,10 @@ def learned_overrides(tune, model: WheelModel, pushes_set: bool = False, calibra
     if model.rung >= RUNG_MAX:
         out["settle"] = False
     if k > 0:
+        # A wheel that hunts on its standing design gets no stiffer design for the road either.
         out.update(bandwidth_hz=min(tune.bandwidth_hz, max(BANDWIDTH_FLOOR, tune.bandwidth_hz * RUNG_BANDWIDTH ** k)),
-                   inertia=min(tune.inertia, max(INERTIA_FLOOR, tune.inertia * RUNG_INERTIA ** k)), damping_first=True)
+                   inertia=min(tune.inertia, max(INERTIA_FLOOR, tune.inertia * RUNG_INERTIA ** k)), damping_first=True,
+                   road_bandwidth_hz=0.0)
     if not pushes or pushes_set:
         return out
     friction = SLIDE_SHARE * model.start_force

@@ -20,7 +20,11 @@ STRENGTH_MAX = 2.0
 
 @dataclass(frozen=True)
 class WheelTuning:
-    """``inertia`` is the rim with hands, in force units per lock per s^2; the servo is designed on it."""
+    """``inertia`` is the rim with hands, in force units per lock per s^2; the servo is designed on it.
+
+    ``road_*`` is a second design for the road (0: none), blended in as the game's centring grows from ``road_from``
+    to ``road_full`` per lock (the test truck's at 40 and 60 km/h): core/la/README.md, "Fast on the road".
+    """
 
     inertia: float = 650.0
     bandwidth_hz: float = 2.0
@@ -58,6 +62,11 @@ class WheelTuning:
     learn: bool = False
     settle: bool = False
     calibrated: bool = False
+    road_inertia: float = 0.0
+    road_bandwidth_hz: float = 0.0
+    road_damping: float = 0.0
+    road_from: float = 15000.0
+    road_full: float = 34000.0
 
 
 @dataclass(frozen=True)
@@ -103,6 +112,15 @@ def design_overrides(bandwidth_hz: float, damping: float, damping_first: bool, s
     if damping > 0.0:
         out["damping"] = max(0.3, min(2.0, damping))
     return out
+
+
+def road_overrides(inertia: float, bandwidth_hz: float, damping: float) -> dict:
+    """``WheelTuning`` fields for the road design (``la_road_*``), bounded like the standing one; none without both an
+    inertia and a bandwidth."""
+    if inertia <= 0.0 or bandwidth_hz <= 0.0:
+        return {}
+    return {"road_inertia": max(50.0, min(20000.0, inertia)), "road_bandwidth_hz": max(0.3, min(3.0, bandwidth_hz)),
+            "road_damping": max(0.3, min(2.0, damping)) if damping > 0.0 else 0.0}
 
 
 def push_ahead_overrides(inertia: float, damping: float, friction: float, lead_s: float, plan_s: float = 0.0,
@@ -176,24 +194,42 @@ class WheelActuator:
         The game's centring answers the wheel angle almost at once, so the servo adds only what is missing (at least
         ``own_floor`` of it). Strength and the ring guard scale the total; damping and integral follow the total, except
         that a ring cut leaves the integral whole down to ``ring_ki_full_from`` and fades it below (core/la/README.md).
+        With a road design the gains move from the standing design's to its own by ``road_share``.
         """
         tn = self.tune
-        w = 2.0 * math.pi * tn.bandwidth_hz
-        design = tn.inertia * w * w * self.strength()
+        got = self._gains_on(tn.inertia, tn.bandwidth_hz, tn.damping, game_spring)
+        share = self.road_share(game_spring)
+        if share > 0.0:
+            road = self._gains_on(tn.road_inertia, tn.road_bandwidth_hz, tn.road_damping or tn.damping, game_spring)
+            got = tuple(a + share * (b - a) for a, b in zip(got, road))
+        level = ease(authority)
+        return got[0] * level, got[1] * level, got[2] * level
+
+    def road_share(self, game_spring: float) -> float:
+        """How much of the road design is in the gains at this much of the game's centring; 0 without one."""
+        tn = self.tune
+        if tn.road_inertia <= 0.0 or tn.road_bandwidth_hz <= 0.0 or tn.road_full <= tn.road_from:
+            return 0.0
+        return ease((abs(game_spring) - tn.road_from) / (tn.road_full - tn.road_from))
+
+    def _gains_on(self, inertia: float, bandwidth_hz: float, damping: float, game_spring: float) -> tuple[float, float, float]:
+        tn = self.tune
+        w = 2.0 * math.pi * bandwidth_hz
+        design = inertia * w * w * self.strength()
         total = design * self._scale
         if total <= 0.0:
             return 0.0, 0.0, 0.0
-        own, kd, ki = self._design(total, game_spring)
+        own, kd, ki = self._design(total, game_spring, inertia, damping)
         if self._scale < 1.0 and tn.ring_ki_full_from > 0.0:
-            ki = max(ki, self._design(design, game_spring)[2] * min(1.0, self._scale / tn.ring_ki_full_from))
-        level = ease(authority)
-        return own * level, kd * level, ki * level
+            whole = self._design(design, game_spring, inertia, damping)[2]
+            ki = max(ki, whole * min(1.0, self._scale / tn.ring_ki_full_from))
+        return own, kd, ki
 
-    def _design(self, total: float, game_spring: float) -> tuple[float, float, float]:
+    def _design(self, total: float, game_spring: float, inertia: float, damping: float) -> tuple[float, float, float]:
         tn = self.tune
         own = max(tn.own_floor * total, total - abs(game_spring))
         stiff = own + min(abs(game_spring), total)
-        return own, 2.0 * tn.damping * math.sqrt(stiff * tn.inertia), stiff * math.sqrt(stiff / tn.inertia) * tn.integral_share
+        return own, 2.0 * damping * math.sqrt(stiff * inertia), stiff * math.sqrt(stiff / inertia) * tn.integral_share
 
     def lag_s(self, gains: Gains | None, speed_ms: float) -> float | None:
         """How far the wheel trails a moving target: the game's spring the integral must carry, over its gain.

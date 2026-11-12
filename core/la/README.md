@@ -505,6 +505,100 @@ over), the 0.02 step 15 % over in 0.29 s, half lock at 0.5 lock/s followed, no b
 1.75 Hz on 150 with a push of 120 cut on half lock); the 0.05 step's swing through zero overshot 49 % (25 % by hand),
 a move the check does not run. Not felt by Lukas yet.
 
+### Fast on the road (2026-11-11)
+
+Lukas: since the calibration the lane keeping pulses cross the line they used to barely touch. `lka_debug.csv` per
+day: the pulse's kp fell from 25661 to 8028 and its integral gain from about 400000 to 118429 per second, its peak push
+from a median 1300 to 1700 (the cap, 3000, at the 90th percentile) to 470 to 590. The cap never changed. The cause is
+the design the calibration saved, 1.4 Hz on 415 for 2.0 Hz on 650: a design stiffness (`inertia * (2 pi f)^2`) of
+32100 for 102600, and the lane keeping assist reads the same `la_*` keys.
+
+Why a design that checks out standing is slow on the road: standing, the servo is the whole stiffness on the rim. At
+speed the game's own centring is most of it (about 122 per lock per (m/s)^2 on the test truck: 34000 at 60 km/h, 76000
+at 90, 159000 at 130), the servo keeps a quarter of its design as its own push (`own_floor`) and the integral has to
+carry the rest, so the wheel trails its target by the game's spring over the integral gain (`WheelActuator.lag_s`).
+On the calibrated rim in the model (`tools/la_bench/road.py`, pulses as `pulse_eval`, hands off and resting, drifts of
+0.4 and 1.2 m/s):
+
+| design | trails by, 60 / 90 / 130 km/h | pulses, worst past a line | standing step |
+|---|---|---|---|
+| 2.0 Hz on 650 (before the calibration) | 0.09 / 0.20 / 0.29 s | 0.10 to 0.52 m, one runaway hands off at 130 | 99 % over on a neighbour rim |
+| 1.4 Hz on 415 (the calibration's) | 0.29 / 0.64 / 1.35 s | 0.26 to 11 m | holds, 19 % over |
+| 1.75 Hz on 415 | 0.21 / 0.33 / 0.69 s | 0.19 to 0.83 m | holds, 26 % over |
+| 2.0 Hz on 415 | 0.14 / 0.22 / 0.46 s | 0.12 to 0.67 m, on the edge of ringing hands off at 130 | holds, 36 % over |
+| 3.0 Hz on 200, damping 1.0 | 0.08 / 0.14 / 0.28 s | 0.11 to 0.34 m | 55 % over standing, 42 % at 30 km/h, 10 % at 60 |
+
+A 0.02 step at 90 km/h took 0.34 s to 90 % on 2.0 Hz on 415 and never got there in the stage's hold on 1.4 Hz; at
+130 km/h no design of the first four reached it in under 0.65 s, with no overshoot and almost no chatter. So at speed
+every design has stability and smoothness to spare and is slow, and standing it is at its limit: one design for every
+speed cannot be fast on the road and well damped standing. On the model wheels with less rim inertia it is worse (the
+bare rim's standing pick, 1.75 Hz on 148, trails 0.92 s at 90 km/h): the stiffness the road needs is set by the game's
+spring, not by the rim.
+
+Measured and not built: letting the integral follow the game's spring whole (it is capped at the design's stiffness
+in `_design`) brought 1.4 Hz on 415 to 0.13 to 0.33 m past at 90 km/h and rang hands off at 130 (9 to 12 wheel
+reversals in a pulse, 3 to 9 m), from about 660000 per second of integral gain. A design with less design inertia at
+a higher bandwidth (the last row) is fast everywhere on the road with modest kp and kd, and overshoots below 60 km/h.
+
+**The road design (Lukas, 2026-11-11: "build it").** The servo has a second design, `la_road_inertia`,
+`la_road_bandwidth_hz` and `la_road_damping` (`WheelTuning.road_*`, 0 is none). `WheelActuator.gains` works out both
+designs' gains at the game's spring and moves from the standing design's to the road design's as that spring grows from
+15000 to 34000 per lock (`road_from`, `road_full`: the test truck's 40 and 60 km/h), eased, for LA and the lane keeping
+assist alike; a pulse, which starts at 60 km/h, is on it throughout. On the spring, not the speed, so a truck with a
+weaker centring gets it later. Standing and below the blend the gains are exactly the standing design's, which is all
+the wheel check and the design check ever vouch for. Strength and the ring guard scale it as they do the standing
+design, the caps are the same, a wheel whose learner steps its design down loses it with the first step, and it has no
+push ahead of its own (those are the rim's).
+
+The calibration picks it in the model (`road.road_design`, after the standing design passed its check on the wheel;
+`--no-road` skips it): bandwidths of 3.0, 2.5 and 2.0 Hz on 0.35 to 1.0 of the rim's inertia at damping 1.0 and 0.7,
+those that trail at least a fifth less than the standing design at 90 km/h, fastest first. One is taken when a 0.02
+step overshoots at most 25 % at 45, 50, 60, 90 and 130 km/h of the game's spring (and at 90 and 130 with a third more
+delay) and lane keeping pulses on the blended gains stay within 1 m of a
+line with at most 8 wheel reversals at 60, 90 and 130 km/h, hands off and resting, drifts of 0.4 and 1.2 m/s, the
+target hold on as the app runs them (without it every design hunted round a still target and none passed). Where none
+of the first eight holds, the one that runs least far past a line is taken if that is under half the standing design's
+alone and it rings no more. Half a minute to two. Its chatter is printed and not judged (Lukas, 2026-11-12: the push
+comes first).
+
+Two calibrations on the R3 after it was built (2026-11-12) showed how much the standing fit decides. At 01:56 the
+reading jitter read 11.2 ms (2.1 to 3.8 on five other runs): the model's chatter then failed every design above 1.0 Hz
+and every road candidate, and the run saved 1.0 Hz on 964 with no road design, trailing 0.67 s at 90 km/h. The jitter
+the model uses is now capped at 5 ms (`calibrate.JITTER_MAX_S`). At 02:41 it read 3.8 ms and a delay of 32 ms (18 and
+20 before) and saved 1.95 Hz on 405, which trails 0.13, 0.22 and 0.45 s at 60, 90 and 130 km/h, as fast as before the
+calibration at 90; no road candidate a fifth faster passed its step on that rim, which is no fault: `calibrate` now
+says whether the standing design alone is fast enough or soft.
+
+On the calibrated R3 (414, 20 ms) beside the standing 1.79 Hz it is 3.0 Hz on 145, damping 1.0, the fifth tried (3.0 on
+207 and 2.5 on 290 rang hands off at 130 km/h, 15 reversals):
+
+| | trails by, 60 / 90 / 130 km/h | pulses hands off | pulses hands resting |
+|---|---|---|---|
+| 1.4 Hz on 415 (saved on 2026-11-10) | 0.29 / 0.64 / 1.35 s | 0.30 to 3.75 m | 0.73 to 11.9 m |
+| standing 1.79 Hz alone | 0.19 / 0.31 / 0.64 s | 0.16 to 0.40 m | 0.23 to 0.69 m |
+| with the road design | 0.12 / 0.19 / 0.39 s | 0.11 to 0.33 m | 0.17 to 0.53 m |
+| 2.0 Hz on 650 (before the calibration) | 0.09 / 0.20 / 0.29 s | 0.10 to 0.17 m, 5.16 m at 130 with a 1.2 m/s drift | 0.16 to 0.52 m |
+
+On the slower model wheels nothing holds every case and the fallback takes a clear improvement: the R3 preset (374,
+38 ms) 2.0 Hz on 261, 2.75 m at worst for 20.4 m on its standing 1.25 Hz alone; the bare rim (148, 32 ms) 2.0 Hz on
+148, 10.5 m for 25.6 m. Those rims run wide at 130 km/h hands off on every design, and the real R3's fitted delay has
+read anywhere from 12 to 36 ms from run to run, so which of these the wheel is decides what it gets. All of it is the
+model: nothing here has run on a wheel, and the first drive on a new road design is the test.
+
+What else the calibration does differently since (model only, not run on a wheel):
+
+- **Chatter on the road gains.** The model's chatter limit and the check's slow ramps run on the gains the design has
+  at 60 km/h of the game's centring (`fast_design(road_spring=...)`, `DesignCheck.road_spring`); the steps keep the
+  standing gains, so overshoot and ringing are still judged at their worst. Standing chatter held 2.0 Hz back (172 for
+  a limit of 150) where it reads 117 at 60 km/h and 53 at 90. Cost: LA below about 60 km/h can crunch on a design this
+  lets through.
+- **The middle.** Between the fastest design that passed the check and a faster one that failed, the middle gets one
+  more run (the calibrated rim in the model: 2.0 Hz 40 % over, 1.6 Hz clean, 1.79 Hz tried).
+- **The road report.** `calibrate` prints how far the wheel trails at 60, 90 and 130 km/h on the standing design
+  alone and with the road design, and says when that is soft for lane keeping (over 0.35 s at 90 km/h). The game's
+  centring is read from `la_saved_calibration` (read only), else the test truck's 122. `--save` writes the road keys
+  with the rest, zeros when there is no road design, so an older one never stays behind.
+
 ## Adding a path source
 
 The lane follower is one path source. A later one (lane departure prevention, collision avoidance with a wanted
@@ -663,6 +757,7 @@ line crossed keeps the lane it left as the reference (see the lane under the tru
 | `la_ff_breakaway` | 0 | the ceiling the friction push climbs to while the wheel stands, for a wheel that needs more to start than to slide (the old wheel: 311 to 526 against 305); used when above `la_ff_friction`, needs the plugin's status bit 2048. The wheel check writes it for a sticky wheel; LA and the lane keeping assist both use it |
 | `la_servo_cap` | 0 (3000) | LA's servo cap out of 10000, 1000 to 6000. The game pushes back about 560 units per m/s^2 of cornering, so 8 m/s^2 needs about 4500 plus friction. A hand overpowers it; with `la_always_on` nothing hands back |
 | `la_bandwidth_hz`, `la_damping` | 0 (2 Hz, 0.7) | the servo's design on that rim, from the wheel check; bounded to 0.3 to 3 Hz and 0.3 to 2 |
+| `la_road_inertia`, `la_road_bandwidth_hz`, `la_road_damping` | 0 (none) | the second design, for the road, from the wheel calibration ("Fast on the road"): blended in as the game's centring grows, all of it from about 60 km/h; LA and the lane keeping assist. 0 on the inertia or the bandwidth is none |
 | `la_damping_first` | false | damping first under the cap (`plugins/ffb/README.md`); needs the plugin that knows it. LA and the lane keeping assist both read the three |
 | `la_min_speed_kmh` | 60 | arm speed |
 | `la_force_per_ms2`, `la_kappa_per_steer` | 0 | 0 learns them; any other value is used as is, sign included |

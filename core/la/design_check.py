@@ -4,7 +4,8 @@ or up on the wheel itself rather than trusted from a model. Pure logic like ``wh
 trace samples, asking for one servo command per step. See core/la/README.md, Wheel calibration.
 
 Out 0.15 lock at 0.2 lock/s with 0.1 s rounded corners and back (the speed bench's ramp, so its chatter compares
-with the bench's), then steps of 0.02 and 0.05 lock and back, each followed by a hold.
+with the bench's), then steps of 0.02 and 0.05 lock and back, each followed by a hold. With ``road_spring`` the ramps
+run on the gains the design has at that much of the game's centring: the chatter the servo adds on the road.
 """
 
 from __future__ import annotations
@@ -82,7 +83,10 @@ def _along(ck: CheckTuning, way: float, u: float, dur: float) -> tuple[float, fl
 
 @dataclass
 class DesignCheck:
-    """``tune`` the design, ``direction`` the torque sign that turns the reading up (the calibration's)."""
+    """``tune`` the design, ``direction`` the torque sign that turns the reading up (the calibration's).
+
+    ``road_spring`` is the game's centring the slow ramps' gains are set for; the steps always run the standing gains.
+    """
 
     tune: WheelTuning
     direction: int
@@ -91,6 +95,7 @@ class DesignCheck:
     failure: str = ""
     result: CheckResult | None = None
     servo: ServoCommand = SERVO_OFF
+    road_spring: float = 0.0
 
     def __post_init__(self) -> None:
         self._t: list[float] = []
@@ -104,6 +109,8 @@ class DesignCheck:
         self._fed_at: float | None = None
         self._seen = 0
         self._gains = WheelActuator(self.tune).gains(1.0)
+        self._ramp_gains = WheelActuator(self.tune).gains(1.0, self.road_spring) if self.road_spring > 0.0 else self._gains
+        self._ramps_s = sum(d for d, _, _ in _schedule(self.check)[:4])
 
     def feed(self, samples) -> None:
         if self.state in (DONE, FAILED):
@@ -166,7 +173,7 @@ class DesignCheck:
         return 0.0, 0.0, 0.0
 
     def _command(self, target: float, rate: float, accel: float, u: float) -> ServoCommand:
-        tn, (kp, kd, ki) = self.tune, self._gains
+        tn, (kp, kd, ki) = self.tune, self._ramp_gains if u < self._ramps_s else self._gains
         _, plan_rate, plan_accel = self._aim(u + tn.plan_s)
         return ServoCommand(target=target, rate=rate, kp=kp, kd=kd, ki=ki, cap=round(tn.servo_cap),
                             direction=self.direction, damping_first=tn.damping_first, accel=accel,

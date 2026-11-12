@@ -22,7 +22,7 @@ from core.sending_thread.debug_csv import TickDebugLog
 from core.settings import Settings
 
 from .calibration import Calibration, ForceCalibration
-from .actuator import design_overrides, push_ahead_overrides
+from .actuator import design_overrides, push_ahead_overrides, road_overrides
 from .controller import STRENGTH_MAX, AssistOutput, AssistTuning, Gains, LaneAssist, Wheel, WheelTuning
 from .hand_push import HandPush, HandPushEstimator, PushTuning
 
@@ -65,6 +65,11 @@ def _setting(name: str, default: float) -> float:
     except (AttributeError, TypeError, ValueError):
         return default
     return value if math.isfinite(value) else default
+
+
+def _road_design() -> tuple[float, float, float]:
+    """The road design's inertia, bandwidth and damping (``la_road_*``); 0 is none."""
+    return _setting("la_road_inertia", 0.0), _setting("la_road_bandwidth_hz", 0.0), _setting("la_road_damping", 0.0)
 
 
 def _calibrated() -> bool:
@@ -285,18 +290,20 @@ class AssistRunner:
                  _setting("la_servo_lead_s", 0.0), _setting("la_ff_plan_s", 0.0), _setting("la_ff_breakaway", 0.0))
         learn = bool(getattr(Settings, "la_wheel_learning", True))
         calibrated = _calibrated()
+        road = _road_design()
         key = (arm, strength, bool(getattr(Settings, "la_tmp_enabled", False)),
                bool(getattr(Settings, "la_follow_all", False)), max(50.0, min(20000.0, inertia)), cancel,
-               bool(getattr(Settings, "la_always_on", False)), *design, *ahead, learn, calibrated)
+               bool(getattr(Settings, "la_always_on", False)), *design, *ahead, learn, calibrated, *road)
         line = ("LA settings: from %.0f km/h, strength %.2f, TruckersMP %s, follow everywhere %s, wheel inertia %.0f, "
                 "game force cancelled %.2f, always on (test, no hand-backs) %s, servo design %.2f Hz, damping %.2f, "
                 "damping first %s, servo cap %.0f (0 is 3000), push ahead inertia %.0f, damping %.0f, friction %.0f, "
-                "lead %.3f s, plan %.3f s, breakaway %.0f, wheel learning %s, calibrated wheel %s", *key)
+                "lead %.3f s, plan %.3f s, breakaway %.0f, wheel learning %s, calibrated wheel %s, road design on "
+                "%.0f at %.2f Hz, damping %.2f (0: none)", *key)
         return key, AssistTuning(
             arm_kmh=arm, disarm_kmh=max(0.0, arm - _ARM_MARGIN_KMH),
             wheel=WheelTuning(strength=strength, inertia=key[4], cancel_share=key[5], **design_overrides(*design),
                               **push_ahead_overrides(*ahead), hold=learn, learn=learn, settle=learn,
-                              calibrated=calibrated),
+                              calibrated=calibrated, **road_overrides(*road)),
             allow_tmp=key[2], follow_all=key[3], always_on=key[6],
         ), line if key[3] or key[6] else ()
 

@@ -230,8 +230,8 @@ class LaneAssist:
         self._lane_since: float | None = None
         self._last_offset: float | None = None
         self._psi: float | None = None
-        self._override_t = 0.0
-        self._insist_t = 0.0
+        self._override_t = self._insist_t = 0.0
+        self._held_push = self.tune.resist_min_push if self.tune.pulse else 0.0
         self._lat_i = 0.0
         self._shift = 0.0
         self._carry_since = 0.0
@@ -638,8 +638,8 @@ class LaneAssist:
         Still, because a released wheel swinging past the target is not a driver. So is a still wheel pushed near the
         servo's cap net of the game's force: firm hands hold it. In a bend the servo carries the game's centring.
         After the hold it rejoins only near a lane centre, so a lane change without a blinker is not pulled back. A pulse
-        counts only a wheel held short of its target: past it, toward home, its one-sided servo does nothing. It also
-        yields once the driver's push has taken all of its authority (``_watch_resist``).
+        counts only a wheel held short of its target (past it, toward home, its one-sided servo does nothing) and only
+        once it pushes ``resist_min_push``; it also yields once the driver's push took all its authority (``_watch_resist``).
         """
         tn = self.tune
         if tn.always_on:
@@ -655,7 +655,7 @@ class LaneAssist:
                 self._override_until = max(self._override_until, t + dt)
             return False
         short = (err if self._pulse_side == SIDE_RIGHT else -err) if tn.pulse else abs(err)
-        held = short > tn.override_err and abs(wheel.rate) < tn.override_still
+        held = short > tn.override_err and abs(wheel.rate) < tn.override_still and abs(wheel.push) >= self._held_push
         self._override_t = self._override_t + dt if held else 0.0
         cap = self._wheel.cap(self._auth)
         cap = min(cap, self._frozen * ease(self._auth)) if self._frozen is not None else cap

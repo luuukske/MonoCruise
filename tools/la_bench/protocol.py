@@ -11,7 +11,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 
-from core.la.actuator import WheelActuator, WheelTuning
+from core.la.actuator import WheelActuator, WheelTuning, road_overrides
 
 LEAD_S = 0.5
 STEP_HOLD_S = 1.5
@@ -24,7 +24,7 @@ class Design:
 
     ``spring`` is the game's centring the design is told about (units per lock); standing it is about 0.
     ``ff_*`` and ``lead_s`` are the plugin's push ahead and lead (layout 5), 0 is none; ``ff_breakaway`` the friction
-    push while the wheel stands (status bit 2048).
+    push while the wheel stands (status bit 2048). ``road_*`` is the design for the road, blended in by ``spring``.
     """
 
     bandwidth_hz: float = 2.0
@@ -42,6 +42,9 @@ class Design:
     plan_s: float = 0.0
     ff_breakaway: float = 0.0
     settle: bool = False
+    road_inertia: float = 0.0
+    road_bandwidth_hz: float = 0.0
+    road_damping: float = 0.0
 
     @property
     def label(self) -> str:
@@ -61,6 +64,7 @@ class Design:
         tune = WheelTuning(
             inertia=self.inertia, bandwidth_hz=self.bandwidth_hz, damping=self.damping, strength=self.strength,
             integral_share=self.integral_share, servo_cap=float(self.cap),
+            **road_overrides(self.road_inertia, self.road_bandwidth_hz, self.road_damping),
         )
         return WheelActuator(tune).gains(1.0, self.spring)
 

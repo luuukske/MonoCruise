@@ -154,6 +154,11 @@ class Settings(metaclass=_SingletonMeta):
     la_bandwidth_hz: float = 0.0
     la_damping: float = 0.0
     la_damping_first: bool = False
+    # A second servo design for the road, from the wheel calibration (0: none): blended in as the game's centring grows,
+    # all of it from about 60 km/h. Used by LA and the lane keeping assist. core/la/README.md, "Fast on the road".
+    la_road_inertia: float = 0.0
+    la_road_bandwidth_hz: float = 0.0
+    la_road_damping: float = 0.0
     # LA's servo cap out of 10000 (0 is the default 3000, bounded 1000 to 6000, the plugin's hard maximum). LA only: the
     # lane keeping assist never reads it. Raise it to hold harder bends (about 560 units per m/s^2 of cornering).
     la_servo_cap: float = 0.0

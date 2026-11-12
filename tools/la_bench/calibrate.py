@@ -9,7 +9,7 @@ import math
 import time
 from dataclasses import asdict, replace
 
-from core.la.actuator import WheelTuning
+from core.la.actuator import WheelTuning, road_overrides
 from core.la.design_check import CheckResult
 from core.la.wheel_calibration import DONE, FAILED, CalTuning, WheelCalibration, WheelProfile, _Trial, analyse
 from core.lane_departure.command import SERVO_OFF, TORQUE_VERSION
@@ -130,10 +130,12 @@ def tuning_of(choice: Choice, bandwidth: float, cap: float = 3000.0) -> WheelTun
     """The servo tuning a design check runs: the choice at ``bandwidth``."""
     return WheelTuning(inertia=choice.inertia, bandwidth_hz=bandwidth, damping=choice.damping, damping_first=True,
                        servo_cap=cap, ff_inertia=choice.ff_inertia, ff_damping=choice.ff_damping,
-                       ff_friction=choice.ff_friction, plan_s=choice.plan_s, ff_breakaway=choice.ff_breakaway)
+                       ff_friction=choice.ff_friction, plan_s=choice.plan_s, ff_breakaway=choice.ff_breakaway,
+                       **road_overrides(choice.road_inertia, choice.road_bandwidth_hz, choice.road_damping))
 
 
 STIFFER = 1.5
+MIDDLE_GAP = 1.15
 HALF_PUSH = 0.5
 HALF_PUSH_GAIN = 0.05
 
@@ -148,7 +150,9 @@ def verify(choice: Choice, run_check, say=print,
            breakaway: float = 0.0) -> tuple[Choice | None, list[tuple[Choice, CheckResult | None]]]:
     """The model's design tried on the wheel (``run_check(tuning) -> CheckResult | None``): 20 % gentler while it is
     rough, half as stiff again on its design inertia while a sticky wheel does not follow the small step, 25 % faster
-    while it is clean with room; at most CHECKS_MAX runs. The fastest design that passed, and every run."""
+    while it is clean with room; at most CHECKS_MAX runs. Between the fastest that passed and a faster one that
+    failed, the middle gets one run more: a 20 % step left a wheel that held 1.75 Hz at 1.6. The fastest design that
+    passed, and every run."""
     best, tried, cur = None, [], choice
     for _ in range(CHECKS_MAX):
         res = run_check(tuning_of(cur, cur.bandwidth_hz))
@@ -174,6 +178,15 @@ def verify(choice: Choice, run_check, say=print,
         cur = _floored(replace(cur, bandwidth_hz=round(cur.bandwidth_hz * STEP_DOWN, 2)), breakaway)
         if cur.bandwidth_hz < BANDWIDTH_MIN:
             break
+    over = [c.bandwidth_hz for c, r in tried if best is not None and not (r and r.passed)
+            and abs(c.inertia - best.inertia) <= 0.01 * best.inertia and c.bandwidth_hz > best.bandwidth_hz]
+    if over and min(over) >= MIDDLE_GAP * best.bandwidth_hz:
+        mid = replace(best, bandwidth_hz=round(math.sqrt(best.bandwidth_hz * min(over)), 2))
+        res = run_check(tuning_of(mid, mid.bandwidth_hz))
+        tried.append((mid, res))
+        say(f"  check between them at {mid.bandwidth_hz:.2f} Hz: " + (res.why if res else "stopped"))
+        if res is not None and res.passed:
+            best = mid
     if best is not None and best.ff_friction > 0.0:
         # The friction a sticky wheel reads varies a quarter from run to run (the old wheel 210 to 336): the wheel
         # decides whether half the push is cleaner.
@@ -191,12 +204,14 @@ def verify(choice: Choice, run_check, say=print,
 STICK_SPEED_AT_CREEP = 0.462
 FRICTION_SHARE = 0.5
 READING_JITTER_S = 0.004
+JITTER_MAX_S = 0.005
 CHATTER_MAX = 150.0
 
 
 def rim_of(p: WheelProfile) -> WheelParams | None:
     """The model rim a pinned profile describes, for the design search; None when not pinned. With the creep's slow
-    friction the rim's friction rises from it to the fast slides' (the plant's ``stick_speed``); its jitter measured."""
+    friction the rim's friction rises from it to the fast slides' (the plant's ``stick_speed``); its jitter measured,
+    up to JITTER_MAX_S: the R3 read 2.1 to 3.8 ms on five runs and 11.2 on one, which alone made its design 1.0 Hz."""
     if not p.pinned:
         return None
     spread = max(0.0, min(0.5, p.breakaway_top / p.breakaway - 1.0)) if p.breakaway > 0.0 else 0.0
@@ -208,7 +223,7 @@ def rim_of(p: WheelProfile) -> WheelParams | None:
     return WheelParams(inertia=p.inertia, damping=p.damping, stick=stick, stick_speed=rise, spring=p.spring,
                        delay_s=p.delay_s, quantum=p.quantum, reading_hz=p.reading_hz,
                        breakaway=max(p.breakaway, p.slide), breakaway_spread=spread,
-                       reading_jitter_s=p.jitter_s or READING_JITTER_S)
+                       reading_jitter_s=min(JITTER_MAX_S, p.jitter_s or READING_JITTER_S))
 
 
 def push_of(p: WheelProfile) -> dict:
@@ -231,16 +246,42 @@ def kp_floor_of(p: WheelProfile, push: dict) -> float:
     return max(0.0, p.breakaway - push["ff_friction"]) / STEP_MIN
 
 
-def design(p: WheelProfile) -> tuple[Choice, float | None] | None:
-    """The design for the calibrated rim in seconds (``fast_design``) and its chatter in the model; None unpinned."""
+ROAD_BANDWIDTHS = (0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.25, 2.5)
+
+
+def design(p: WheelProfile, per_v2: float | None = None) -> tuple[Choice, float | None] | None:
+    """The design for the calibrated rim in seconds (``fast_design``) and its chatter in the model; None unpinned.
+
+    With ``per_v2`` (the game's centring per lock per (m/s)^2, ``road.spring_per_v2``) the chatter is judged on the
+    gains the design has at 60 km/h, so smoothness no longer holds back a design that is only stiff standing. The pick
+    still has to hold on the standing rim: how it does on the road is reported (``road``), not searched.
+    """
     rim = rim_of(p)
     if rim is None:
         return None
     push = push_of(p)
-    return fast_design(rim, push, p.ffb_hz or 120.0, CHATTER_MAX, kp_floor=kp_floor_of(p, push))
+    floor = kp_floor_of(p, push)
+    if per_v2 is None:
+        return fast_design(rim, push, p.ffb_hz or 120.0, CHATTER_MAX, kp_floor=floor)
+    from tools.la_bench import road
+
+    return fast_design(rim, push, p.ffb_hz or 120.0, CHATTER_MAX, ROAD_BANDWIDTHS, kp_floor=floor,
+                       road_spring=road.spring_at(road.CHATTER_KMH, per_v2))
 
 
 
+
+def with_road(p: WheelProfile, choice: Choice, per_v2: float, say=None) -> Choice:
+    """``choice`` with the design for the road beside it (``road.road_design``), when one holds on this rim."""
+    from tools.la_bench import road
+
+    rim = rim_of(p)
+    if rim is None:
+        return choice
+    got = road.road_design(rim, tuning_of(choice, choice.bandwidth_hz), p.ffb_hz or 120.0, per_v2, say)
+    if got is None:
+        return choice
+    return replace(choice, road_inertia=got[0], road_bandwidth_hz=got[1], road_damping=got[2])
 
 
 def save(p: WheelProfile, choice: Choice) -> dict:
@@ -250,7 +291,7 @@ def save(p: WheelProfile, choice: Choice) -> dict:
     Settings.load()
     learned = dict(getattr(Settings, "la_wheel_learned", None) or {})
     learned.update(rung=0, calm_s=0.0)
-    values = {**choice.config(), "la_wheel_profile": p.to_dict(), "la_wheel_learned": learned}
+    values = {**choice.config(), **choice.road_config(), "la_wheel_profile": p.to_dict(), "la_wheel_learned": learned}
     Settings.save(values=values)
     return values
 

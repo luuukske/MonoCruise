@@ -60,6 +60,14 @@ class Choice:
     ff_friction: float = 0.0
     plan_s: float = 0.0
     ff_breakaway: float = 0.0
+    road_inertia: float = 0.0
+    road_bandwidth_hz: float = 0.0
+    road_damping: float = 0.0
+
+    def road_config(self) -> dict:
+        """The road design's keys, zeros when there is none so an older one does not stay in the config."""
+        return {"la_road_inertia": round(self.road_inertia), "la_road_bandwidth_hz": round(self.road_bandwidth_hz, 2),
+                "la_road_damping": round(self.road_damping, 2)}
 
     def design(self) -> Design:
         return Design(bandwidth_hz=self.bandwidth_hz, damping=self.damping, inertia=self.inertia, damping_first=True,
@@ -216,11 +224,16 @@ def choose_design(params: WheelParams, frame_hz: float = 120.0, bandwidths=BANDW
 
 
 def fast_design(params: WheelParams, push: dict, frame_hz: float, chatter_max: float | None,
-                bandwidths=BANDWIDTHS, damping: float = 0.7, kp_floor: float = 0.0) -> tuple[Choice, float | None]:
+                bandwidths=BANDWIDTHS, damping: float = 0.7, kp_floor: float = 0.0,
+                road_spring: float = 0.0) -> tuple[Choice, float | None]:
     """The fastest bandwidth, designed on the rim's own inertia, whose force chatter stays under ``chatter_max`` and
     that holds on the rim and its neighbours; seconds where ``choose_design`` takes minutes. Also its chatter.
     The full search's stiffer design inertias crunched on the R3 (2026-11-09); ``kp_floor`` raises the design
-    inertia only as far as a sticky wheel needs to move a small step past its breakaway."""
+    inertia only as far as a sticky wheel needs to move a small step past its breakaway.
+
+    With ``road_spring`` the chatter is the design's at that much of the game's centring (``road.chatter``), where the
+    servo works, not standing: standing it is the whole stiffness, on the road a share of it.
+    """
     plants = neighbours(params, ahead=True, measured=True)
 
     def inertia_at(bw: float) -> float:
@@ -228,10 +241,18 @@ def fast_design(params: WheelParams, push: dict, frame_hz: float, chatter_max: f
 
     for bw in sorted(bandwidths, reverse=True):
         design = Design(bandwidth_hz=bw, damping=damping, inertia=inertia_at(bw), damping_first=True, **push)
-        ok, res = holds(plants, design, frame_hz, chatter_max)
-        if ok:
-            return Choice(design.inertia, bw, damping, res[0]["rise_s"], res[0]["lag_s"], max(r["over"] for r in res),
-                          **push), res[0]["chatter"]
+        ok, res = holds(plants, design, frame_hz, None if road_spring > 0.0 else chatter_max)
+        if not ok:
+            continue
+        felt = res[0]["chatter"]
+        if road_spring > 0.0 and chatter_max is not None:
+            from tools.la_bench.road import chatter as road_chatter
+
+            felt = road_chatter(params, design, frame_hz, road_spring)
+            if felt > chatter_max:
+                continue
+        return Choice(design.inertia, bw, damping, res[0]["rise_s"], res[0]["lag_s"], max(r["over"] for r in res),
+                      **push), felt
     low = min(bandwidths)
     return Choice(inertia_at(low), low, damping, None, None, 1.0, limited=True, **push), None
 

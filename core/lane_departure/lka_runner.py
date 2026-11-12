@@ -10,9 +10,9 @@ import logging
 import math
 from dataclasses import replace
 
-from core.la.actuator import design_overrides, push_ahead_overrides
+from core.la.actuator import design_overrides, push_ahead_overrides, road_overrides
 from core.la.controller import STRENGTH_MAX, AssistTuning, Wheel, WheelTuning
-from core.la.runner import _ARM_MARGIN_KMH, AssistRunner, Request, _setting
+from core.la.runner import _ARM_MARGIN_KMH, AssistRunner, Request, _road_design, _setting
 from core.lane_departure.command import PluginStatus
 from core.settings import Settings
 
@@ -21,8 +21,7 @@ from .lka import Pulse
 
 logger = logging.getLogger(__name__)
 
-_SKIPS = {"swerve": "a swerve in the last seconds", "override": "the driver took over",
-          "drift": "the truck itself is not drifting toward it (lane fit)"}
+_SKIPS = {"swerve": "a swerve in the last seconds", "override": "the driver took over"}
 # Past the pulse's own push by this much is the driver steering through it; still wheels read up to 500 (2026-11-02).
 _BEYOND_UNITS = 500.0
 
@@ -108,13 +107,15 @@ class LkaRunner(AssistRunner):
         ahead = (_setting("la_ff_inertia", 0.0), _setting("la_ff_damping", 0.0), _setting("la_ff_friction", 0.0),
                  _setting("la_servo_lead_s", 0.0), _setting("la_ff_plan_s", 0.0), _setting("la_ff_breakaway", 0.0))
         learn = bool(getattr(Settings, "la_wheel_learning", True))
-        key = (arm, strength, bool(getattr(Settings, "lka_tmp_enabled", False)), inertia, *design, *ahead, learn)
+        road = _road_design()
+        key = (arm, strength, bool(getattr(Settings, "lka_tmp_enabled", False)), inertia, *design, *ahead, learn, *road)
         line = ("LKA settings: from %.0f km/h, strength %.2f, TruckersMP %s, wheel inertia %.0f, servo design %.2f Hz, "
                 "damping %.2f, damping first %s, push ahead inertia %.0f, damping %.0f, friction %.0f, lead %.3f s, "
-                "plan %.3f s, breakaway %.0f, wheel learning %s",
+                "plan %.3f s, breakaway %.0f, wheel learning %s, road design on %.0f at %.2f Hz, damping %.2f (0: none)",
                 *key)
         return key, AssistTuning(
             pulse=True, settle_s=1.0, arm_kmh=arm, disarm_kmh=max(0.0, arm - _ARM_MARGIN_KMH),
             wheel=WheelTuning(strength=strength, inertia=inertia, **design_overrides(*design),
-                              **push_ahead_overrides(*ahead), hold=learn, settle=learn), allow_tmp=key[2],
+                              **push_ahead_overrides(*ahead), hold=learn, settle=learn, **road_overrides(*road)),
+            allow_tmp=key[2],
         ), line
