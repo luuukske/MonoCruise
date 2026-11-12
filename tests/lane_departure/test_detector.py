@@ -337,11 +337,10 @@ def test_no_reaction_on_a_slight_bend_cues_early_and_warns_at_the_outside_line()
     assert LINE - 0.2 < warn.gap_m <= LINE and warn.allow_m == TN.warn_overlap_m
 
 
-def test_no_reaction_in_a_tight_corner_warns_at_the_outside_line_without_a_cue():
+def test_no_reaction_in_a_tight_corner_cues_before_the_outside_line_and_warns_at_it():
     decisions = drive(no_reaction_on_a_right_bend, radius=300.0)
-    warn = warns(decisions)[0]
-    assert not cues(decisions) and warn.side == SIDE_LEFT
-    assert any(d.near_miss == "bend_tight" for d in decisions)
+    cue, warn = cues(decisions)[0], warns(decisions)[0]
+    assert cue.side == warn.side == SIDE_LEFT and decisions.index(cue) < decisions.index(warn)
     assert LINE - 0.2 < warn.gap_m <= LINE and warn.allow_m == TN.warn_overlap_m
     assert decisions.index(warn) * DT < DRIFT_START + 1.2
 
@@ -559,7 +558,7 @@ def test_understeering_toward_the_outside_of_a_bend_warns_at_the_line_with_no_al
     warn = warns(decisions)[0]
     assert warn.side == SIDE_LEFT
     assert warn.allow_m == TN.warn_overlap_m and LINE - 0.05 < warn.gap_m <= LINE
-    assert not cues(decisions)
+    assert cues(decisions)[0].side == SIDE_LEFT
 
 
 def test_a_sharp_bend_is_silent():
@@ -683,9 +682,12 @@ def test_a_cue_that_ends_does_not_disarm_the_line_warning():
     assert LINE - 0.1 < warns(decisions)[0].gap_m <= LINE
 
 
-def test_a_tight_corner_never_cues_and_a_steady_slight_bend_cues_like_a_straight():
-    tight = drive(drift(1.5, 1.0), radius=300.0)
-    assert not cues(tight) and warns(tight)[0].side == SIDE_RIGHT
+def test_the_inside_of_a_tight_corner_cues_only_for_a_fast_run_and_the_rest_like_a_straight():
+    slow, fast = drive(drift(0.5, 1.0), radius=300.0), drive(drift(1.5, 1.0), radius=300.0)
+    assert not cues(slow) and warns(slow)[0].side == SIDE_RIGHT
+    assert any(d.near_miss == "inner_slow" for d in slow)
+    assert cues(fast)[0].side == SIDE_RIGHT
+    assert cues(drive(drift(0.5, -1.0), radius=300.0))[0].side == SIDE_LEFT
     for side, expected in ((1.0, SIDE_RIGHT), (-1.0, SIDE_LEFT)):
         slight = drive(drift(0.5, side), radius=700.0)
         assert cues(slight) and cues(slight)[0].side == expected

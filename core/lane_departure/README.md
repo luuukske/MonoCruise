@@ -35,34 +35,57 @@ rear whichever is farther out, to that lane edge. The rear corner keeps the rumb
 the cab swings back. Without readable wheels the reference rig is used, and the thread logs which
 body it has once. The trailer is not included.
 
-There are two triggers on the same lane data, and they differ in what they sense.
+There are two triggers on the same lane data, and they differ in what they sense. The rumble and the lane
+keeping pulse share them (Lukas, 2026-11-11): whatever starts one starts the other, see "One trigger" below.
 
 - **Line warning (full rumble).** Position only: how far the body is from the lane centre.
   It starts when the corner reaches the warning line, `warn_overlap_m` past the edge (-0.1, so
   0.1 m before the tyre touches the line) plus the bend allowance on the inside of a bend
-  (below). Lateral speed and heading play no part, so a fast and a slow drift warn at the same
-  place.
+  (below). A fast and a slow drift warn at the same place. It does not start on a truck already
+  heading home (0.07 m/s toward the centre or more) or on a driver already steering back (below).
 - **Approach cue (softer rumble, 60 % strength).** The relative speed: "you are getting close to
   the lane". It starts when the time to reach the warning line is 0.8 s or less, from the
   corner's lateral speed and a damped lateral acceleration (half the regression of the heading
   over 0.6 s, capped at 1.5 m/s^2), and the truck is drifting toward the edge at 0.4 m/s or more.
   It only exists near the edge: the corner must be within 0.4 m of the warning line, so a fast
   move in the middle of the lane is ignored. It escalates to the full rumble when the line is
-  reached. A slow wander (under 0.4 m/s) gets no cue, only the line warning. The cue follows the
-  change of curvature, not the curvature itself, over the road from ego to `max(30 m, 3 s)`
-  ahead, each zone held 2 s after it clears:
-  - **Steady slight bend** (curvature varying by less than 1/1000 across that road, gentler than
-    R 400): the cue works as on a straight, both edges.
-  - **Curvature changing** (entry, exit, wavy roads; `bend_change`): a drift there is mostly
-    positioning and timing, turning in late or unwinding late. The cue is kept for the driver who
-    is not paying attention: it is muted while the wheel has moved away from that edge in the
-    last 1.5 s (0.008 of lock net, or 0.03 per second), a driver already correcting, and a still
-    wheel or one moving toward the edge cues as on a straight.
-  - **Tight corner** (R 400 or tighter anywhere from 10 m behind to 3 s ahead; `bend_tight`):
-    never a cue, and a cue already running ends. Only the line warning is left.
+  reached. A slow wander (under 0.4 m/s) gets no cue, only the line warning. It works in bends
+  as on a straight, with two extra conditions:
+  - **The truck itself drifts out** (`no_drift`): 0.2 m/s or more toward the line by the lane fit
+    (`core/la/lane_model.py`, the lane's own vertices). The polyline heading showed up to 0.8 m/s
+    of drift toward the outer line of fast bends on a truck heading home. No fit: the detector's
+    own drift decides.
+  - **Inside edge of a tight bend** (R 500 or tighter toward that edge, `inner_slow`): only for a
+    run of 0.8 m/s or more. A slower corner cut keeps to the line warning and its allowance.
 
   Sharp bends stay silent as a whole (`bend_sharp`), and the heading is read from the smoothed
   lane tangent so a coarse polyline cannot fake a closing speed.
+
+## One trigger for the rumble and the pulse
+
+Until 2026-11-11 LDW muted its cue in bends (never in a corner of R 400 or tighter, and where the
+curvature changed while the wheel moved away) and LKA started there on a test of its own. On the
+drive of that night (both on, 57 pulses) 14 pulses came with no rumble and 11 more got it only at
+the line, a smooth pull on the wheel with nothing felt first; LDW alone was only useful on
+motorways. Both now start on the detector's decision, and the bend tests LKA had are the
+detector's (the two conditions above). What stays the pulse's own: no pulse for 5 s after a
+swerve, while an override holds, or without the plugin and the calibration; the rumble still
+comes there. The catch after a pulse (below) has no detector start behind it, so with LDW on the
+thread adds the soft rumble for its first second.
+
+**Steering back** (`correcting`, Lukas, 2026-11-11: "it rumbles while I am already steering
+back"). Neither level starts while the wheel has turned home and that turn is enough to stop the
+truck within 0.15 m past the warning line. The wheel's turn is the last 1.5 s of movement away
+from the edge, less what the lane's own change of curvature asked for (at `steer_kappa`, 0.18 1/m
+per lock, the gain LA learned on the test truck), so following a bend is not steering back from
+its outer line. It needs 0.008 of lock, or a flick of 0.03 per second. The stop is predicted from
+the drift and the inward acceleration seen; where the lane's curvature is steady ahead (varying by
+under 1/1000 over `max(30 m, 3 s)`) the wheel's own turn counts too, `v^2 * steer_kappa * turn`,
+before the truck answers it. A truck that does not answer the wheel passes the 0.15 m and is
+warned there; the evidence also runs out after 1.5 s. Not toward an unsafe lane (Side traffic),
+not in test mode. A rumble already running is not ended by it. Where the curvature changes the
+wheel's turn alone muted real run-outs on the drive of 2026-11-12 (a wheel turning into the bend
+ahead leads the curvature under the truck, so it read as steering back from the outer line).
 
 Lateral speed is read at the rear axle group (`EgoGeometry.path_origin_m`, `core/radar/README.md`
 section 17), the point that rolls along the heading: the heading is compared with the lane tangent
@@ -100,14 +123,15 @@ A truck centre more than three half lanes from the route is `off_route`.
 | `speed`, `reverse`, `paused`, `stale`, `aeb`, `brake` | below 60 km/h (disarm 50), reversing, game paused, radar older than 0.25 s, AEB cue, brake 0.7 or more (hard braking only) |
 | `lane_settle` | first 1 s on a lane after a lane switch of the router, a junction, no map or stale data (a fork or fast bend ahead does not restart it) |
 | `bend_sharp` | lane curvature of 1/90 m or more |
-| `bend_change` | approach cue only: lane curvature varies by 1/1000 or more from ego to `max(30 m, 3 s)` ahead (`dkappa` in the log), held 2 s, and the wheel moved away from that edge in the last 1.5 s (`steer_away`); the line warning still applies |
-| `bend_tight` | approach cue only: curvature of 1/400 or more from 10 m behind to `max(30 m, 3 s)` ahead, held 2 s; the line warning still applies |
+| `inner_slow` | approach cue only: the inside edge of a bend of R 500 or tighter, drifting at under 0.8 m/s; the line warning still applies |
+| `no_drift` | approach cue only: the truck is not drifting toward the line at 0.2 m/s by the lane fit; the line warning still applies |
+| `correcting` | the wheel turned home (`steer_away`, less the lane's own turn) by enough to stop within 0.15 m past the warning line |
 | `blinker` | that side's lamp (or hazards) is on, or went off under 2 s ago; not toward an unsafe lane (Side traffic) |
 | `deliberate` | the wheel moved toward that edge by 0.06 of lock or more over the last 2 s, or at 0.3 per second or more over 0.3 s; held 1 s |
-| `intent` | the heading toward that edge is 1.2 degrees or more and the wheel moved toward it (0.015 of lock net over 2 s, or 0.06 per second); held 2 s |
+| `intent` | the heading toward that edge is 1.2 degrees or more and the wheel moved toward it (0.015 of lock net over 2 s, or 0.06 per second), turning into a bend included; held 2 s |
 | `evade` | a hard wheel move in either direction (0.15 of lock net over 2 s, or 0.6 per second over 0.3 s) mutes both sides for 2 s: a swerve and its counter-steer |
 | `latched` | reached the warning line while blinking or steering deliberately: silent until back inside it. `deliberate`, `intent` and `latched` do not mute toward an unsafe lane either (Side traffic) |
-| `returning` | moving toward the lane centre at 0.2 m/s or more; mutes the line warning (the cue needs a drift toward the edge anyway) |
+| `returning` | moving toward the lane centre: 0.07 m/s or more keeps a line warning from starting, 0.2 m/s ends a running one (the cue needs a drift toward the edge anyway) |
 | `bend_inner` | not a mute: the tyre is over the inside line but within the bend allowance (reported for tuning) |
 
 Every number above is a placeholder in `Tuning`, set by reasoning and not by driving.
@@ -127,11 +151,24 @@ the other lane warned.
 
 An evasive move is hard steering, so it silences the rumble (`evade`, both sides, 2 s, on top of
 the per-side `deliberate`). In a tight bend (lane curvature of 1/500 or more toward a side)
-steering that way is the bend, not intent, and is not counted: a driver who turns hard into a
-corner and still runs wide, or sleeps through it, is warned for the outside edge. Steering
-against the bend still counts. The inside edge of a bend is then decided by position and the bend
-allowance alone. Gentler curves get no exemption, so a lane change on a motorway sweep is muted
-as on a straight.
+steering that way is the bend, not a deliberate move or a swerve, and is not counted for
+`deliberate` and `evade`: a driver who turns hard into a corner and still runs wide, or sleeps
+through it, is warned for the outside edge. Steering against the bend still counts. Gentler
+curves get no exemption, so a lane change on a motorway sweep is muted as on a straight.
+
+**Turning in and cutting the bend is intent** (Lukas, 2026-11-11). On the inside edge of a tight
+bend the `intent` rule counts the wheel's turn toward that edge beyond what the lane's own turn
+asked for (the last 1.5 s of wheel movement less the lane's change of curvature at
+`steer_kappa`): 0.015 of lock of that with the truck pointing at the edge by 1.2 degrees or more
+is a cut, muted like a lane change without a blinker and `latched` until back inside. A wheel
+that turned in with the bend and then stands while the truck runs to the inside is a drift and
+warns. The first version counted the wheel as it was turned, bend or not, for 2 s and held 2 s
+more: on the drive of 2026-11-12 every bend entry armed it, and trucks ran 1 to 2 m past the
+inside line with no rumble and no pulse (`intent` was the top mute, 12 of 37). On the drive of
+2026-11-11 about 9 pulses came on the inside of corners, most overridden within 0.4 s; in 5 the
+wheel had just turned toward that edge. Toward an unsafe lane (Side traffic) it mutes nothing,
+like the other intent rules. A slow cut under 1.2 degrees is still decided by position and the
+allowance.
 
 ## Prefab lanes
 
@@ -179,7 +216,8 @@ straights and 0.15 to 0.5 m on bends from R 1000 to R 90. So a driver who cuts b
 will feel it. Thin data from AEB clips, so the numbers are placeholders like the rest.
 
 Cost: on a left bend (right-hand traffic) the inside edge is the oncoming lane, which gets the
-same allowance, and no cue in a tight corner. Trailer off-tracking is not modelled.
+same allowance, a cue only for a fast run, and none for a driver who turned in and cut it.
+Trailer off-tracking is not modelled.
 
 On straights 8 of 21 clips had the truck's median position more than 0.5 m from the map's lane
 centre (3 more than 1 m). Whether that is map error or how those drivers drive is open; a road
@@ -206,26 +244,26 @@ gate, the shared-memory layout against `plugins/ffb/ffb_cmd.h`).
 ## Lane keeping assist
 
 A short steer back when the detector above catches an unintended drift out of the lane, into the next
-lane, off the road or into the oncoming lane. It reads the detector and never changes it: the rumble
-warns exactly as it does without it (`test_lane_departure_warns_exactly_the_same_with_it_on`), and with
-`ldw_enabled` off the detector still runs for it, silently. It steers through LA's core (`core/la/`, the
+lane, off the road or into the oncoming lane. It reads the detector and never changes it: the detector
+decides exactly as it does without it (`test_lane_departure_warns_exactly_the_same_with_it_on`), and with
+`ldw_enabled` off the detector still runs for it, silently. The one rumble it adds is the soft cue under a
+catch pulse ("One trigger" above). It steers through LA's core (`core/la/`, the
 lane fit, path tracking and servo) in its pulse mode; LA outranks it when both are on. Pure logic in
 `lka.py` (when to start and stop) and `edges.py` (what lies past each line), settings and logs in
 `lka_runner.py`.
 
-**When it starts.** On the detector's own episode on a side, the approach cue or the line warning, with
-the same mutes: blinker on that side, deliberate steering, a wheel that made the heading, a swerve,
-`latched`, `returning`, and every gate (speed, AEB, hard braking, stale data, junctions, forks, merges,
-sharp bends). The detector mutes its approach cue in bends; there LKA still starts on the same test
-(0.8 s to the warning line, drifting at 0.4 m/s or more, within 0.4 m of it) on a straight or a bend's
-outer edge: running wide is caught early. On a bend's inner edge it does so only for a run at 0.8 m/s or
-more; a slower corner cut keeps to the line warning, as in LDW (on 2026-11-02 a 1.5 m/s run into the
-oncoming lane on the inside of an R 90 waited for the line and went 0.5 m over). An approach start, this
-test or the detector's own cue, also needs the truck itself drifting toward the line at 0.2 m/s or more by
-LA's lane fit (`drift` in the skips): the detector reads its heading off the route polyline, which in fast
-bends showed up to 0.8 m/s toward the outer line while the truck was heading home. On 2026-11-02 that was 17
-of 47 pulse starts, among them every 0.2 s stutter and the pulse the driver held at the servo's cap at
-20:59:55. A start at the line warning stays position only. It needs no swerve in the last 5 s (the
+**When it starts.** On the detector's own start on a side, the approach cue or the line warning, and
+nowhere else but the catch below: the rumble and the pulse share one trigger (Lukas, 2026-11-11, "One
+trigger" above), with the same mutes: blinker on that side, deliberate steering, a wheel that made the
+heading, a swerve, `latched`, `returning`, `correcting`, and every gate (speed, AEB, hard braking, stale
+data, junctions, forks, merges, sharp bends). The bend tests it had of its own until then are the detector's
+now: the approach start in bends, on a bend's inner edge only for a run at 0.8 m/s or more (on 2026-11-02 a
+1.5 m/s run into the oncoming lane on the inside of an R 90 waited for the line and went 0.5 m over), and the
+truck itself drifting toward the line at 0.2 m/s or more by the lane fit (the route polyline showed up to
+0.8 m/s toward the outer line of fast bends while the truck was heading home: 17 of 47 pulse starts on
+2026-11-02, among them every 0.2 s stutter and the pulse the driver held at the servo's cap at 20:59:55).
+The detector fits the lane itself (`LaneModel`, the same class and window as LA's core), so the rumble has
+it with LKA off. A start at the line warning stays position only. It needs no swerve in the last 5 s (the
 detector's own hold is 2 s, and a pulse must not steer back onto what the driver swerved round), no
 override still holding (it used to start a pulse with no force), and LA's calibration: about a minute of bends on
 the first drive, then the saved one once the drive confirms the wheel's direction (`core/la/README.md`,
@@ -270,7 +308,9 @@ no rumble; now it stays within 0.4 m of the line.
 
 **What it keeps and drops (Lukas, 2026-11-02).** Kept: the servo's cap (3000 of 10000, a hand always
 overpowers it), LA's override (a wheel held still off the target for 0.3 s, or held against the servo
-near its cap; yields in 0.4 s) and the hand-back to the driver's push (below), the plugin's own buzz guard (since drive 12 a real ring of the wheel only,
+near its cap; yields in 0.4 s; for a pulse a still wheel counts only once the pulse pushes 500, Lukas
+2026-11-12: on a soft design 4 of 10 pulses gave up 0.4 s in as "the driver took over" on a wheel their
+20 to 240 units had not moved yet) and the hand-back to the driver's push (below), the plugin's own buzz guard (since drive 12 a real ring of the wheel only,
 see `plugins/ffb/README.md`), and every detector mute and gate. Dropped
 for a pulse, which lasts a second or three: LA's ring guard, weave guard, hands-off check, the 2 s rise
 and 1 s re-arm, LA's blinker and swerve mutes (the detector's per-side ones decide) and the lane carry.
@@ -329,8 +369,8 @@ not the standards' text). Known gaps, open:
 - No hands-on check: real systems nag and stand by without hands; here a sleeping driver in a long bend
   gets a pulse every few seconds, with the rumble only if LDW is on. There is no per-minute limit (Lukas,
   2026-11-02: it was 8; a driver gripping the wheel is paying attention, and one who is not feels the pulls).
-- With LDW off, or in a bend where LDW mutes its cue, the pulse comes with no warning first (R79 asks
-  for one at the latest when it intervenes).
+- With LDW off the pulse comes with no warning first (R79 asks for one at the latest when it
+  intervenes). With LDW on every pulse starts with the rumble since 2026-11-11.
 - The cap is a share of the wheel's own peak: about 1 Nm on a 4 Nm wheel, 6 Nm or more on a direct
   drive. R79 caps override effort at 50 N at the rim; `lka_strength` is the lever.
 - Like real systems it yields on the driver's torque, here an estimate (handing back, above). The still-wheel
@@ -349,7 +389,8 @@ not the standards' text). Known gaps, open:
 `la_strength`), `lka_tmp_enabled` (true: TruckersMP moderation gave the go-ahead for steering, 2026-11-02;
 config.json only, false keeps it off there). The
 arm speed is `ldw_min_speed_kmh`; the wheel inertia and the fixed calibration are LA's keys
-(`la_wheel_inertia`, `la_force_per_ms2`, `la_kappa_per_steer`), one wheel and one truck. `ldw_test_mode`
+(`la_wheel_inertia`, `la_force_per_ms2`, `la_kappa_per_steer`), one wheel and one truck, and so is the servo's
+design: at a pulse's speeds that is the road design (`la_road_*`, `core/la/README.md`, "Fast on the road"). `ldw_test_mode`
 reaches it too, since it reads the detector: every close call starts a pulse, blinker or not.
 
 **Logs.** `LKA on/off` (and `waiting while LA steers`), its settings, the shared calibration as for LA,

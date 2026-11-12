@@ -9,6 +9,7 @@ import math
 from collections import deque
 from dataclasses import dataclass
 
+from core.la.lane_model import LaneModel
 from core.radar.ego_geometry import REF_HALF_LENGTH_M, REF_HALF_WIDTH_M, REF_PATH_ORIGIN_M
 
 SIDE_NONE = 0
@@ -51,13 +52,18 @@ class Tuning:
     bend_ahead_min_m: float = 30.0
     bend_ahead_s: float = 1.5
     kappa_sharp: float = 1.0 / 90.0
-    cue_tight_kappa: float = 1.0 / 400.0
-    cue_change_kappa: float = 1.0 / 1000.0
     cue_change_ahead_s: float = 3.0
-    cue_hold_s: float = 2.0
+    inner_drift_ms: float = 0.8
+    fit_drift_ms: float = 0.2
+    lane_fit_m: float = 25.0
     attentive_s: float = 1.5
     attentive_net: float = 0.008
     attentive_peak: float = 0.03
+    back_reach_m: float = 0.15
+    back_steady_kappa: float = 1.0 / 1000.0
+    steer_kappa: float = 0.18
+    back_accel_cap_ms2: float = 3.0
+    home_ms: float = 0.07
     prefab_max_kappa: float = 1.0 / 400.0
     rearm_m: float = 0.15
     rearm_hold_s: float = 0.3
@@ -182,8 +188,11 @@ class _Edge:
     armed_close: bool
     steer_net: float = 0.0
     steer_peak: float = 0.0
-    cue_mute: str = ""
     steer_away: float = 0.0
+    inner_slow: bool = False
+    fit_out: bool = True
+    homing: bool = False
+    back: bool = False
 
     @property
     def margin(self) -> float:
@@ -368,9 +377,8 @@ class LaneDetector:
         self._level_since = 0.0
         self._lost_since: float | None = None
         self._evade_until = -_INF
-        self._tight_until = -_INF
-        self._change_until = -_INF
         self._steer: deque[tuple[float, float]] = deque()
+        self._lane = LaneModel(max(1.0, self.tune.lane_fit_m))
         self.edges: dict[int, _Edge] = {}
         self._clear_track()
 
@@ -381,6 +389,7 @@ class LaneDetector:
 
     def _clear_track(self) -> None:
         self._hist: deque[tuple[float, float]] = deque()
+        self._kappas: deque[tuple[float, float]] = deque()
         self._lane_since: float | None = None
         self._last_right0: float | None = None
 
@@ -393,7 +402,7 @@ class LaneDetector:
         self._clear_track()
         self._steer.clear()
         self._evade_until = -_INF
-        self._tight_until = self._change_until = -_INF
+        self._lane.reset()
         self._clear_active()
         for st in self._sides.values():
             st.latched = False
@@ -482,14 +491,8 @@ class LaneDetector:
         kind = getattr(f.route, "kind", "")
         if kind != "road" and not (kind == "prefab" and max(peaks.values()) <= tn.prefab_max_kappa):
             return self._off("route_kind", kmh)
-        # Tight corners never cue; where the curvature changes (entry, exit, wavy roads) only a still wheel does.
         ahead = max(tn.bend_ahead_min_m, tn.cue_change_ahead_s * f.speed_ms)
         low, high = curvature_span(pts, s0, min(s0 + ahead, getattr(f.route, "reach_m", 0.0) - _KAPPA_SPAN_M))
-        if max(-low, high, *peaks.values()) >= tn.cue_tight_kappa:
-            self._tight_until = t + tn.cue_hold_s
-        if high - low >= tn.cue_change_kappa:
-            self._change_until = t + tn.cue_hold_s
-        cue_zone = "bend_tight" if self._tight_until > t else "bend_change" if self._change_until > t else ""
 
         if self._lane_since is None:
             self._lane_since = t
@@ -501,7 +504,8 @@ class LaneDetector:
                 st.latched = False
         self._last_right0 = right0
         # Heading against the lane at the rear axle: from the origin a steady bend reads as kappa * d of drift outward.
-        tangent = smooth_heading(pts, project(pts, f.x + fx * f.path_m, f.z + fz * f.path_m)[0])
+        ax, az = f.x + fx * f.path_m, f.z + fz * f.path_m
+        tangent = smooth_heading(pts, project(pts, ax, az)[0])
         ego_angle = math.atan2(fz, fx)
         psi = math.atan2(math.sin(ego_angle - tangent), math.cos(ego_angle - tangent))
         self._hist.append((t, psi))
@@ -510,18 +514,27 @@ class LaneDetector:
         ready = len(self._hist) >= 4 and t - self._hist[0][0] >= tn.min_history_s
         psi_rate = _slope(list(self._hist)) if ready else 0.0
         acc_right = tn.accel_weight * max(-tn.accel_cap_ms2, min(tn.accel_cap_ms2, f.speed_ms * math.cos(psi) * psi_rate))
-        motion = (f.speed_ms * math.sin(psi), psi_rate, acc_right, psi, ready)
+        # The truck's own drift by the lane fit: the polyline heading shows phantom drift in fast bends.
+        self._lane.observe(f.route)
+        fit = self._lane.local(ax, az, fx, fz, 0.0)
+        fit_right = f.speed_ms * math.sin(fit.psi) if fit is not None else math.nan
+        motion = (f.speed_ms * math.sin(psi), psi_rate, acc_right, psi, ready, fit_right, high - low)
         steer = self._steer_input(t, peaks)
         att_net, att_right, att_left = _steer_features([p for p in self._steer if t - p[0] <= tn.attentive_s], tn)
+        # What the lane itself turned meanwhile, as wheel: following a bend is not steering back from its outer line.
+        self._kappas.append((t, kappa))
+        while t - self._kappas[0][0] > tn.attentive_s:
+            self._kappas.popleft()
+        lane_turn = (kappa - self._kappas[0][1]) / tn.steer_kappa
 
         edges = {}
         for side in _SIDES:
             lamp = f.blinker_left if side == SIDE_LEFT else f.blinker_right
-            toward_peak = steer[1] if side == SIDE_RIGHT else steer[2]
+            pick = 1 if side == SIDE_RIGHT else 2
             away = (att_net, att_right) if side == SIDE_LEFT else (-att_net, att_left)
+            away = (*away, away[0] + _SIGN[side] * lane_turn)
             edges[side] = self._edge(
-                side, f, rows[side], peaks[side], (_SIGN[side] * steer[0], toward_peak), lamp, motion,
-                cue_zone, away,
+                side, f, rows[side], peaks[side], (_SIGN[side] * steer[0], steer[pick]), lamp, motion, away,
             )
         if t - self._lane_since < tn.steady_s:
             self.edges = {}
@@ -530,9 +543,8 @@ class LaneDetector:
         return self._decide(t, kmh, kappa, psi, edges, high - low)
 
     def _steer_input(self, t: float, peaks) -> tuple[float, float, float]:
-        """Wheel movement as intent evidence: steering the way a tight bend turns is the bend, not intent.
-
-        A hard move in either direction (a swerve and its counter-steer) mutes both sides for a while.
+        """Wheel movement ``(net, peak right, peak left)`` as intent evidence: steering the way a tight bend turns is
+        the bend, not intent. A hard move in either direction (a swerve and its counter-steer) mutes both sides.
         """
         tn = self.tune
         net, right, left = _steer_features(self._steer, tn)
@@ -557,15 +569,16 @@ class LaneDetector:
                 return name
         return ""
 
-    def _edge(self, side, f, rows, peak, steer_toward, lamp, motion, cue_zone, away) -> _Edge:
+    def _edge(self, side, f, rows, peak, steer_toward, lamp, motion, away) -> _Edge:
         """``rows`` holds ``(gap, distance ahead of the rear axle)`` per outer corner, ``peak`` the bend toward this edge.
 
-        ``away`` is the wheel's recent ``(net, peak rate)`` away from this edge, the driver correcting.
+        ``away`` is the wheel's recent ``(net, peak rate, net beyond what the lane's own turn asked)`` away from this
+        edge, the driver correcting; the last one negated is how far it turned in past what the bend asked.
         """
         tn = self.tune
         t = f.t
         sign = _SIGN[side]
-        drift_right, psi_rate, acc_right, psi, ready = motion
+        drift_right, psi_rate, acc_right, psi, ready, fit_right, kappa_change = motion
         st = self._sides[side]
         bend = bend_allowance(peak, tn)
         allow = tn.warn_overlap_m + bend
@@ -575,8 +588,10 @@ class LaneDetector:
             st.blink_until = t + tn.blinker_hold_s
         if steer_toward[0] >= tn.steer_net or steer_toward[1] >= tn.steer_peak:
             st.delib_until = t + tn.deliberate_hold_s
-        # Heading toward the edge that the wheel itself produced is a lane change; a still wheel is a drift.
-        if sign * psi >= tn.intent_psi_rad and (steer_toward[0] >= tn.intent_net or steer_toward[1] >= tn.intent_peak):
+        # Heading toward the edge that the wheel itself produced is a lane change or a cut bend; a still wheel is a drift.
+        made = steer_toward[0] >= tn.intent_net or steer_toward[1] >= tn.intent_peak
+        cut = peak >= tn.steer_bend_kappa and -away[2] >= tn.intent_net
+        if sign * psi >= tn.intent_psi_rad and (made or cut):
             st.intent_until = t + tn.intent_hold_s
         evading = self._evade_until > t
         if margin <= 0.0 and (st.blink_until > t or st.delib_until > t or st.intent_until > t or evading):
@@ -604,7 +619,8 @@ class LaneDetector:
             hard = "evade"
         elif st.latched:
             hard = "latched"
-        if unsafe_toward(f, side):
+        unsafe = unsafe_toward(f, side)
+        if unsafe:
             # Toward a lane side traffic makes unsafe the driver's intent (blinker, steering) mutes nothing; a swerve does.
             hard = "evade" if evading else ""
         if tn.test_mode:
@@ -615,12 +631,20 @@ class LaneDetector:
             for g, along in rows
         )
         close = ready and drift >= tn.approach_min_ms
-        correcting = away[0] >= tn.attentive_net or away[1] >= tn.attentive_peak
-        cue_mute = cue_zone if cue_zone == "bend_tight" or (cue_zone and correcting) else ""
+        # Steering back: the truck already curves in, or on a steady lane the wheel's turn home is enough to stop it.
+        cap = tn.back_accel_cap_ms2
+        inward = -sign * max(-cap, min(cap, f.speed_ms * math.cos(psi) * psi_rate))
+        if kappa_change < tn.back_steady_kappa:
+            inward = max(inward, min(cap, f.speed_ms * f.speed_ms * tn.steer_kappa * max(0.0, away[2])))
+        reach = -margin if drift <= 0.0 else drift * drift / (2.0 * inward) - margin if inward > 1e-3 else _INF
+        turned_home = away[2] >= tn.attentive_net or (away[1] >= tn.attentive_peak and away[2] > 0.0)
+        back = ready and turned_home and reach <= tn.back_reach_m and not unsafe and not tn.test_mode
         return _Edge(
             gap, allow, bend, drift, tlc, drift <= -tn.return_ms, close, hard,
-            st.armed_warn, st.armed_close, steer_toward[0], steer_toward[1],
-            "" if tn.test_mode else cue_mute, away[0],
+            st.armed_warn, st.armed_close, steer_toward[0], steer_toward[1], away[0],
+            inner_slow=peak >= tn.steer_bend_kappa and drift < tn.inner_drift_ms,
+            fit_out=not math.isfinite(fit_right) or sign * fit_right >= tn.fit_drift_ms,
+            homing=drift <= -tn.home_ms, back=back,
         )
 
     def _want(self, e: _Edge) -> int:
@@ -635,10 +659,14 @@ class LaneDetector:
     def _mute(e: _Edge, level: int) -> str:
         if e.hard:
             return e.hard
-        if level == LEVEL_CLOSE and e.cue_mute:
-            return e.cue_mute
-        if level == LEVEL_WARN and e.returning:
+        if level == LEVEL_CLOSE and e.inner_slow:
+            return "inner_slow"
+        if level == LEVEL_CLOSE and not e.fit_out:
+            return "no_drift"
+        if level == LEVEL_WARN and (e.returning or e.homing):
             return "returning"
+        if e.back:
+            return "correcting"
         if not (e.armed_warn if level == LEVEL_WARN else e.armed_close):
             return "unarmed"
         return ""
@@ -650,10 +678,7 @@ class LaneDetector:
         if self._level == LEVEL_WARN:
             keep = e.margin <= 0.0 and not e.hard and not e.returning
         else:
-            keep = (
-                e.margin > 0.0 and e.tlc <= tn.approach_tlc_s * tn.approach_hold and not e.hard
-                and e.cue_mute != "bend_tight"
-            )
+            keep = e.margin > 0.0 and e.tlc <= tn.approach_tlc_s * tn.approach_hold and not e.hard
         over = age >= tn.max_rumble_s or (self._level == LEVEL_WARN and e.gap <= -tn.out_far_m)
         if over:
             due = True

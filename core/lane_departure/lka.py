@@ -1,8 +1,8 @@
 """Lane keeping assist: a short steer back when the lane departure detector catches a drift out of the lane.
 
-Pure logic. It starts on the detector's own warning or approach cue and ends once the truck is back inside its
-line and parallel, the driver acts, or it times out; the LA core (core/la) does the steering. The detector
-itself is not changed by it. See core/lane_departure/README.md, "Lane keeping assist".
+Pure logic. It starts where the rumble does, on the detector's warning or approach cue, and ends once the truck is
+back inside its line and parallel, the driver acts, or it times out; the LA core (core/la) does the steering. The
+detector itself is not changed by it. See core/lane_departure/README.md, "Lane keeping assist".
 """
 
 from __future__ import annotations
@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from typing import NamedTuple
 
 from . import edges as edge_kinds
-from .detector import LEVEL_CLOSE, SIDE_LEFT, SIDE_NONE, SIDE_RIGHT, Decision, LaneDetector, project, unsafe_toward
+from .detector import SIDE_LEFT, SIDE_NONE, SIDE_RIGHT, Decision, LaneDetector, project, unsafe_toward
 
 class _Seen(NamedTuple):
     gap: float
@@ -39,7 +39,6 @@ class LkaTuning:
     crossing_s: float = 0.5
     back_drift_ms: float = 0.05
     start_drift_ms: float = 0.2
-    inner_drift_ms: float = 0.8
     own_steer: float = 0.01
 
 
@@ -93,14 +92,11 @@ class LaneKeeping:
             self._ended = (self._side, t)
             self._side = SIDE_NONE
             return pulse
-        side = decision.side if decision.started else self._early(detector, steered)
-        caught = side == SIDE_NONE and not decision.started
-        side = side or (self._catch(t, detector, steered) if caught else SIDE_NONE)
+        caught = not decision.started
+        side = self._catch(t, detector, steered) if caught else decision.side
         if side == SIDE_NONE:
             return Pulse()
-        cue = decision.started and decision.level == LEVEL_CLOSE
-        why = ("override" if yielded else "swerve" if t - self._evade_seen < tn.evade_hold_s
-               else "drift" if cue and not self._heading_out(side, steered) else "")
+        why = "override" if yielded else "swerve" if t - self._evade_seen < tn.evade_hold_s else ""
         if why:
             return Pulse(event="skipped", line=side, reason=why) if decision.started else Pulse()
         last, at = self._ended
@@ -111,20 +107,6 @@ class LaneKeeping:
         self._caught = caught and side != last
         self._beyond = self._class(frame, side)
         return Pulse(self._side, "start", self._beyond, 0.0, side)
-
-    def _early(self, detector: LaneDetector, steered) -> int:
-        """The detector's approach cue test where it mutes the cue in bends: on a straight or a bend's outer edge, and
-        on its inner edge only for a run at ``inner_drift_ms`` or more; a slow corner cut gets the line warning alone.
-        """
-        tn = detector.tune
-        for side, e in detector.edges.items():
-            if e.hard or not e.armed_close or not e.close or (e.bend > 0.0 and e.drift < self.tune.inner_drift_ms):
-                continue
-            if not self._heading_out(side, steered):
-                continue
-            if 0.0 < e.margin <= tn.approach_range_m and e.tlc <= tn.approach_tlc_s:
-                return side
-        return SIDE_NONE
 
     def _catch(self, t: float, detector: LaneDetector, steered) -> int:
         """Just after a pulse, the other line on the detector's own tests even where it reads the wheel the pulse turned
@@ -181,10 +163,8 @@ class LaneKeeping:
         return ""
 
     def _heading_out(self, side: int, steered) -> bool:
-        """The truck itself drifts toward that line at ``start_drift_ms`` or more by the LA core's lane fit (none: the
-        detector decides). The detector's heading comes off the route polyline, which in fast bends read up to 0.8 m/s
-        toward the outer line while the truck headed home: 17 of 47 pulse starts on 2026-11-02, the 20:59:55 override
-        and every stutter among them.
+        """For a catch: the truck itself drifts toward that line at ``start_drift_ms`` or more by the LA core's lane
+        fit (none: the detector decides). The detector applies the same test to its own approach starts.
         """
         drift = getattr(steered, "drift_ms", math.nan)
         if not math.isfinite(drift) or not math.isfinite(getattr(steered, "offset_m", math.nan)):

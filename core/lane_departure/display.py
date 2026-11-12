@@ -26,7 +26,7 @@ _DISABLED_REASONS = frozenset({
 # Armed. The mutes of a single close call (blinker, steering, returning) stay armed so a lane change does not flicker.
 _STANDBY_REASONS = frozenset({
     "clear", "warn", "approach", "blinker", "deliberate", "intent", "evade", "latched", "returning",
-    "bend_change", "bend_tight", "bend_inner", "unarmed",
+    "bend_inner", "inner_slow", "no_drift", "correcting", "unarmed",
 })
 
 HOLD_S = 1.0

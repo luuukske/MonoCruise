@@ -134,10 +134,14 @@ class LaneDepartureThread(BaseThread):
         if not repeat:
             self._last_frame_t = frame.t if frame is not None else -1.0
         self._last_decision = decision
-        scale = self._intensity() * (self._detector.tune.approach_scale if decision.level == LEVEL_CLOSE else 1.0)
-        rumble = (ldw and decision.active) or assist.rumble
-        status = self._channel.publish(rumble, decision.side, intensity_units(scale), torque=assist.torque,
-                                       servo=assist.servo)
+        tune = self._detector.tune
+        # A pulse the detector has no warning behind (the catch after a pulse) still comes with the soft cue.
+        caught = ldw and lka and not decision.active and self._pulse.side and self._pulse.elapsed_s < tune.min_rumble_s
+        soft = caught or decision.level == LEVEL_CLOSE
+        rumble = (ldw and decision.active) or assist.rumble or bool(caught)
+        status = self._channel.publish(rumble, self._pulse.side if caught else decision.side,
+                                       intensity_units(self._intensity() * (tune.approach_scale if soft else 1.0)),
+                                       torque=assist.torque, servo=assist.servo)
         self._status = status
         self._note(decision if ldw else Decision(), status)
         if ldw:
@@ -228,7 +232,7 @@ class LaneDepartureThread(BaseThread):
         self._side_window = now
 
     def _keep_lane(self, frame: Frame | None, repeat: bool, decision: Decision) -> Request:
-        """A lane keeping pulse on the detector's own departures; the detector is read, never changed."""
+        """A lane keeping pulse where the rumble starts, on the detector's departures; it reads the detector only."""
         if repeat:
             self._pulse = replace(self._pulse, event="")
         else:

@@ -10,7 +10,7 @@ import pytest
 
 from core.lane_departure.detector import SIDE_LEFT, SIDE_NONE, SIDE_RIGHT, LaneDetector, smooth_heading
 from core.radar.ego_geometry import REF_PATH_ORIGIN_M
-from tests.lane_departure.test_detector import DT, HZ, SPEED, cues, frame_at, warns
+from tests.lane_departure.test_detector import DT, HZ, SPEED, TN, cues, frame_at, warns
 
 
 def composite_route(*pieces, step=5.0):
@@ -92,23 +92,62 @@ def drift_left_at(route, s_cue, correction):
 
 
 @pytest.mark.parametrize("s_cue,changing", [
-    (150.0, False), (250.0, True), (470.0, False), (650.0, True), (705.0, True), (760.0, False),
+    (150.0, False), (250.0, True), (470.0, False), (650.0, True), (760.0, False),
 ])
-def test_where_the_curvature_changes_only_a_driver_who_is_not_correcting_gets_the_cue(s_cue, changing):
-    """Straight to 300 m, a slight right bend R 700 to 700 m, straight again: entry, steady bend, exit."""
+def test_a_wheel_turned_home_holds_the_cue_only_where_the_lane_s_curvature_is_steady(s_cue, changing):
+    """Straight to 300 m, a slight right bend R 700 to 700 m, straight again; here the truck never answers the wheel.
+
+    Where the curvature changes ahead a wheel that moves is mostly the bend, and the truck itself has to curve in.
+    """
     route = composite_route((300.0, None), (400.0, 700.0), (400.0, None))
     still = drift_left_at(route, s_cue, 0.0)
     correcting = drift_left_at(route, s_cue, 0.02)
     assert cues(still) and cues(still)[0].side == SIDE_LEFT
-    assert bool(cues(correcting)) != changing
-    assert warns(correcting) and warns(correcting)[0].side == SIDE_LEFT
-    assert not changing or any(d.near_miss == "bend_change" for d in correcting)
+    assert bool(cues(correcting)) == changing
+    warn = warns(correcting)[0]
+    assert warn.side == SIDE_LEFT and -TN.back_reach_m - 0.1 < warn.gap_m + warn.allow_m <= 0.0
+    assert changing or any(d.near_miss == "correcting" for d in correcting)
 
 
 @pytest.mark.parametrize("s_cue", [250.0, 360.0, 430.0])
-def test_a_tight_corner_never_cues_even_with_a_still_wheel(s_cue):
+def test_running_wide_of_a_tight_corner_cues_before_the_line(s_cue):
     """A right corner R 300 from 300 to 420 m: approaching, inside it, just out of it."""
     route = composite_route((300.0, None), (120.0, 300.0), (400.0, None))
     decisions = drift_left_at(route, s_cue, 0.0)
-    assert not cues(decisions) and warns(decisions)
-    assert any(d.near_miss in {"bend_tight", "bend_change"} for d in decisions)
+    cue, warn = cues(decisions)[0], warns(decisions)[0]
+    assert cue.side == warn.side == SIDE_LEFT and decisions.index(cue) < decisions.index(warn)
+
+
+def test_following_a_bend_with_the_wheel_is_not_steering_back_from_its_outer_line():
+    """The same turn of the wheel: on a straight it is the driver correcting, entering a right corner it is the bend."""
+    route = composite_route((300.0, None), (120.0, 300.0), (400.0, None))
+    assert not cues(drift_left_at(route, 150.0, 0.012))
+    assert cues(drift_left_at(route, 305.0, 0.012))[0].side == SIDE_LEFT
+
+
+def into_the_bend(drifts_from, extra_turn=0.0, seconds=7.0):
+    """A right corner R 300 from 300 m: the wheel turns in as the lane does (0.0185 of lock), ``extra_turn`` more for a
+    cut; from ``drifts_from`` seconds the truck runs to the inside at 0.9 m/s. Starts 100 m before the corner."""
+    route = composite_route((300.0, None), (600.0, 300.0))
+    rate = 0.9
+
+    def plan(t):
+        s = 200.0 + SPEED * t
+        turned = min(1.0, max(0.0, (s - 275.0) / 25.0))
+        steer = {"steer_right": (1.0 / 300.0 / TN.steer_kappa + extra_turn) * turned}
+        if t < drifts_from:
+            return 0.0, 0.0, steer
+        return rate * (t - drifts_from), math.atan2(rate, SPEED), steer
+
+    return drive_on(route, 200.0, plan, seconds)
+
+
+def test_following_a_bend_in_and_then_drifting_to_its_inside_is_a_drift_not_a_cut():
+    """2026-11-12: the wheel a driver turned in with the bend counted as intent for 4 s and the inside line latched;
+    trucks ran 1 to 2 m past it with no rumble and no pulse."""
+    drifted = into_the_bend(drifts_from=4.6)
+    assert warns(drifted) and warns(drifted)[0].side == SIDE_RIGHT
+    assert not any(d.near_miss in {"intent", "latched"} for d in drifted)
+    cut = into_the_bend(drifts_from=4.6, extra_turn=0.03)
+    assert not any(d.active for d in cut) and any(d.near_miss in {"intent", "latched"} for d in cut)
+
