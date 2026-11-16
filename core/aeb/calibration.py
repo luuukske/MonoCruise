@@ -380,6 +380,56 @@ class AEBCalibration:
     road_bend_ramp_s: float = 1.0
     road_bend_max_lat_ms2: float = 25.0
 
+    # Lane track (README): a body held on ego's own track along its map lane is kept where a
+    # stage would drop it as oncoming in its lane or parked off ego's path. No map, no effect.
+    lane_track_enabled: bool = True
+    lane_track_oncoming: bool = True
+    lane_track_stationary: bool = True
+    lane_track_max_offset_m: float = 2.5
+    lane_track_max_heading_deg: float = 20.0
+    lane_track_overlap_m: float = 0.3
+    lane_track_hold_s: float = 0.25
+    lane_track_min_along: float = 0.9
+    lane_track_range_m: float = 150.0
+    # Lane clear and lane keep trust ego to follow its lane only through bends that need no
+    # more lateral accel than this at ego's speed (README).
+    lane_follow_max_lat_ms2: float = 6.0
+    # Lane clear (README): a parked body the map holds clear of ego's own track, with ego centred
+    # and calm in its lane, stays out-of-lane through a sweep of ego's arc. Off: awaits a decision.
+    lane_clear_stationary: bool = False
+    lane_clear_max_offset_m: float = 0.8
+    lane_clear_max_drift_ms: float = 0.3
+    lane_clear_min_free_m: float = 1.3
+    lane_clear_arrival_free_m: float = 0.5
+    lane_clear_drift_horizon_s: float = 1.5
+    lane_clear_hold_s: float = 0.5
+    # Lane keep: a mover on its own map lane, clear of ego's track along it, is no threat (README).
+    lane_keep_enabled: bool = True
+    lane_keep_max_ego_offset_m: float = 0.8
+    lane_keep_max_ego_heading_deg: float = 20.0
+    lane_keep_max_offset_m: float = 1.2
+    lane_keep_max_heading_deg: float = 8.0
+    lane_keep_min_free_m: float = 1.3
+    lane_keep_horizon_s: float = 1.5
+    lane_keep_route_s: float = 3.0
+    lane_keep_route_min_m: float = 20.0
+    lane_keep_heading_slack_deg: float = 1.0
+    lane_keep_own_turn_credit: bool = False
+    lane_keep_follow_s: float = 1.0
+    lane_keep_follow_min_m: float = 10.0
+    lane_keep_follow_tol_ms2: float = 0.5
+    lane_keep_turn_in_drift_ms: float = 0.3
+    lane_keep_swerve_ms2: float = 4.0
+    lane_keep_min_speed_ms: float = 5.0
+    lane_keep_follow_branch: bool = True
+    lane_keep_all_branches: bool = True
+    # Lane return (README): a mover turning back to its lane with the measured miss opening
+    # gets its turn away counted, against a smaller margin.
+    lane_return_enabled: bool = True
+    lane_return_min_free_m: float = 1.2
+    # A body the map holds on ego's own track counts as in ego's lane for the engage grade.
+    lane_track_certain: bool = True
+
 
 DEFAULT = AEBCalibration()
 

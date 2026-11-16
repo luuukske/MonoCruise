@@ -11,7 +11,9 @@ from typing import TYPE_CHECKING
 
 from core.aeb.calibration import AEBCalibration
 from core.aeb.cross_zone import _apply_cross_zone
-from core.aeb.filters import _PASS, FilterResult, _earliest_hit
+from core.aeb.filters import (
+    _PASS, FilterResult, _earliest_hit, lane_clear_held, lane_track_held,
+)
 from core.aeb.lane_frame import Lane
 from core.radar.traffic import ArcPath
 
@@ -135,7 +137,13 @@ class AvoidabilityGate:
     def apply(self, ctx: FilterContext) -> FilterResult:
         res = self._inner.apply(ctx)
         cal = self._cal
+        # A parked body the map holds on ego's own track is not beside ego's path (README lane track).
+        if (res.suppressed and not self._oncoming and cal.lane_track_stationary
+                and ctx.abs_v_speed < cal.sweep_pass_max_target_speed
+                and lane_track_held(ctx, cal)):
+            return _PASS
         if (res.suppressed and cal.avoidability_gate_enabled
+                and not (not self._oncoming and lane_clear_held(ctx, cal))
                 and self._in_scope(ctx)
                 and measured_miss_inside_body(ctx)
                 and braking_deadline_passed(ctx, cal)):

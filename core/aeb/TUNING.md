@@ -140,4 +140,53 @@ back. `aeb_warn_confirm_wide_lat_s` must not go past 0.6: at 0.7 it drops
 rejected levers (demand floors, slope gate, speed-ratio carve-outs,
 co-directional out-of-lane window): `tools/aeb_corpus_run/progress.md`.
 
+## Map lane rules
+
+Behaviour and the clips behind each number: `core/aeb/README.md`, "Map lane
+rules". None of these does anything without a map snapshot. A change here needs
+a full-corpus run replayed with the map and no true positive lost or delayed;
+the standard corpus score replays without a map and cannot see them.
+
+| Constant | Default | Role |
+|---|---|---|
+| `lane_track_enabled` | True | Master switch: off, no lane frame is bound and lane track, lane clear and lane keep all do nothing |
+| `lane_track_oncoming` | True | Lane track keeps an oncoming body through `OppositeLaneFilter`, its mirror and `TmpCrossTrafficFilter` |
+| `lane_track_stationary` | True | Lane track keeps a stopped body through `EgoEvasionFilter` and the avoidability gate |
+| `lane_track_certain` | True | A body held on ego's track counts as in ego's lane for the engage grade, beyond `lane_confidence_range_m` too |
+| `lane_track_max_offset_m` | 2.5 m | Ego further than this from its lane centre binds no lane frame |
+| `lane_track_max_heading_deg` | 20 deg | Same, on ego's heading against the lane |
+| `lane_track_overlap_m` | 0.3 m | Overlap with ego's swept width that puts a body on ego's track |
+| `lane_track_hold_s` | 0.25 s | Unbroken time on the track before lane track speaks |
+| `lane_track_min_along` | 0.9 | Cosine of a mover's travel against the lane; under it the mover is crossing, not on the track |
+| `lane_track_range_m` | 150 m | Lane track range along the lane |
+| `lane_follow_max_lat_ms2` | 6.0 m/s^2 | Lane clear and lane keep stand down where ego's lane up to the body bends harder than this at ego's speed. Under 10: an R 60 bend at 90 km/h must fail it |
+| `lane_clear_stationary` | False | Lane clear: `OutOfLaneParallelFilter` drops a parked body the map holds clear of ego's track. Off by default because the straight-through bend scenario warns 0.67 s later with it enabled (README) |
+| `lane_clear_max_offset_m` | 0.8 m | Lane clear only with ego this close to its lane centre (1.5 with a toward-only drift test lost 3 true positives) |
+| `lane_clear_max_drift_ms` | 0.3 m/s | Lane clear only with ego moving across its lane no faster than this, either way |
+| `lane_clear_min_free_m` | 1.3 m | Room between the parked body and ego's swept width |
+| `lane_clear_arrival_free_m` | 0.5 m | Room that must remain after ego's drift toward it; cannot bind at the default drift bar |
+| `lane_clear_drift_horizon_s` | 1.5 s | Longest time that drift is run forward |
+| `lane_clear_hold_s` | 0.5 s | Unbroken time clear before lane clear speaks. Never 0: a missing sight then counts as held |
+| `lane_keep_enabled` | True | `LaneKeepFilter`, the last stage |
+| `lane_keep_max_ego_offset_m` | 0.8 m | Lane keep only with ego this close to the centre of the lane it keeps (1.6 lost `86aaab6d`, `8a5612e7`, `0a20598b`) |
+| `lane_keep_max_ego_heading_deg` | 20 deg | Same, on ego's heading |
+| `lane_keep_max_offset_m` | 1.2 m | Mover further than this from its own route gets no verdict |
+| `lane_keep_max_heading_deg` | 8 deg | Same, on the mover's heading against its route |
+| `lane_keep_min_free_m` | 1.3 m | Room that must remain between the mover's lane and ego's track (1.0 made `2c6eac90` late) |
+| `lane_keep_horizon_s` | 1.5 s | Longest time either vehicle's sideways motion is run forward; shorter when they pass sooner |
+| `lane_keep_route_s` | 3.0 s | How far along the mover's lane the room is measured, in seconds of its travel |
+| `lane_keep_route_min_m` | 20 m | Floor on that length |
+| `lane_keep_heading_slack_deg` | 1.0 deg | Mover heading error not counted as motion toward ego (2.0 lost `e9d61021`, `993fdee4`) |
+| `lane_keep_follow_s` | 1.0 s | Stretch of the mover's lane ahead whose curvature its turn is compared with |
+| `lane_keep_follow_min_m` | 10 m | Floor on that stretch |
+| `lane_keep_follow_tol_ms2` | 0.5 m/s^2 | Mover's turn beyond its lane's that is not counted |
+| `lane_keep_turn_in_drift_ms` | 0.3 m/s | Ego's steering toward the mover counts once ego drifts that way this fast |
+| `lane_keep_swerve_ms2` | 4.0 m/s^2 | Or once the steering is this hard |
+| `lane_keep_min_speed_ms` | 5.0 m/s | Slower movers get no verdict (`7dd7fec0`) |
+| `lane_keep_own_turn_credit` | False | Count every mover's turn away from ego. Lost 2 true positives; lane return is the guarded form |
+| `lane_keep_follow_branch` | True | The keep frame follows ego's steering through a fork instead of ending at it |
+| `lane_keep_all_branches` | True | Every branch of the mover's lane must stay clear, not just the one it steers for |
+| `lane_return_enabled` | True | Lane return: a mover turning away with the measured miss opening gets its turn away counted |
+| `lane_return_min_free_m` | 1.2 m | Room that must remain for lane return |
+
 ---

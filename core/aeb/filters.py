@@ -16,52 +16,11 @@ from core.radar.traffic import (
 from core.radar.ego_path import ego_curvature_from_history
 from core.aeb.calibration import AEBCalibration
 from core.aeb.cross_zone import _apply_cross_zone, _cross_zone_padding
+from core.aeb.one_euro import OneEuroFilter
 from core.aeb.lane_frame import (
     Lane, project_to_ego_arc, classify, in_lane_closing, shares_bend,
     _any_body_in_ego_lane, _any_body_ahead_in_ego_lane, _body_centreline_d_abs,
 )
-
-
-class OneEuroFilter:
-    """Speed-adaptive 1€ low-pass; see core/aeb/README.md (One-Euro on v_curvature)."""
-
-    __slots__ = ("min_cutoff", "beta", "d_cutoff", "beta_scale",
-                 "_x_prev", "_dx_prev", "_t_prev")
-
-    def __init__(self, min_cutoff: float, beta: float, d_cutoff: float = 1.0,
-                 beta_scale: float = 0.0) -> None:
-        self.min_cutoff = min_cutoff
-        self.beta = beta
-        self.d_cutoff = d_cutoff
-        self.beta_scale = beta_scale
-        self._x_prev: float | None = None
-        self._dx_prev: float = 0.0
-        self._t_prev: float | None = None
-
-    @staticmethod
-    def _alpha(cutoff: float, dt: float) -> float:
-        tau = 1.0 / (2.0 * math.pi * cutoff)
-        return 1.0 / (1.0 + tau / dt)
-
-    def step(self, x: float, t: float) -> float:
-        if self._x_prev is None or self._t_prev is None:
-            self._x_prev = x
-            self._t_prev = t
-            return x
-        dt = t - self._t_prev
-        if dt <= 0.0:
-            return self._x_prev
-        dx_raw = (x - self._x_prev) / dt
-        a_d = self._alpha(self.d_cutoff, dt)
-        dx_hat = a_d * dx_raw + (1.0 - a_d) * self._dx_prev
-        beta_eff = self.beta / (1.0 + self.beta_scale * abs(self._x_prev))
-        cutoff = self.min_cutoff + beta_eff * abs(dx_hat)
-        a_x = self._alpha(cutoff, dt)
-        x_hat = a_x * x + (1.0 - a_x) * self._x_prev
-        self._x_prev = x_hat
-        self._dx_prev = dx_hat
-        self._t_prev = t
-        return x_hat
 
 
 class VehicleCurvatureBlender:
@@ -385,6 +344,14 @@ class FilterContext:
     deadline_passed: bool | None = None
     deadline_released: bool = False
 
+    # Map second opinion (README lane track): the body in ego's lane frame, and how long
+    # it has sat on ego's own track. None and 0 without a map.
+    lane_sight: object | None = None
+    lane_track_s: float = 0.0
+    # Seconds the map has held the body clear of ego's track, ego's drift included.
+    lane_clear_s: float = 0.0
+    # () -> bool: this mover keeps its own map lane clear of ego's track. None without one.
+    lane_keep_fn: object | None = None
 
     @property
     def reversing(self) -> bool:
@@ -398,6 +365,19 @@ class FilterContext:
 
 
 # ---- Filter stages ----
+
+def lane_track_held(ctx: "FilterContext", cal: AEBCalibration) -> bool:
+    """The map has held the body on ego's own track for the hold time (README lane track)."""
+    return cal.lane_track_enabled and getattr(ctx, "lane_track_s", 0.0) >= cal.lane_track_hold_s
+
+
+def lane_clear_held(ctx: "FilterContext", cal: AEBCalibration) -> bool:
+    """The map has held a parked body clear of ego's track for the hold time (README lane clear)."""
+    return (cal.lane_track_enabled and cal.lane_clear_stationary
+            and getattr(ctx, "lane_clear_s", 0.0) >= cal.lane_clear_hold_s
+            and ctx.v.id not in ctx.latched_threat_ids
+            and not getattr(ctx.v, "crash_confirmed", False))
+
 
 def oncoming_closing_into(
     ctx: "FilterContext",
@@ -599,6 +579,9 @@ class OppositeLaneFilter:
         if not ctx.head_on and not ctx.near_head_on:
             return _PASS
         cal = self._cal
+        # Oncoming on ego's own track along the lane is not keeping to its lane (README).
+        if cal.lane_track_oncoming and lane_track_held(ctx, cal):
+            return _pass("lane_track")
 
         # Determine own_lane using arc-projected lane instead of cross-product.
         # OPPOSITE_OR_OUTER = vehicle is in its own lane (or outer), not in ego's lane.
@@ -696,6 +679,8 @@ class OppositeLaneFilterMirrored:
             return _PASS
         if abs(ctx.v_curvature) >= cal.turning_diverge_kappa:
             return _PASS
+        if cal.lane_track_oncoming and lane_track_held(ctx, cal):
+            return _pass("lane_track")
 
         delta_kappa_t = min(abs(ctx.ego_curvature), cal.shared_turn_max_kappa)
 
@@ -826,6 +811,9 @@ class TmpCrossTrafficFilter:
         if ctx.abs_v_speed < 1.0:
             return _PASS
         cal = self._cal
+        # A head-on car the map holds on ego's own track is no junction sweep (README lane track).
+        if cal.lane_track_oncoming and ctx.near_head_on and lane_track_held(ctx, cal):
+            return _pass("lane_track")
         # In-corridor closer: body already in ego lane band; do not graze-suppress.
         # Require closing miss (or unknown rate) so completing side-road sweeps stay suppressed.
         if cal.tmp_cross_in_corridor_pass:
@@ -916,6 +904,9 @@ class OutOfLaneParallelFilter:
             return _PASS
         if ctx.v.id in ctx.follow_threat_ids or ctx.v.id in ctx.latched_threat_ids:
             return _PASS
+        # Parked clear of ego's track by the map: a sweep of ego's arc does not put it in the lane.
+        if stationary and lane_clear_held(ctx, cal):
+            return _suppress("OutOfLaneParallelFilter")
         miss, rate = getattr(ctx, "d_miss", None), getattr(ctx, "d_miss_rate", None)
         if (miss is not None and rate is not None and miss < cal.out_of_lane_los_keep_m
                 and rate <= cal.out_of_lane_los_keep_rate_mps
@@ -1107,6 +1098,9 @@ class EgoEvasionFilter:
         # round a bend is not something a 0.08 g swerve "clears" (README road-bent).
         if not target_moving and _in_lane_closing_on_bent_path(ctx, cal):
             return _PASS
+        # And by position alone: a stopped body the map holds on ego's own track (README).
+        if not target_moving and cal.lane_track_stationary and lane_track_held(ctx, cal):
+            return _pass("lane_track")
         # Trailer swing: out-of-lane co-dir mover with a body in-lane (README).
         if (ctx.lane != Lane.EGO
                 and ctx.co_directional
@@ -1154,6 +1148,7 @@ def build_pipeline(cal: AEBCalibration) -> list:
     # Local import: the gate module builds on this one (README avoidability gate).
     from core.aeb.avoidability import AvoidabilityGate
     from core.aeb.bend_chain import BendChainFilter
+    from core.aeb.lane_keep import LaneKeepFilter
     from core.aeb.turn_completion import TightTurnFilter, TurnCompletionFilter
 
     return [
@@ -1174,5 +1169,6 @@ def build_pipeline(cal: AEBCalibration) -> list:
         AvoidabilityGate(BendChainFilter(cal), cal),
         TightTurnFilter(cal),
         EgoEvasionFilter(cal),
+        LaneKeepFilter(cal),
     ]
 

@@ -108,9 +108,13 @@ review uses.
   before the map existed.
 - Build their own `PathContext` on their own frame and their own curvature: the
   route is in world coordinates and stays valid as ego moves along it.
-- AEB: only for ego's road path and the targets it puts in ego's lane
-  (core/aeb/README.md, "Road-bent trajectories"). Never to drop a target or move
-  a decision AEB makes without the map, never the FF, disarm, holds or latches.
+- AEB: for ego's road path and the targets it puts in ego's lane
+  (core/aeb/README.md, "Road-bent trajectories"), and for the map lane rules
+  (same README, "Map lane rules"): by position in ego's lane frame a stage's
+  verdict may be overruled, to keep a body on ego's own track or to drop a
+  parked body or a lane-keeping mover that is clear of it. Nothing else may
+  drop a target or move a decision, and never the FF, disarm, holds or latches:
+  a latched or crash-confirmed body is never let go on the map's word.
 - ACC: laterals for scoring and the corridor, nested over the road model and
   the arc. Never the gap law, never the geometric lead failsafe.
 

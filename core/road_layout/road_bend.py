@@ -18,6 +18,8 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 
 _RESAMPLE_M = 2.5
+# Vertex stride of the coarse pass in ``fast_offset``.
+_FOOT_STRIDE = 8
 _SMOOTH_M = 5.0
 _MAIN_BIAS = 1e-4
 
@@ -335,6 +337,42 @@ def lateral_offset(curve: RoadCurve, x: float, z: float) -> tuple[float, float]:
     if p is None or h is None:
         return s, math.inf
     return s, (x - p[0]) * (-math.sin(h)) + (z - p[1]) * math.cos(h)
+
+
+def fast_offset(curve: RoadCurve, x: float, z: float) -> tuple[float, float]:
+    """``lateral_offset`` for many points on one curve: every eighth vertex first, then the
+    segments round the two nearest. Same answer unless the curve passes the point three times."""
+    pts = curve.pts
+    n = len(pts) - 1
+    if n <= 3 * _FOOT_STRIDE:
+        return lateral_offset(curve, x, z)
+    first = second = (math.inf, 0)
+    for j in range(0, n + 1, _FOOT_STRIDE):
+        d = (x - pts[j][0]) ** 2 + (z - pts[j][1]) ** 2
+        if d < first[0]:
+            first, second = (d, j), first
+        elif d < second[0]:
+            second = (d, j)
+    spans = sorted({first[1], second[1]})
+    best_s, best_d = 0.0, math.inf
+    done = -1
+    for j in spans:
+        for i in range(max(j - _FOOT_STRIDE, done + 1, 0), min(j + _FOOT_STRIDE, n)):
+            ax, az = pts[i]
+            sx, sz = pts[i + 1][0] - ax, pts[i + 1][1] - az
+            length2 = sx * sx + sz * sz
+            if length2 < 1e-12:
+                continue
+            t = max(0.0, min(1.0, ((x - ax) * sx + (z - az) * sz) / length2))
+            d = (x - ax - t * sx) ** 2 + (z - az - t * sz) ** 2
+            if d < best_d:
+                best_d, best_s = d, curve.s[i] + t * _RESAMPLE_M
+            done = i
+    p = _curve_point(curve, best_s)
+    h = _curve_heading(curve, best_s)
+    if p is None or h is None:
+        return best_s, math.inf
+    return best_s, (x - p[0]) * (-math.sin(h)) + (z - p[1]) * math.cos(h)
 
 
 def foot_kappa(curve: RoadCurve, x: float, z: float) -> float:

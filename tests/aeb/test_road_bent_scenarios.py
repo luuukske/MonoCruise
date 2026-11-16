@@ -15,6 +15,8 @@ import math
 from dataclasses import replace
 from types import SimpleNamespace
 
+import pytest
+
 from core.aeb.calibration import DEFAULT as CAL
 from core.aeb.clip_eval import _make_headless
 from core.aeb.calibration import ego_path_params
@@ -152,10 +154,12 @@ def test_today_brakes_for_some_of_those_parked_cars():
     assert _run(lane, car, 22.0, _STRAIGHT + 45.0, with_map=False)[1] is not None
 
 
-def test_a_bend_too_tight_for_the_speed_keeps_the_roadside_threat():
+@pytest.mark.parametrize("lane_clear", [False, True])
+def test_a_bend_too_tight_for_the_speed_keeps_the_roadside_threat(lane_clear):
     lane = _Lane(60.0)
     car = _parked(lane, _STRAIGHT + 18.0, -4.0)
-    base = _run(lane, car, 25.0, _STRAIGHT + 10.0, with_map=False)
-    mapped = _run(lane, car, 25.0, _STRAIGHT + 10.0, with_map=True)
+    cal = replace(CAL, lane_clear_stationary=lane_clear)
+    base = _run(lane, car, 25.0, _STRAIGHT + 10.0, with_map=False, cal=cal)
+    mapped = _run(lane, car, 25.0, _STRAIGHT + 10.0, with_map=True, cal=cal)
     assert base[1] is not None and mapped[1] is not None
     assert abs(mapped[1] - base[1]) < 0.1

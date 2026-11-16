@@ -10,6 +10,7 @@ import threading
 import time
 from collections import deque
 from dataclasses import dataclass, field, replace
+from functools import partial
 
 from core.thread_management.base_thread import BaseThread, ThreadData
 from core.thread_management.registry import registry
@@ -36,12 +37,15 @@ from core.aeb.clip_schema import AEBTickRecord, AEBWarmState, ConsumedContext, L
 from core.aeb.warning_player import WarningPlayer
 from core.aeb.avoidability import measured_stationary
 from core.aeb.overlap_ghosts import OverlapGhostHold
+from core.aeb.lane_track import (
+    LaneTrackHold, clear_of_ego_track, keeps_own_lane, lane_drivable, lane_sight, on_ego_track,
+)
 from core.aeb.filters import (
     FilterContext, FilterResult,
     _build_vehicle_collision_data, _world_to_ego_forward, _cross_zone_padding,
     _apply_cross_zone, _earliest_hit, _is_approaching, _dampen_turning_curvature,
     _any_body_in_ego_lane, _vehicle_curvature_blend, VehicleCurvatureBlender,
-    build_pipeline, oncoming_closing_into, travel_sign,
+    build_pipeline, lane_track_held, oncoming_closing_into, travel_sign,
 )
 
 logger = logging.getLogger(__name__)
@@ -886,6 +890,8 @@ class AEBThread(BaseThread):
         # Last tick each latched id was colliding; the latch expires latched_max_s later.
         self._latched_hit_mono: dict[int, float] = {}
         self._overlap_ghosts = OverlapGhostHold()
+        self._lane_track = LaneTrackHold()
+        self._lane_clear = LaneTrackHold()
         # Rate-limit for gap/collision box debug (Settings.debug only).
         self._gap_debug_last_mono: float = 0.0
         self._gap_debug_was_engaged: bool = False
@@ -1328,6 +1334,10 @@ class AEBThread(BaseThread):
             bent = self._road_paths.bend_ego([ego_arc], ego_curvature)[0]
             if isinstance(bent, BentPath):
                 road_arc = bent
+        # Ego's place on its map lane, by position: the stages' second opinion (README lane track).
+        lane_bound = run_collision and self._road_paths.bind_ego_lane(
+            ego_x, ego_z, cal, ego_speed * _ego_fwd_x, ego_speed * _ego_fwd_z, ego_curvature,
+        )
 
         ego_fwd_x = ego_arc.fwd_x
         ego_fwd_z = ego_arc.fwd_z
@@ -1657,6 +1667,31 @@ class AEBThread(BaseThread):
                 vehicle_dicts.append(veh_dict)
                 continue
 
+            sight = (lane_sight(self._road_paths, v, v_yaw_rad, travel_sign(v.speed, cal))
+                     if lane_bound else None)
+            lane_track_s = self._lane_track.step(
+                v.id,
+                on_ego_track(sight, abs_v_speed >= cal.sweep_pass_max_target_speed,
+                             ego_hw + v_hw, cal),
+                now_mono,
+            )
+            lane_clear_s = self._lane_clear.step(
+                v.id,
+                cal.lane_clear_stationary and abs_v_speed < cal.sweep_pass_max_target_speed
+                and clear_of_ego_track(
+                    sight, ego_hw + v_hw, self._road_paths.lane_ego_right,
+                    self._road_paths.lane_drift_right, abs(ego_speed), cal)
+                and lane_drivable(self._road_paths, sight.ahead, abs(ego_speed), cal),
+                now_mono,
+            )
+
+            lane_keep_fn = None
+            if (cal.lane_keep_enabled and self._road_paths.keep_frame is not None
+                    and abs_v_speed >= cal.sweep_pass_max_target_speed):
+                lane_keep_fn = partial(
+                    keeps_own_lane, self._road_paths, v, v_yaw_rad, travel_sign(v.speed, cal),
+                    v_curvature, abs(ego_speed), ego_hw + v_hw, cal)
+
             # Build FilterContext and run pipeline
             ctx = FilterContext(
                 v=v,
@@ -1693,11 +1728,16 @@ class AEBThread(BaseThread):
                 v_ground_meas=_los_ground_speed(trk),
                 brake_deadline_ms2=brake_deadline_ms2,
                 clearance_fn=clearance_of,
+                lane_sight=sight,
+                lane_track_s=lane_track_s,
+                lane_clear_s=lane_clear_s,
+                lane_keep_fn=lane_keep_fn,
             )
-            # A road-ahead target keeps today's evaluation whenever today would flag it (passes
-            # every stage and is hit), so the road path only judges what today lets go.
+            # A road-ahead target keeps today's evaluation whenever today, without the map lane
+            # rules, would flag it; the road path only judges what today lets go (README).
             if v.id in road_ahead and not _plain_flags(
-                    replace(ctx), self._pipeline, cal, plain_set[0]):
+                    replace(ctx, lane_track_s=0.0, lane_clear_s=0.0, lane_keep_fn=None),
+                    self._pipeline, cal, plain_set[0]):
                 ego_arc, ego_braked_arc, ego_evasion_left, ego_evasion_right = road_set
                 all_target_arcs, precomputed_cross_arcs = road_ahead[v.id]
                 vehicle_arcs[v.id] = list(all_target_arcs)
@@ -1793,10 +1833,11 @@ class AEBThread(BaseThread):
                     # Pose fixes a lane only inside the range an unseen bend
                     # cannot span (README lane confidence range).
                     d_miss_v = ctx.d_miss
+                    on_track = cal.lane_track_certain and lane_track_held(ctx, cal)
                     lane_trusted = (
-                        ctx.co_directional or dist <= cal.lane_confidence_range_m
+                        ctx.co_directional or dist <= cal.lane_confidence_range_m or on_track
                     )
-                    if ctx.lane == Lane.EGO and aligned and lane_trusted:
+                    if (ctx.lane == Lane.EGO or on_track) and aligned and lane_trusted:
                         certain_geom_ids.add(v.id)
                     elif head_on and oncoming_closing_into(ctx, cal):
                         # Turn-into-path: shrinking CBDR miss while ego turns.
@@ -2025,6 +2066,8 @@ class AEBThread(BaseThread):
                 del self._risk_confirm[vid]
         _active_vids = {v.id for v in vehicles_eff}
         self._curvature_blender.prune(_active_vids)
+        self._lane_track.prune(_active_vids)
+        self._lane_clear.prune(_active_vids)
         for vid in list(self._los_tracks.keys()):
             if vid not in _active_vids:
                 del self._los_tracks[vid]

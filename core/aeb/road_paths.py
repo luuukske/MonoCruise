@@ -14,8 +14,10 @@ import math
 from core.aeb.calibration import AEBCalibration
 from core.radar.bent_path import bend_arc
 from core.radar.traffic import ArcPath
+from core.road_layout.ego_route import route_behind
 from core.road_layout.road_bend import (
-    BendParams, bend_profile, foot_kappa, lateral_offset, rank_routes, road_curve,
+    BendParams, _curve_heading, _frange, bend_profile, fast_offset, foot_kappa, lateral_offset,
+    rank_routes, road_curve,
 )
 
 _MIN_SPEED_MS = 3.0
@@ -31,6 +33,12 @@ _RECENT_M = 7.5
 # Targets bent only within this range and not well behind ego (a cheap relevance cut).
 _TARGET_RANGE_M = 120.0
 _TARGET_BEHIND_M = 10.0
+# Ego's lane frame ends where another branch has left the route by this much.
+_LANE_BRANCH_APART_M = 1.5
+_LANE_REJOINED_M = 0.5
+# A vehicle's lane is read against ego's track this often along it, at no more points than this.
+_GAP_STEP_M = 3.0
+_GAP_POINTS = 240
 
 
 def bend_params(cal: AEBCalibration) -> BendParams:
@@ -57,12 +65,20 @@ class RoadPaths:
         self._recent: dict = {}
         # The lane ego's road path follows this frame, or None.
         self._ego_curve = None
+        # (curve, ego s, ego right, certain reach) of ego's lane frame this frame, or None.
+        self._lane = None
+        # The same on the branch ego follows through a fork; the lane-keep verdict reads this one.
+        self._keep = None
+        self.lane_ego_right = 0.0
+        self.lane_drift_right = 0.0
 
     def frame(self, snap, cal: AEBCalibration, now: float = 0.0) -> None:
         """Bind this frame's map snapshot; None or a disabled calibration bends nothing."""
         self._snap = snap if (snap is not None and cal.road_bend_enabled) else None
         self._now = now
         self._ego_curve = None
+        self._lane = None
+        self._keep = None
         self._params = bend_params(cal)
         self._length_s = max(cal.arc_horizon_max, cal.clearance_horizon_s)
         self._targets = cal.road_bend_targets
@@ -168,6 +184,155 @@ class RoadPaths:
         self._profiles[key] = (route, pick, self._now, lead.start_x, lead.start_z, ss, ks)
         return ss, ks
 
+    def bind_ego_lane(self, x: float, z: float, cal: AEBCalibration,
+                      vel_x: float = 0.0, vel_z: float = 0.0, kappa: float = 0.0) -> bool:
+        """Place ego on its map lane for ``lane_offset``, by position only (README lane track)."""
+        self._lane = None
+        self._keep = None
+        self.lane_ego_right = 0.0
+        self.lane_drift_right = 0.0
+        route = getattr(self._snap, "route", None) if self._snap is not None else None
+        if route is None or not cal.lane_track_enabled:
+            return False
+        # The branch ego's steering follows carries the lane-keep frame through a fork.
+        if self._ego_curve is not None and cal.lane_keep_follow_branch:
+            self._keep = _frame(self._ego_curve, self._ego_curve.length, x, z, vel_x, vel_z, kappa)
+        if (abs(route.offset_m) > cal.lane_track_max_offset_m
+                or abs(route.heading_err_rad) > math.radians(cal.lane_track_max_heading_deg)):
+            return False
+        ckey = (id(route), -1)
+        entry = self._curves.get(ckey)
+        if entry is None or entry[0] is not route:
+            entry = (route, road_curve(route.pts))
+            self._curves[ckey] = entry
+        curve = entry[1]
+        if curve is None:
+            return False
+        reach = curve.length
+        div = getattr(route, "divergence", ())
+        for k, (s, apart) in enumerate(div):
+            if apart < _LANE_BRANCH_APART_M:
+                continue
+            # A lane that starts just ahead of ego reads as apart at the first sample only.
+            if k == 0 and len(div) > 1 and div[1][1] < _LANE_REJOINED_M:
+                continue
+            reach = min(reach, s)
+            break
+        frame = _frame(curve, reach, x, z, vel_x, vel_z, kappa)
+        if frame is None:
+            return False
+        self._lane = frame
+        if self._keep is None:
+            self._keep = frame
+        self.lane_ego_right = frame[2]
+        # Ego's speed across its lane, rightward: the drift a lane-clear verdict must survive.
+        self.lane_drift_right = frame[4]
+        return True
+
+    @property
+    def keep_frame(self) -> tuple[float, float, float, float] | None:
+        """Ego on the lane it keeps: metres right of it, speed and accel across it, heading error."""
+        if self._keep is None:
+            return None
+        return self._keep[2], self._keep[4], self._keep[6], self._keep[5]
+
+    def lane_offset(self, x: float, z: float,
+                    keep: bool = False) -> tuple[float, float, float, float] | None:
+        """Metres ahead along ego's lane, metres right of ego's own track, and the lane direction.
+
+        None behind ego, past the lane's certain reach, or with no lane bound.
+        """
+        frame = self._keep if keep else self._lane
+        if frame is None:
+            return None
+        curve, ego_s, ego_right, reach = frame[:4]
+        s, right = fast_offset(curve, x, z)
+        if not math.isfinite(right) or s <= ego_s or s >= reach:
+            return None
+        h = _curve_heading(curve, s)
+        if h is None:
+            return None
+        return s - ego_s, right - ego_right, math.cos(h), math.sin(h)
+
+    def lane_bend(self, ahead: float, keep: bool = False) -> float:
+        """Sharpest curvature of ego's lane over the next ``ahead`` metres; 0 with no frame."""
+        frame = self._keep if keep else self._lane
+        if frame is None:
+            return 0.0
+        curve, ego_s = frame[0], frame[1]
+        return max(abs(curve.kappa_at(ego_s + d)) for d in _frange(0.0, max(ahead, 0.0), _GAP_STEP_M))
+
+    def target_lane(self, vid: int, x: float, z: float,
+                    reach: float) -> tuple[float, float, float, float, float] | None:
+        """A mover against its own map lane, every value positive toward ego's own track.
+
+        ``(metres off it, heading error, least and most lane curvature over the next ``reach``
+        metres, +1 when its own left turn leads toward ego's track)``. None with no route or
+        outside ego's lane frame.
+        """
+        route = (getattr(self._snap, "target_routes", None) or {}).get(vid) if self._snap else None
+        at = self.lane_offset(x, z, keep=True)
+        if route is None or at is None or len(route.pts) < 2:
+            return None
+        (ax, az), (bx, bz) = route.pts[0], route.pts[1]
+        hop = math.hypot(bx - ax, bz - az)
+        if hop < 1e-6:
+            return None
+        # Its lane's right-hand normal against the direction from it to ego's track.
+        nx, nz = -(bz - az) / hop, (bx - ax) / hop
+        _ahead, right, tx, tz = at
+        side = -1.0 if right > 0.0 else 1.0
+        sign = 1.0 if side * (nx * -tz + nz * tx) >= 0.0 else -1.0
+        ckey = (id(route), -2)
+        entry = self._curves.get(ckey)
+        if entry is None or entry[0] is not route:
+            entry = (route, road_curve(route.pts))
+            self._curves[ckey] = entry
+        # Curvature is positive to the left; ``sign`` says the lane's right points at ego's track.
+        ks = [0.0]
+        if entry[1] is not None:
+            ks = [-sign * entry[1].kappa_at(d) for d in _frange(0.0, reach, _GAP_STEP_M)]
+        # The lane just behind counts too: a vehicle's turn trails the bend it has left.
+        behind = route_behind(
+            getattr(self._snap, "window", None), route.lane_index, x, z,
+            (bx - ax) / hop, (bz - az) / hop, 2.0 * _RECENT_M)
+        back = road_curve(behind) if len(behind) >= 2 else None
+        if back is not None:
+            ks.extend(sign * back.kappa_at(d) for d in _frange(0.0, back.length, _GAP_STEP_M))
+        return sign * route.offset_m, -sign * route.heading_err_rad, min(ks), max(ks), -sign
+
+    def route_gap(self, vid: int, length: float, pose: tuple | None = None) -> float | None:
+        """Smallest distance from ego's own track to the vehicle's lane, ``length`` m along it.
+
+        Every branch of that lane counts, or with ``pose`` (x, z, fwd_x, fwd_z, kappa, speed)
+        only the branch it steers for. None with no route or a branch leaving ego's lane frame.
+        """
+        route = (getattr(self._snap, "target_routes", None) or {}).get(vid) if self._snap else None
+        if route is None or self._keep is None:
+            return None
+        branches = [route.pts, *getattr(route, "alternatives", ())]
+        if pose is not None and len(branches) > 1 and self._params is not None:
+            order = rank_routes(branches, *pose, self._params)
+            branches = [branches[order[0]]] if order else branches[:1]
+        curve, ego_s, ego_right, reach = self._keep[:4]
+        best = math.inf
+        seen: set[tuple[int, int]] = set()
+        for pts in branches:
+            for x, z in _walk(pts, length):
+                key = (round(x), round(z))
+                if key in seen:
+                    continue
+                seen.add(key)
+                if len(seen) > _GAP_POINTS:
+                    return None
+                s, right = fast_offset(curve, x, z)
+                # Behind ego it has passed; past the frame nobody knows.
+                if s <= ego_s:
+                    continue
+                if s >= reach or not math.isfinite(right):
+                    return None
+                best = min(best, abs(right - ego_right))
+        return best
 
     def in_ego_lane(self, x: float, z: float, half_width: float) -> bool:
         """``(x, z)`` ahead on the lane ego's road path follows, within ``half_width`` of its centre."""
@@ -176,6 +341,36 @@ class RoadPaths:
             return False
         s, right = lateral_offset(curve, x, z)
         return 0.0 < s < curve.length and abs(right) <= half_width
+
+
+def _frame(curve, reach: float, x: float, z: float, vel_x: float, vel_z: float, kappa: float = 0.0):
+    """``(curve, ego s, ego right, reach, speed across, heading error, accel across)`` on ``curve``."""
+    ego_s, ego_right = lateral_offset(curve, x, z)
+    h = _curve_heading(curve, ego_s)
+    if not math.isfinite(ego_right) or h is None:
+        return None
+    along = vel_x * math.cos(h) + vel_z * math.sin(h)
+    across = vel_x * -math.sin(h) + vel_z * math.cos(h)
+    # Curvature is positive to the left, so steering tighter than the lane pulls ego left.
+    accel = -(vel_x * vel_x + vel_z * vel_z) * (kappa - curve.kappa_at(ego_s))
+    return curve, ego_s, ego_right, reach, across, math.atan2(across, max(along, 1e-6)), accel
+
+
+def _walk(pts, length: float):
+    """Points every ``_GAP_STEP_M`` along ``pts`` up to ``length``, the start included."""
+    if not pts:
+        return
+    yield pts[0]
+    done, due = 0.0, _GAP_STEP_M
+    for (ax, az), (bx, bz) in zip(pts, pts[1:]):
+        hop = math.hypot(bx - ax, bz - az)
+        while hop > 1e-9 and due <= done + hop:
+            if due > length:
+                return
+            f = (due - done) / hop
+            yield ax + f * (bx - ax), az + f * (bz - az)
+            due += _GAP_STEP_M
+        done += hop
 
 
 def _start_key(pts) -> tuple[int, int]:

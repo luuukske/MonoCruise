@@ -267,9 +267,12 @@ what ACC uses.
 | `core/aeb/calibration.py` | Frozen `AEBCalibration` dataclass: all tunable constants. `DEFAULT` singleton used by both `thread.py` and tests. |
 | `core/aeb/lane_frame.py` | `Lane` enum, `project_to_ego_arc()`, `classify()`: arc-projected lane membership, replacing the old cross-product `lateral_offset`. Also the body-in-lane primitives (`_any_body_in_ego_lane`, `_body_centreline_d_abs`). |
 | `core/aeb/filters.py` | Named filter pipeline: the stage classes + `FilterContext` + `build_pipeline()`. |
+| `core/aeb/one_euro.py` | `OneEuroFilter`, the low-pass on each target's blended curvature (§1). |
 | `core/aeb/overlap_ghosts.py` | `OverlapGhostHold`: bodies deep inside ego, skipped as ghosts until they separate (§4). |
 | `core/aeb/avoidability.py` | `AvoidabilityGate`, which ends a guess-based drop of a parked body at the braking deadline (§3, Avoidability gate). |
-| `core/aeb/road_paths.py` | Ego's road path and road-ahead targets' bent arcs from the map worker's routes (Road-bent trajectories). |
+| `core/aeb/road_paths.py` | Ego's road path and road-ahead targets' bent arcs from the map worker's routes (Road-bent trajectories), and ego's lane frame (Map lane rules). |
+| `core/aeb/lane_track.py` | Where a body sits against ego's own track along its map lane: `lane_sight`, `on_ego_track`, `clear_of_ego_track`, `lane_keep_free` (Map lane rules). |
+| `core/aeb/lane_keep.py` | `LaneKeepFilter`, the last stage (Map lane rules). |
 | `core/aeb/debug_overlays.py` | Map lanes, the map path and ACC trail arcs drawn by the debug window. |
 | `core/aeb/thread.py` | `AEBThread`: data acquisition, ego-arc construction, pipeline dispatch, TTB/state output. |
 
@@ -299,6 +302,7 @@ pass, the vehicle enters collision evaluation.
 | `BendChainFilter` | Stopped or crawling car facing ego whose neighbours bend their lane beside ego, not through it |
 | `TightTurnFilter` | Walking-pace turn (radius 10 m or less) whose arc wraps onto a body the measured line is not closing on |
 | `EgoEvasionFilter` | Ego can steer around target within 0.08 g (runs for `Lane.EGO` too) |
+| `LaneKeepFilter` | Map only: a mover following its own map lane, whose lane stays clear of ego's track (Map lane rules) |
 
 `OutOfLaneParallelFilter`, `SweepPassFilter`, both corner-entry stages and
 `BendChainFilter` run inside `AvoidabilityGate` (see "Avoidability gate" below).
@@ -861,9 +865,10 @@ stages. The gate's own cases are in `tests/aeb/test_avoidability_gate.py`.
 
 ### Road-bent trajectories
 
-AEB does not trust the map to drop anything, and it does not let the map move a
-decision it already makes. With a fresh map snapshot it builds one extra path,
-ego's road path, and uses it only for targets the road puts in ego's lane:
+The road path does not drop anything, and it does not move a decision AEB
+already makes (the one place the map may do that is "Map lane rules" below).
+With a fresh map snapshot AEB builds one extra path, ego's road path, and uses
+it only for targets the road puts in ego's lane:
 
 1. **Following.** Ego gets a road path only while it follows its lane
    (`core/road_layout/road_bend.py`): within 2.5 m of the lane, within 20° of its
@@ -914,7 +919,7 @@ ego's road path, and uses it only for targets the road puts in ego's lane:
    evaluation stands untouched; only otherwise is it judged on the road path, with
    its own arcs bent along its lane by the same rules. Every other target, and
    everything after the per-target loop (latches, holds, warn gate), sees the
-   plain arcs exactly as before. So the map can only add or advance braking.
+   plain arcs exactly as before. So the road path can only add or advance braking.
 
 On the road path lanes are classified along its own centreline: the
 straight-line guard in `project_to_ego_arc` (`max(d_arc, d_straight)`) protects
@@ -965,6 +970,167 @@ built only in a frame that has one. Replayed AEB loop p50 +0.2 to 1.0 ms, p95 up
 to +5 ms. Without a map, or with `road_bend_enabled`
 off, there is no road path and AEB is bit-identical. Replays rebuild the map
 with `tools/map_replay.py`; `tools/map_aeb_ab.py` runs the A/B.
+
+### Map lane rules: lane track, lane clear, lane keep
+
+The road path above only adds braking. These rules let the map's lanes give a
+second opinion on a stage's verdict, in both directions, and they are the one
+place where the map may drop a target. Lukas asked for that on 2026-11-15, over
+the earlier "never on the map's say-so" rule; each rule was checked in a
+full-corpus A/B with the map in which no true positive was lost or made late. All of them
+judge by position in one frame, none replaces an arc, and with no map there is
+no frame: every stage decides exactly as before.
+
+**Lane frame** (`RoadPaths.bind_ego_lane`, `lane_offset`). Ego's route centreline
+as a curve. A point is read as metres ahead along it and metres right of ego's
+own track: ego's offset in its lane is subtracted, so a truck hugging the line
+carries that with it. The frame is bound while ego is within
+`lane_track_max_offset_m` (2.5) and `lane_track_max_heading_deg` (20) of its
+lane, and it ends where another branch has left the route by 1.5 m
+(`LaneRoute.divergence`): past a fork nobody knows which lane is ego's. A route
+that reads apart at its first sample and together again 5 m on is a
+neighbouring lane that starts just ahead of ego, not a branch, and does not end
+the frame (`e0f4b928` lost its frame for single frames on it, which restarts
+every hold below). `lane_sight` reads a body by its centre and both ends of its
+centreline; `reach` is the nearest of the three to ego's track, so a long rig
+angled across the road counts by its nearest end. The keep frame is the same on
+the branch ego's steering follows through a fork (the road path's lane, full
+length); only lane keep reads it.
+
+**Lane track: a body on ego's own track is kept.** `on_ego_track`: the body
+overlaps ego's swept width by `lane_track_overlap_m` (0.3 m) within 150 m, a
+mover also travels along the lane (cosine 0.9 or more), and that has held for
+`lane_track_hold_s` (0.25 s) unbroken (`LaneTrackHold`). Then
+
+- `OppositeLaneFilter` and its mirror pass it: oncoming on ego's own track is
+  not keeping to its lane;
+- `TmpCrossTrafficFilter` passes a near-head-on one: it is no junction sweep;
+- `EgoEvasionFilter` passes a stopped one, by position alone;
+- `AvoidabilityGate` overrides a guess stage's drop of a parked one;
+- with `lane_track_certain` it counts as in ego's lane for the engage grade
+  (`certain_geom_ids`) and its lane is trusted beyond `lane_confidence_range_m`.
+
+**Lane clear: a parked body clear of ego's track stays out of lane.** Off by
+default (`lane_clear_stationary`), see the end of this paragraph.
+`clear_of_ego_track`, stationary bodies only: at least `lane_clear_min_free_m`
+(1.3 m) between the body and ego's swept width; ego within
+`lane_clear_max_offset_m` (0.8 m) of its lane centre and moving across the lane
+at no more than `lane_clear_max_drift_ms` (0.3 m/s, either way); ego's drift
+toward it over the time to reach it (1.5 s at most) leaving
+`lane_clear_arrival_free_m` (0.5 m); all held `lane_clear_hold_s` (0.5 s)
+unbroken. Then `OutOfLaneParallelFilter` drops it through a sweep of ego's arc,
+and the avoidability gate does not hand it back at the braking deadline. Latched
+and crash-confirmed bodies are exempt. At the defaults the arrival term cannot
+bind (0.3 m/s for 1.5 s leaves 0.85 m); it is there for a looser drift bar. The
+hold must never be 0: a missing sight then counts as held.
+
+With lane clear enabled, two cases in `tests/aeb/test_road_bent_scenarios.py`
+change. Those tests build their own lane, a straight followed by a bend, from
+synthetic points. In the R 250 case with a car parked 4.5 m outside the bend,
+lane clear removes the warning at 5.57 s and the brake at 6.30 s as intended.
+When the driver continues straight toward a car on that line, the truck is
+still centred on the shared approach at 6.40 s, when the plain arc first warns.
+Lane clear trusts the mapped bend and holds the warning until 7.07 s, when ego
+has started leaving the lane. Braking starts at 7.20 s either way. That warning
+delay keeps lane clear off by default.
+
+**Drivable bend.** Lane clear and lane keep both assume ego follows its lane, so
+neither speaks where that lane, between ego and the body, bends harder than
+`lane_follow_max_lat_ms2` (6 m/s^2) at ego's speed (`lane_drivable`): on an
+R 60 bend at 90 km/h lane clear held back the brake for a car on the outside by
+1.8 s. Must stay under 10 for that scenario.
+
+The first version (ego within 1.5 m, 2.0 m free, drift toward the body only,
+3 s) cleared 19 false brakes and 15 false warnings on its 288-clip subset and
+lost three true positives (`793a60fd`, `72456399`, `6c7d47b4`) with a fourth
+late (`1d7eb731`): ego changing lanes toward a parked rig. Centred and calm
+keeps all four. Do not go back to a toward-only drift test, and do not widen it
+to lane changes: at the onset of `e0f4b928` (still a false warning) ego is
+1.4 m off its lane centre moving across at 1.2 m/s, the same picture as the
+four.
+
+**Lane keep: a mover on its own lane, clear of ego's, is not braked for.**
+`LaneKeepFilter` is the last stage, so it only judges what every other stage let
+through, and never a latched or crash-confirmed id. `lane_keep_free` returns the
+metres to spare, or None (no verdict) unless
+
+- ego is within `lane_keep_max_ego_offset_m` (0.8 m) of the centre of the lane
+  it keeps and within 20 degrees of it (1.6 m lost `86aaab6d`, `8a5612e7`,
+  `0a20598b`);
+- the mover does `lane_keep_min_speed_ms` (5 m/s) or more (`7dd7fec0`) and sits
+  within 1.2 m and 8 degrees of its own route (`MapSnapshot.target_routes`);
+- its lane, every branch of it over the next 3 s of its travel (20 m at least),
+  stays inside the keep frame. The smallest distance from that lane to ego's
+  track is the room (`RoadPaths.route_gap`).
+
+From the room come off both half widths, the mover's offset toward ego, and how
+far each can still move across before they have passed (1.5 s at most,
+`_excursion`): ego's drift; ego's steering toward it, counted only once ego also
+drifts that way at 0.3 m/s or the turn is a 4 m/s^2 swerve (a steering transient
+is not a plan: always counting it lost 11 clears, never counting it lost
+`eb839d5f` and `1c399790`); the mover's heading error beyond 1 degree of slack
+(2 degrees lost `e9d61021`, `993fdee4`); and the mover's turn beyond what its
+lane does over the next second and the 15 m behind it, less 0.5 m/s^2 (following
+a bend is no swerve; without the term `68ca7d28` and `0af8aedb` were lost). The
+mover is dropped when `lane_keep_min_free_m` (1.3 m) or more remains (1.0 made
+`2c6eac90` late).
+
+**Lane return.** A mover turning back to its lane (the second half of an aborted
+lane change, a slip lane swinging away) fails lane keep on its offset and
+heading while it is already leaving. When the measured miss is opening
+(`d_miss_rate` finite and not negative) and its turn is away from ego's track,
+the turn away is counted too, against `lane_return_min_free_m` (1.2 m). Both
+conditions are load-bearing: counting the turn away for every mover lost two
+true positives at 1.0 m and at 1.2 m.
+
+Why not looser. A plain lane keep (ego within 1.6 m, 0.5 m free, no turn terms)
+cleared 120 false brakes and lost 32 true positives with 6 more late. The lost
+and the cleared are the same scene, a vehicle beside ego's lane with a yaw rate
+across it, so the guards above are what tells them apart and each is pinned on
+the clips named. Loosen one only with a full-corpus run on the map and nothing
+lost (`tools/aeb_corpus_run`, map scoring).
+
+Corpus, replayed with the local map (4387 labelled clips, 4330 at the first two
+steps), each step against the one before:
+
+| step | cost | changes |
+|---|---|---|
+| map, none of these rules | -8244.50 | |
+| lane track | -8577.00 | 8 misses and 4 late caught; 5 no-event clips gain a brake or a warning, 2 warnings become brakes |
+| lane-track certainty, lane keep | -8775.25 | 51 false brakes and 3 false warnings cleared; 2 misses and 1 late caught; 2 no-event clips gain a brake, 1 warning becomes a brake |
+| lane clear (on for this run), lane return | -21.00 more | 6 false brakes and 7 false warnings cleared, 1 false brake becomes a warning |
+| current defaults | -8803.50 | 4387 clips; +40.25 against the preceding guarded full run, with no positive verdict lost or made late |
+
+No positive verdict is lost or made late at any step. Against the lane-keep
+reference, four positive clips start braking later before their labelled windows:
+`625c88b4` by 0.08 s, `44588696` by 0.23 s, `dcab867a` by 0.03 s and
+`66874532` by 0.34 s. The standard corpus score replays without a map; all
+4331 clips shared with its earlier baseline keep their verdict and cost. The
+current-default run includes the drivable-bend guard, the plain-flags rule
+below and lane clear's off default.
+
+Road path first. A road-ahead candidate's `_plain_flags` run (Road-bent
+trajectories, step 6) sees no lane rule: with lane track passing the body on
+the plain arcs, "today would flag it" turned true, the road path was skipped
+and a crashed car behind an R 150 bend was warned for 0.5 s later than before.
+
+Closed loop on a synthetic two-lane road (`tests/aeb/test_lane_keep.py`, ego at
+97 km/h, a truck at 54 km/h joining the next lane over an S-shaped slip road
+that never comes closer than a lane): without a map AEB brakes at 1.9 s on the
+slip road's bend, with the map not at all; a truck that leaves its lane for
+ego's at 3.0 s is braked for at 3.1 s; with ego drifting toward the slip road at
+1.5 m/s the map changes nothing.
+
+Cost: `lane_sight` runs for every body while a frame is bound, three lane
+lookups each. With the full nearest-point search that was +1.8 ms per replayed
+tick at p50 (+2.6 at p90, 40 map clips); `road_bend.fast_offset` (every eighth
+vertex, then the segments round the two nearest) replaced it in the lane frame
+and `route_gap`. On 40 map clips with two replays per mode, the paired on-minus-off
+cost was +0.63 ms/tick at p50 and +1.36 at p90; the earlier differences were
+computed from separately sorted samples, not paired timings. Lane keep itself
+is lazy: it runs only for movers every other stage let through.
+
+Tests: `tests/aeb/test_lane_track.py`, `tests/aeb/test_lane_keep.py`.
 
 ### `BendChainFilter`
 
