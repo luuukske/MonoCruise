@@ -6,7 +6,7 @@ import time
 
 import core.map_thread.thread as mt
 from core.road_layout.ego_lane import LineIndex
-from core.road_layout.game_map import LaneWindow, pack_lane
+from core.road_layout.game_map import LaneWindow, WindowBuild, pack_lane
 from core.road_layout.lanes import LaneLine
 
 
@@ -26,6 +26,15 @@ class _StubMap:
     def lanes_in_box(self, *box):
         self.builds += 1
         return self.window
+
+    def window_build(self, *box):
+        window = self.lanes_in_box(*box)
+
+        def parts():
+            yield
+            return window
+
+        return WindowBuild(parts())
 
 
 def _thread(monkeypatch, *, enabled=True, game="ets2", pose=(0.0, 0.0, 0.4, 1.0, 0.0)):
@@ -54,6 +63,76 @@ def test_window_is_reused_while_ego_stays_inside(monkeypatch):
     thread.loop()
     thread.loop()
     assert thread._map.builds == 1
+
+
+class _SlowMap(_StubMap):
+    """A window build that needs ``passes`` loop passes, like a dense window in budget slices."""
+
+    def __init__(self, passes: int) -> None:
+        super().__init__()
+        self.passes = passes
+
+    def window_build(self, *box):
+        self.builds += 1
+        line = LaneLine("road", "t", ((box[0], 0.0, box[2]), (box[1], 0.0, box[3])), None, self.builds, 0, 1, 0.0)
+        lanes = (pack_lane(line),)
+        window = LaneWindow((line,), (), box, lanes, LineIndex(lanes))
+
+        def parts():
+            for _ in range(self.passes - 1):
+                yield
+            return window
+
+        return WindowBuild(parts())
+
+
+def test_a_build_is_one_slice_per_expired_deadline_and_ends_with_the_window():
+    def parts():
+        yield
+        yield
+        return "window"
+
+    build = WindowBuild(parts())
+    assert build.step(0.0) is None
+    assert build.step(0.0) is None
+    assert build.step(0.0) == "window"
+    assert build.finish() == "window"
+
+
+def test_the_old_window_serves_while_the_next_one_builds(monkeypatch):
+    pose = {"p": (0.0, 0.0, 0.4, 1.0, 0.0)}
+    thread = _thread(monkeypatch)
+    # No budget left: every pass runs exactly one slice.
+    monkeypatch.setattr(mt, "_BUDGET_S", 0.0)
+    monkeypatch.setattr(mt, "_ego_pose", lambda: pose["p"])
+    thread._map = _SlowMap(passes=1)
+    thread.loop()
+    first = thread.data.snapshot.window
+    thread._map.passes = 3
+    pose["p"] = (350.0, 0.0, 0.4, 1.0, 0.0)
+    thread.loop()
+    thread.loop()
+    snap = thread.data.snapshot
+    assert snap.status == "ready" and snap.window is first
+    thread.loop()
+    assert thread.data.snapshot.window is not first
+    assert thread.data.snapshot.window.box == (-250.0, 950.0, -599.6, 600.4)
+
+
+def test_a_jump_during_a_build_starts_it_over_where_ego_is(monkeypatch):
+    pose = {"p": (0.0, 0.0, 0.4, 1.0, 0.0)}
+    thread = _thread(monkeypatch)
+    monkeypatch.setattr(mt, "_BUDGET_S", 0.0)
+    monkeypatch.setattr(mt, "_ego_pose", lambda: pose["p"])
+    thread._map = _SlowMap(passes=1)
+    thread.loop()
+    thread._map.passes = 3
+    pose["p"] = (350.0, 0.0, 0.4, 1.0, 0.0)
+    thread.loop()
+    pose["p"] = (5000.0, 0.0, 0.4, 1.0, 0.0)
+    for _ in range(3):
+        thread.loop()
+    assert thread.data.snapshot.window.box == (4400.0, 5600.0, -599.6, 600.4)
 
 
 def test_disabled_publishes_off(monkeypatch):

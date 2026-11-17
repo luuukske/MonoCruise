@@ -142,6 +142,15 @@ panel.update(AEB_warn=False)  # blink may continue briefly (cooldown)
 
 Lines are cached per distance setting. Vehicle cutout uses DestinationOut on an offscreen buffer each frame; pixmaps at max scale, drawn at animated scale. Bbox from settled targets keeps cache keys stable.
 
+## Caches
+
+Every cache is keyed by what it draws (sprite, size, colour, DPR; pixmaps by `cacheKey()`, never `id()`, which a
+freed pixmap hands to the next one), so ACC lock, lead car/truck and AEB changes only pick the current icon and
+reuse the rest. Only a scale or DPR change clears them. Clearing them on every lock or lead change used to rebuild
+the cutout masks in per-pixel Python loops: 70 to 115 ms of GUI thread per change at 175 % scaling, repeated in
+city traffic. The masks are now built with Qt blits (separable max filter as `CompositionMode_Lighten` on an opaque
+grey copy, an exact max) and byte slicing, pixel for pixel what the loops made (`tests/test_cc_panel_masks.py`).
+
 ## Close-follow warning
 
 `update(close_warn=True)` draws the tracked vehicle in the warning orange (`WARN_COLOR`, shared with the lane

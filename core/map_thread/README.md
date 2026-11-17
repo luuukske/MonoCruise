@@ -13,11 +13,16 @@ live in `core/road_layout/` (read its README first).
 | `waiting` | No game connected, or no ego pose from the radar thread. |
 | `opening` | `GameMapOpener` opens archives for about 20 ms per pass (107 on ETS2 with DLCs, about 130 ms in total: the HashFS index is a sorted hash list, entries decode on lookup). The game is the telemetry game id (1 ETS2, 2 ATS). |
 | `loading` | Sectors for the first window parse one at a time inside the same budget. |
-| `ready` | `EgoRouter.step` on the current window; a new window (ego +-600 m) is built once ego comes within 300 m of the old one's edge. |
+| `ready` | `EgoRouter.step` on the current window; a new window (ego +-600 m) is built once ego comes within 300 m of the old one's edge. The old window serves until the new one is done. |
 | `no_map` | No install found, or its archives have no map. Logged once. |
 
 The loop never blocks for long: one archive or one sector per budget slice, and
-building a window from parsed sectors takes about 5 to 30 ms. Measured passes on
+the window build (`GameMap.window_build`, `lanes_in_box` in slices) runs in the
+same 20 ms budget per pass (longest measured slice 15 ms). A dense window is 30 to 190 ms
+of work (2,100 lanes, prefabs read for the first time); built in one call it held
+the Python lock that long and the GUI stuttered at every rebuild in towns. The
+sliced build gives the same window (checked on 12 real windows against the
+one-call build). A pose jump past the build's own margin starts it over. Measured passes on
 the installed ETS2: 178 ms once at start (install lookup), about 100 ms for the
 catalog and the densest sector, 0.3 ms per pass once ready. It also routes every
 moving vehicle within 120 m and not more than 10 m behind ego, nearest first,

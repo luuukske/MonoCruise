@@ -51,6 +51,22 @@ Behaviour is pinned by `tests/thread_management/`.
 Interactive CLI, only when `Settings.debug` is true: `status`, `stop <name>`,
 `restart <name>`, `quit`.
 
+## GUI stall probe (`gui_stall_probe.py`)
+
+Debug only, like the monitor. The watchdog watches workers, never the Qt GUI thread, so a
+frozen cruise panel or pedal bar left no trace. A 20 ms `QTimer` on the GUI thread beats;
+`GuiStallProbe` (a `BaseThread`, not watched) logs one warning per gap of 250 ms or more,
+once the GUI beats again: how long, where the GUI thread was (its innermost frames, sampled
+every 20 ms during the gap, repo-relative paths) and which Python threads used the CPU
+meanwhile. Every 10 s a debug line gives the longest gap and the busiest threads, so a drive
+shows what grows. Stall lines closer than 1 s are counted into the next one.
+
+Why the CPU column matters: almost every PySide6 call releases the GIL and must win it
+back, so a GUI thread making many Qt calls slows down in proportion to how busy the
+workers are (2000 `drawLine` calls: 7 ms alone, 775 ms beside one busy thread). Thread CPU
+comes from `GetThreadTimes` (Windows, 15.6 ms ticks) or the thread CPU clock (Linux), never
+psutil: its thread list walks every process, 116 ms a call on Windows.
+
 ## Popup UI
 
 `ui/popup/popup_window.py` is a process-wide singleton created by the entry point, with

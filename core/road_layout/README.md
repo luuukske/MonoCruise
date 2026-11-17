@@ -34,7 +34,9 @@ only when the game log says it was mounted.
 
 Paths are hashed with CityHash64 from CityHash 1.0.3. The 1.1 hash that current
 PyPI builds ship does not match these archives. The empty string is the one
-value both revisions share.
+value both revisions share. The hash is pure Python and memoized per path: a
+lookup probes every archive (about 114 on ETS2 with DLCs) with the same key, and
+unmemoized a dense window's first prefab reads spent 109 of 177 ms hashing.
 
 ## What a centerline is
 
@@ -144,6 +146,27 @@ branches part; they never guess which branch the driver takes.
 `extend_lane` returns a whole joined line in stored order, which can run
 backwards; the route orients each span from the previous tip. Without that an
 S-bend route folded back on itself.
+
+### Route cost
+
+The map worker builds ego's route every pass (20 Hz) and the routes of nearby
+movers inside a 15 ms budget. In junction-dense towns the divergence was nearly
+all of it: a route there has about 15 span tips and 20 branches, rebuilt
+every pass and measured every 5 m against every branch segment, 20 to 40 ms per
+route (2026-11-17, TruckersMP clip `320342b3`). The map worker then never slept,
+held Python's lock 100 % of a core and froze the GUI for up to a second
+(core/thread_management/README.md, GUI stall probe). Now, bit for bit the same:
+
+- The branches leaving a tip are memoized on the window's `LineIndex`
+  (`branch_cache`) by the exact tip, tip direction and the two span lanes; the
+  same tip comes back every pass as ego drives toward it (98.7 % hits). Lanes
+  from another window never read it. The `seen` filter is applied after the cache.
+- A branch's distance skips chunks of 8 segments whose bounding box is farther
+  than the best segment so far, and stops once the branch cannot beat the
+  widest gap at that sample (`_distance_past`).
+
+18,194 routes from six clips of that drive matched the old code exactly; ego's
+route went from 24 to 5 ms there (`tests/road_layout/test_route_cost.py`).
 
 `route_behind` follows ego's lane the other way from its foot, the same
 assembly with the direction flipped; the lane departure thread's side traffic

@@ -42,6 +42,9 @@ _MERGE_APART_M = 1.5
 _MERGE_JOIN_M = 0.75
 _MERGE_REACH_M = 150.0
 _DIV_STEP_M = 5.0
+# Branch tips kept per window, and segments per culling box when measuring a branch.
+_BRANCH_CACHE_MAX = 4096
+_CHUNK_SEGMENTS = 8
 
 
 @dataclass(frozen=True)
@@ -249,22 +252,22 @@ def _offset_polyline(pts, right: float) -> tuple[tuple[float, float], ...]:
 
 
 def _divergence(lanes, near, spans, route, boundaries):
-    """``(s, metres)`` the widest branch leaving any span tip has drifted from the route."""
+    """``(s, metres)`` the widest branch leaving any span tip has drifted from the route.
+    Bit for bit what measuring every branch with ``_distance_to`` gives (README, "Route cost")."""
     seen = {span.index for span in spans}
     branches: list[tuple[float, tuple[tuple[float, float], ...]]] = []
+    shapes: list[tuple[float, tuple]] = []
     tips = [(s_at, spans[k - 1].index, spans[k].index) for s_at, k in boundaries]
     for s_at, prev_index, next_index in tips:
         tip = _route_point(route, s_at)
         tip_dir = _route_dir(route, s_at)
         if tip is None or tip_dir is None:
             continue
-        for _cost, cand, _end in join_candidates(near, tip, tip_dir, {prev_index, next_index}):
+        for cand, pts, shape in _tip_branches(lanes, near, tip, tip_dir, prev_index, next_index):
             if cand in seen:
                 continue
-            alt = extend_lane(lanes, cand, tip[0], tip[1], tip_dir[0], tip_dir[1], near)
-            pts = _join(alt, tip)
-            if len(pts) >= 2:
-                branches.append((s_at, pts))
+            branches.append((s_at, pts))
+            shapes.append((s_at, shape))
     total = _length(route)
     out: list[tuple[float, float]] = []
     first: float | None = None
@@ -272,10 +275,10 @@ def _divergence(lanes, near, spans, route, boundaries):
     while s <= total + 1e-6:
         widest = 0.0
         p = _route_point(route, s)
-        for s_at, pts in branches:
+        for s_at, shape in shapes:
             if s < s_at or p is None or s > s_at + _ALT_REACH_M:
                 continue
-            gap = _distance_to(pts, p[0], p[1])
+            gap = _distance_past(shape, p[0], p[1], widest)
             if gap > widest:
                 widest = gap
         if widest > 0.5 and first is None:
@@ -283,6 +286,78 @@ def _divergence(lanes, near, spans, route, boundaries):
         out.append((s, widest))
         s += _DIV_STEP_M
     return tuple(out), first, branches
+
+
+def _tip_branches(lanes, near, tip, tip_dir, prev_index, next_index) -> tuple:
+    """``(lane, branch pts, shape)`` for every lane joining at a span tip, cheapest first.
+    Memoized per window on the exact inputs: ego drives toward the same tip for many passes."""
+    cache = getattr(near, "branch_cache", None) if getattr(near, "lines", None) is lanes else None
+    key = (prev_index, next_index, tip, tip_dir)
+    if cache is not None:
+        hit = cache.get(key)
+        if hit is not None:
+            return hit
+    found = []
+    for _cost, cand, _end in join_candidates(near, tip, tip_dir, {prev_index, next_index}):
+        pts = _join(extend_lane(lanes, cand, tip[0], tip[1], tip_dir[0], tip_dir[1], near), tip)
+        if len(pts) >= 2:
+            found.append((cand, pts, _shape(pts)))
+    result = tuple(found)
+    if cache is not None:
+        if len(cache) >= _BRANCH_CACHE_MAX:
+            cache.clear()
+        cache[key] = result
+    return result
+
+
+def _shape(pts) -> tuple:
+    """``pts`` with its segments in chunks, each with the bounding box of its points."""
+    boxes = []
+    for i0 in range(0, len(pts) - 1, _CHUNK_SEGMENTS):
+        i1 = min(i0 + _CHUNK_SEGMENTS, len(pts) - 1)
+        xs = [p[0] for p in pts[i0:i1 + 1]]
+        zs = [p[1] for p in pts[i0:i1 + 1]]
+        boxes.append((min(xs), max(xs), min(zs), max(zs), i0, i1))
+    return pts, tuple(boxes)
+
+
+def _distance_past(shape, x: float, z: float, floor: float) -> float:
+    """``_distance_to`` the shape's points, bit for bit, or any value <= ``floor`` once it cannot
+    beat it. A chunk whose box is farther than the best segment so far holds no closer segment."""
+    pts, boxes = shape
+    lows = []
+    for x0, x1, z0, z1, _i0, _i1 in boxes:
+        dx = x0 - x if x < x0 else x - x1 if x > x1 else 0.0
+        dz = z0 - z if z < z0 else z - z1 if z > z1 else 0.0
+        lows.append(dx * dx + dz * dz)
+    nearest = min(range(len(boxes)), key=lows.__getitem__)
+    best = math.inf
+    for k in (nearest, *range(len(boxes))):
+        if k == nearest and best < math.inf:
+            continue
+        if lows[k] > best * best * (1.0 + 1e-9):
+            continue
+        best = _segments_min(pts, x, z, boxes[k][4], boxes[k][5], best)
+        if best <= floor:
+            return best
+    return best
+
+
+def _segments_min(pts, x: float, z: float, i0: int, i1: int, best: float) -> float:
+    """``_distance_to`` over segments ``i0`` to ``i1 - 1`` only, starting from ``best``."""
+    for i in range(i0, i1):
+        ax, az = pts[i]
+        bx, bz = pts[i + 1]
+        sx, sz = bx - ax, bz - az
+        length2 = sx * sx + sz * sz
+        if length2 < 1e-12:
+            d = math.hypot(x - ax, z - az)
+        else:
+            t = max(0.0, min(1.0, ((x - ax) * sx + (z - az) * sz) / length2))
+            d = math.hypot(x - (ax + t * sx), z - (az + t * sz))
+        if d < best:
+            best = d
+    return best
 
 
 def _oriented(chunk, tail) -> list[tuple[float, float]]:

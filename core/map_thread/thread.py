@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from core.road_layout.ego_route import EgoRouter, LaneRoute
-from core.road_layout.game_map import GameMap, GameMapOpener, LaneWindow
+from core.road_layout.game_map import GameMap, GameMapOpener, LaneWindow, WindowBuild
 from core.road_layout.target_path import TargetRouter
 from core.road_layout.mod_mounts import ModOverlayOpener, live_mounts
 from core.road_layout.tmp_mods import TmpOverlayOpener
@@ -93,6 +93,8 @@ class MapThread(BaseThread):
         self._tmp_seen = -math.inf
         self._window: LaneWindow | None = None
         self._pending: list[tuple[int, int]] = []
+        self._build: WindowBuild | None = None
+        self._build_box = (0.0, 0.0, 0.0, 0.0)
         self._router = EgoRouter()
         self._targets = TargetRouter()
         self._status = ""
@@ -148,6 +150,7 @@ class MapThread(BaseThread):
         self._tmp_on = False
         self._window = None
         self._pending = []
+        self._build = None
         self._router.reset()
         self._opener = None
         if game in self._open_failed:
@@ -300,31 +303,38 @@ class MapThread(BaseThread):
     def _invalidate_window(self) -> None:
         self._window = None
         self._pending = []
+        self._build = None
         self._router.reset()
         self._targets = TargetRouter()
 
     def _window_step(self, x: float, z: float) -> bool:
-        """Keep the lane window around ego. False while sectors are still loading."""
+        """Keep the lane window around ego. False while the first window is still loading. Sectors
+        load and the window builds in budget slices; the old window serves until the new one is done."""
         win = self._window
-        inside = win is not None and (
-            win.box[0] + _WINDOW_MARGIN_M <= x <= win.box[1] - _WINDOW_MARGIN_M
-            and win.box[2] + _WINDOW_MARGIN_M <= z <= win.box[3] - _WINDOW_MARGIN_M
-        )
-        if inside:
+        if win is not None and _inside(win.box, x, z):
             return True
-        box = (x - _WINDOW_HALF_M, x + _WINDOW_HALF_M, z - _WINDOW_HALF_M, z + _WINDOW_HALF_M)
-        if not self._pending:
-            self._pending = self._map.sectors_needed(*box)
+        if self._build is not None and not _inside(self._build_box, x, z):
+            self._build = None
         started = time.monotonic()
-        while self._pending and time.monotonic() - started < _BUDGET_S and self.running:
-            self._map.sector(self._pending.pop(0))
-        if self._pending:
-            if win is None:
-                self._publish(MapSnapshot("loading", self._game))
-            return win is not None
-        self._window = self._map.lanes_in_box(*box)
-        logger.debug("map window rebuilt, %d lanes", len(self._window.lanes))
-        return True
+        if self._build is None:
+            box = (x - _WINDOW_HALF_M, x + _WINDOW_HALF_M, z - _WINDOW_HALF_M, z + _WINDOW_HALF_M)
+            if not self._pending:
+                self._pending = self._map.sectors_needed(*box)
+            while self._pending and time.monotonic() - started < _BUDGET_S and self.running:
+                self._map.sector(self._pending.pop(0))
+            if not self._pending:
+                self._build = self._map.window_build(*box)
+                self._build_box = box
+        if self._build is not None:
+            built = self._build.step(started + _BUDGET_S)
+            if built is not None:
+                self._window = built
+                self._build = None
+                logger.debug("map window rebuilt, %d lanes", len(built.lanes))
+                return True
+        if win is None:
+            self._publish(MapSnapshot("loading", self._game))
+        return win is not None
 
     def _target_routes(self, ego_x: float, ego_z: float, fwd_x: float, fwd_z: float) -> dict:
         """Lane routes of moving vehicles near and ahead of ego, nearest first, in the budget."""
@@ -365,6 +375,14 @@ class MapThread(BaseThread):
 
     def _log_status(self, text: str) -> None:
         logger.info(text)
+
+
+def _inside(box: tuple[float, float, float, float], x: float, z: float) -> bool:
+    """Ego at least ``_WINDOW_MARGIN_M`` from every edge of a window box."""
+    return (
+        box[0] + _WINDOW_MARGIN_M <= x <= box[1] - _WINDOW_MARGIN_M
+        and box[2] + _WINDOW_MARGIN_M <= z <= box[3] - _WINDOW_MARGIN_M
+    )
 
 
 def map_snapshot(max_age_s: float = _STALE_S) -> MapSnapshot | None:

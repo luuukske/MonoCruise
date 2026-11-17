@@ -30,7 +30,10 @@ renames it to the released version and starts a fresh `[Unreleased]` above it.
 - **AEB was late for a stopped car round a bend**: AEB only saw a stopped or crashed vehicle in your lane once your truck had turned into the bend. With the map files it now looks ahead along your lane while you follow it and brakes earlier; everything else it brakes for is unchanged.
 - **AEB braked for traffic keeping to its own lane**: a truck joining the next lane from a slip road or oncoming traffic on a bend could trigger a brake or a warning even though it never came into your lane. With the map files AEB now knows where the lanes run: it stays quiet for vehicles that keep to their own lane while you keep to yours, and brakes sooner for one that is in your lane.
 - **ACC accelerated in steps when pulling away**: at every gear change, the truck ahead's or your own, ACC eased off or kicked back in, so pulling away in a jam felt wobbly. ACC now rides through gear changes smoothly, and still reacts straight away when the truck ahead brakes.
+- **ACC braked too long for a quick brake tap ahead in TruckersMP**: when the truck ahead touched its brakes for a moment, ACC kept braking for about a second after the tap was over. It now sees the tap end sooner and brakes less for it.
+- **ACC stayed closer than your following distance after a slowdown**: when the vehicle ahead braked briefly while you were catching up, ACC let go of its own brake too soon and then sat well inside the distance you set. It now settles back at your following distance.
 - **Cruise control switched off after ACC or AEB braked**: when ACC or AEB let go of a firm brake quickly, MonoCruise mistook its own braking for you braking in game and turned cruise control off. It now only switches off for your own brake.
+- **Cruise control panel and live bar stuttered in towns**: driving through busy junctions, the panel and the bottom bar could freeze for up to a second, and again whenever ACC picked up or switched the vehicle ahead. Following the lanes through junctions now takes a fraction of the work, so the display stays smooth.
 
 ## [1.1.4-preview.1] - 2026-11-04
 ### Added

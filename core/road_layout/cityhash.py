@@ -10,6 +10,8 @@ Ported from CityHash 1.0.3 (Google, MIT). See THIRD_PARTY_LICENSES/cityhash-LICE
 
 from __future__ import annotations
 
+from functools import lru_cache
+
 _MASK = (1 << 64) - 1
 
 _K0 = 0xC3A5C85C97CB3127
@@ -166,6 +168,8 @@ def city_hash64(data: bytes) -> int:
     )
 
 
+@lru_cache(maxsize=8192)
 def city_hash64_path(path: str) -> int:
-    """Hash an archive key. Keys are ASCII, no leading slash."""
+    """Hash an archive key. Keys are ASCII, no leading slash. Cached: a lookup probes every
+    archive with the same key, and a cold prefab cost about 114 pure-Python hashes."""
     return city_hash64(path.encode("utf-8"))

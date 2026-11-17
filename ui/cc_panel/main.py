@@ -92,6 +92,11 @@ _LANE_TICK_MS = 16
 # Sentinel for update(lead_vehicle_speed=...): distinguishes "not provided" from None ("no lead").
 _LEAD_UNSET = object()
 
+# Byte offsets of a 32-bit QImage pixel in memory (0xAARRGGBB in native order), for the cutout masks.
+_ALPHA_BYTE = 3 if sys.byteorder == "little" else 0
+_COLOUR_BYTES = (0, 1, 2) if sys.byteorder == "little" else (1, 2, 3)
+_NONZERO_TO_FF = bytes([0] + [255] * 255)
+
 
 def _smoothstep(t: float) -> float:
     """Hermite smoothstep (flat ends); pre-warps lead/vehicle easing curves."""
@@ -317,14 +322,8 @@ class _PanelWidget(QWidget):
                 self._start_blinking()
 
         if needs_icon:
+            # Caches are keyed by what they draw, so a lock or lead change reuses them (README, Caches).
             p._current_icon = self._load_icon()
-            self._tint_cache.clear()
-            self._scaled_icon_lines_cache.clear()
-            self._ghost_raw_cache.clear()
-            self._ghost_scaled_cache.clear()
-            self._ghost_exact_alpha_cache.clear()
-            self._vehicle_cutout_mask_cache.clear()
-            self._acc_lines_layer_cache.clear()
 
         if needs_color or needs_icon:
             p._text_color = cc_panel._color_for_mode(p._cc_mode, p._cc_enabled)
@@ -371,14 +370,6 @@ class _PanelWidget(QWidget):
         p = self._p
         p._blink_running = False
         p._hide_icon = False
-        p._icon_cache.clear()
-        self._tint_cache.clear()
-        self._scaled_icon_lines_cache.clear()
-        self._ghost_raw_cache.clear()
-        self._ghost_scaled_cache.clear()
-        self._ghost_exact_alpha_cache.clear()
-        self._vehicle_cutout_mask_cache.clear()
-        self._acc_lines_layer_cache.clear()
         p._current_icon = self._load_icon()
         self._blink_timer.stop()
         self.update()
@@ -487,38 +478,55 @@ class _PanelWidget(QWidget):
             raise
 
     @staticmethod
-    def _dilate_alpha_channel_sep(src: QImage, radius: int) -> QImage:
-        """Separable max-filter dilation on alpha (fast O(n·r) vs O(n·r²))."""
+    def _alpha_bytes(img: QImage) -> bytes:
+        """Alpha of ``img``, one byte per pixel, rows packed."""
+        argb = img.convertToFormat(QImage.Format.Format_ARGB32)
+        return bytes(argb.constBits())[_ALPHA_BYTE::4]
+
+    @staticmethod
+    def _image_from_channels(alpha: bytes, colour: bytes, w: int, h: int, fmt: QImage.Format) -> QImage:
+        """32-bit image with ``colour`` in R, G and B and ``alpha`` in A."""
+        buf = bytearray(4 * w * h)
+        buf[_ALPHA_BYTE::4] = alpha
+        for offset in _COLOUR_BYTES:
+            buf[offset::4] = colour
+        return QImage(bytes(buf), w, h, 4 * w, fmt).copy()
+
+    @classmethod
+    def _white_with_alpha(cls, alpha: bytes, w: int, h: int) -> QImage:
+        """Non-premultiplied white carrying ``alpha``, zero where it is zero (the old pixel loop's output)."""
+        return cls._image_from_channels(
+            alpha, alpha.translate(_NONZERO_TO_FF), w, h, QImage.Format.Format_ARGB32,
+        )
+
+    @staticmethod
+    def _max_filter(gray: QImage, radius: int, horizontal: bool) -> QImage:
+        """Max of each pixel over ``radius`` either side. Lighten on opaque images is an exact max."""
+        out = gray.copy()
+        pa = QPainter(out)
+        try:
+            pa.setCompositionMode(QPainter.CompositionMode.CompositionMode_Lighten)
+            for d in range(1, radius + 1):
+                for s in (-d, d):
+                    pa.drawImage(s if horizontal else 0, 0 if horizontal else s, gray)
+        finally:
+            pa.end()
+        return out
+
+    @classmethod
+    def _dilated_alpha(cls, alpha: bytes, w: int, h: int, radius: int) -> bytes:
+        """Separable max-filter dilation of an alpha plane, run as Qt blits on an opaque grey copy."""
+        gray = cls._image_from_channels(b"\xff" * (w * h), alpha, w, h, QImage.Format.Format_RGB32)
+        gray = cls._max_filter(cls._max_filter(gray, radius, True), radius, False)
+        return bytes(gray.constBits())[_COLOUR_BYTES[0]::4]
+
+    @classmethod
+    def _dilate_alpha_channel_sep(cls, src: QImage, radius: int) -> QImage:
+        """White image whose alpha is ``src`` alpha max-filtered over ``radius`` (separable)."""
         if radius <= 0 or src.isNull():
             return src
         w, h = src.width(), src.height()
-        tmp = QImage(w, h, QImage.Format.Format_ARGB32)
-        out = QImage(w, h, QImage.Format.Format_ARGB32)
-        tmp.fill(0)
-        out.fill(0)
-        for y in range(h):
-            for x in range(w):
-                amax = 0
-                for dx in range(-radius, radius + 1):
-                    sx = x + dx
-                    if 0 <= sx < w:
-                        a = src.pixelColor(sx, y).alpha()
-                        if a > amax:
-                            amax = a
-                if amax > 0:
-                    tmp.setPixelColor(x, y, QColor(255, 255, 255, amax))
-        for y in range(h):
-            for x in range(w):
-                amax = 0
-                for dy in range(-radius, radius + 1):
-                    sy = y + dy
-                    if 0 <= sy < h:
-                        a = tmp.pixelColor(x, sy).alpha()
-                        if a > amax:
-                            amax = a
-                if amax > 0:
-                    out.setPixelColor(x, y, QColor(255, 255, 255, amax))
-        return out
+        return cls._white_with_alpha(cls._dilated_alpha(cls._alpha_bytes(src), w, h, radius), w, h)
 
     def _load_vehicle_asset_scaled(self, truck: bool, sh: int, dpr: float) -> QPixmap:
         key = (truck, sh, dpr)
@@ -587,18 +595,20 @@ class _PanelWidget(QWidget):
         if hit is not None:
             return hit
 
-        img = scaled_vehicle_raw.toImage().convertToFormat(QImage.Format.Format_ARGB32)
+        img = scaled_vehicle_raw.toImage()
         if img.isNull():
             return QPixmap()
 
         w, h = img.width(), img.height()
-        padded = QImage(w + 2 * r_phys, h + 2 * r_phys, QImage.Format.Format_ARGB32)
-        padded.fill(0)
-        for yy in range(h):
-            for xx in range(w):
-                padded.setPixelColor(xx + r_phys, yy + r_phys, img.pixelColor(xx, yy))
-
-        dil = self._dilate_alpha_channel_sep(padded, r_phys)
+        alpha = self._alpha_bytes(img)
+        pw, ph = w + 2 * r_phys, h + 2 * r_phys
+        side = bytes(r_phys)
+        padded = b"".join(
+            [bytes(pw * r_phys)]
+            + [side + alpha[y * w:(y + 1) * w] + side for y in range(h)]
+            + [bytes(pw * r_phys)]
+        )
+        dil = self._white_with_alpha(self._dilated_alpha(padded, pw, ph, r_phys), pw, ph)
         out = QPixmap.fromImage(dil)
         out.setDevicePixelRatio(dpr)
         self._vehicle_cutout_mask_cache[cache_key + (r_phys,)] = out
@@ -613,18 +623,11 @@ class _PanelWidget(QWidget):
             return hit
         if scaled_vehicle_raw.isNull():
             return scaled_vehicle_raw
-        img = scaled_vehicle_raw.toImage().convertToFormat(QImage.Format.Format_ARGB32)
+        img = scaled_vehicle_raw.toImage()
         if img.isNull():
             return QPixmap()
         w, h = img.width(), img.height()
-        out_img = QImage(w, h, QImage.Format.Format_ARGB32)
-        out_img.fill(0)
-        for yy in range(h):
-            for xx in range(w):
-                a = img.pixelColor(xx, yy).alpha()
-                if a > 0:
-                    out_img.setPixelColor(xx, yy, QColor(255, 255, 255, a))
-        pm = QPixmap.fromImage(out_img)
+        pm = QPixmap.fromImage(self._white_with_alpha(self._alpha_bytes(img), w, h))
         pm.setDevicePixelRatio(dpr)
         self._ghost_exact_alpha_cache[cache_pk] = pm
         return pm
@@ -1318,7 +1321,8 @@ class _PanelWidget(QWidget):
     def _tinted(self, pm: QPixmap, color: QColor) -> QPixmap:
         if pm is None or pm.isNull():
             return pm
-        key = (id(pm), color.name())
+        # cacheKey, not id(): a freed pixmap's id can come back for another one.
+        key = (pm.cacheKey(), color.name())
         hit = self._tint_cache.get(key)
         if hit is not None:
             return hit
@@ -1578,7 +1582,7 @@ class _PanelWidget(QWidget):
             dpr = self.devicePixelRatio()
             # Pre-render at max sh (n=1 gives largest sprite) for smooth scale-down.
             sh_max = self._compute_sh(area_sz, 1, lw, ls, sc, acc_truck)
-            cache_key = (id(icon_pm), area_sz, dpr, acc_truck, sc)
+            cache_key = (icon_pm.cacheKey(), area_sz, dpr, acc_truck, sc)
             scaled_max = self._scaled_icon_lines_cache.get(cache_key)
             if scaled_max is None:
                 phys_sh_max = int(sh_max * dpr)

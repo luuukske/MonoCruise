@@ -73,6 +73,7 @@ from core.version import __version__
 from core.thread_management.registry import registry
 from core.thread_management.watchdog import Watchdog
 from core.thread_management.monitor  import Monitor
+from core.thread_management.gui_stall_probe import GuiStallProbe
 from core.thread_management.popup_log_handler import PopupLogHandler
 
 from core.telemetry_thread.thread import TelemetryThread
@@ -486,6 +487,17 @@ def main() -> None:
         monitor = Monitor(watchdog=watchdog)
         registry.register(monitor)
 
+    # GUI stall probe (debug only): the GUI thread beats, a worker logs the gaps.
+    stall_probe: GuiStallProbe | None = None
+    stall_beat: QTimer | None = None
+    if settings.debug:
+        stall_probe = GuiStallProbe()
+        registry.register(stall_probe)
+        stall_beat = QTimer()
+        stall_beat.setInterval(20)
+        stall_beat.timeout.connect(stall_probe.beat)
+        stall_beat.start()
+
     # Start workers
     for w in workers:
         w.start()
@@ -497,6 +509,10 @@ def main() -> None:
     if monitor:
         monitor.start()
         log.info("started: monitor")
+
+    if stall_probe:
+        stall_probe.start()
+        log.info("started: gui stall probe")
 
     # Updater shutdown event; window.close() for same path as the title-bar X.
     shutdown_event = _create_shutdown_event()

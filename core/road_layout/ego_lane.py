@@ -40,6 +40,8 @@ class LineIndex:
 
     def __init__(self, lines: Sequence[object]) -> None:
         self.lines = lines
+        # Branches leaving a junction tip, memoized by ego_route for as long as this window lives.
+        self.branch_cache: dict = {}
         self._grid: dict[tuple[int, int], list[int]] = {}
         for index, line in enumerate(lines):
             self._cover(index, line, _pts(line))

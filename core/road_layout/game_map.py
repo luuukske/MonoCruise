@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 import math
 import struct
+import time
 from collections import OrderedDict
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -19,7 +20,7 @@ from core.road_layout.archive import Archive, HashFs
 from core.road_layout.ego_lane import LineIndex
 from core.road_layout.buried import drop_buried
 from core.road_layout.grid import map_folder, read_sector_blob, sector_index, sector_key
-from core.road_layout.lanes import LaneLine, lane_lines
+from core.road_layout.lanes import LaneLine, iter_lane_lines
 from core.road_layout.looks import RoadLook, load_road_looks
 from core.road_layout.prefab import PrefabLibrary, load_prefab_paths
 from core.road_layout.sector import SectorError, SectorMesh, parse_sector
@@ -30,6 +31,9 @@ log = logging.getLogger("road_layout")
 # A road is at most about 1 km, so its far node can sit one sector over.
 _ROAD_REACH_M = 1100.0
 _SECTOR_CACHE = 24
+# Work between pauses of a sliced window build: well under a millisecond each.
+_SLICE_ITEMS = 128
+_SLICE_LINES = 16
 
 
 @dataclass(frozen=True)
@@ -170,6 +174,26 @@ class GameMap:
         prefab_tangent: str = "chord",
     ) -> LaneWindow:
         """Lanes of every road or prefab that can reach the box."""
+        return self.window_build(
+            min_x, max_x, min_z, max_z, steps=steps, road_tangent=road_tangent, prefab_tangent=prefab_tangent,
+        ).finish()
+
+    def window_build(
+        self,
+        min_x: float,
+        max_x: float,
+        min_z: float,
+        max_z: float,
+        *,
+        steps: int = 8,
+        road_tangent: str = "stored",
+        prefab_tangent: str = "chord",
+    ) -> "WindowBuild":
+        """``lanes_in_box`` in slices, for a caller with a time budget per pass (the map worker)."""
+        return WindowBuild(self._window_parts(min_x, max_x, min_z, max_z, steps, road_tangent, prefab_tangent))
+
+    def _window_parts(self, min_x, max_x, min_z, max_z, steps, road_tangent, prefab_tangent):
+        """Yields between slices of work and returns the ``LaneWindow``."""
         keys = _sectors_for_box(min_x - _ROAD_REACH_M, max_x + _ROAD_REACH_M,
                                 min_z - _ROAD_REACH_M, max_z + _ROAD_REACH_M)
         merged = SectorMesh()
@@ -177,24 +201,65 @@ class GameMap:
             part = self.sector(key)
             merged.nodes.update(part.nodes)
             merged.sectors += 1
+            yield
         for key in keys:
             part = self.sector(key)
-            for road in part.roads:
+            for i, road in enumerate(part.roads, 1):
                 if _road_reaches(merged.nodes, road, min_x, max_x, min_z, max_z):
                     merged.roads.append(road)
-            for item in part.prefabs:
+                if i % _SLICE_ITEMS == 0:
+                    yield
+            for i, item in enumerate(part.prefabs, 1):
                 if _prefab_reaches(merged.nodes, item, min_x, max_x, min_z, max_z):
                     merged.prefabs.append(item)
-        lines = lane_lines(
+                if i % _SLICE_ITEMS == 0:
+                    yield
+        lines: list[LaneLine] = []
+        for line in iter_lane_lines(
             merged, self._looks, self._prefabs, steps,
             road_tangent=road_tangent, prefab_tangent=prefab_tangent,
-        )
-        lanes = tuple(lane for line in lines if (lane := pack_lane(line)) is not None)
+        ):
+            lines.append(line)
+            if len(lines) % _SLICE_LINES == 0:
+                yield
+        packed: list[MapLane] = []
+        for i, line in enumerate(lines, 1):
+            lane = pack_lane(line)
+            if lane is not None:
+                packed.append(lane)
+            if i % _SLICE_ITEMS == 0:
+                yield
+        lanes = tuple(packed)
         if self._added:
+            yield
             lanes = drop_buried(lanes, self._added)
+        yield
         return LaneWindow(
             tuple(lines), tuple(keys), (min_x, max_x, min_z, max_z), lanes, LineIndex(lanes),
         )
+
+
+class WindowBuild:
+    """One window build. ``step`` works until a deadline and returns the window once it is done."""
+
+    def __init__(self, parts) -> None:
+        self._parts = parts
+        self.result: LaneWindow | None = None
+
+    def step(self, deadline: float) -> LaneWindow | None:
+        """At least one slice per call, so a late pass still moves the build on."""
+        while self.result is None:
+            try:
+                next(self._parts)
+            except StopIteration as done:
+                self.result = done.value
+                break
+            if time.monotonic() >= deadline:
+                break
+        return self.result
+
+    def finish(self) -> LaneWindow:
+        return self.step(math.inf)
 
 
 class GameMapOpener:

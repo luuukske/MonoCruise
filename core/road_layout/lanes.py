@@ -64,7 +64,23 @@ def lane_lines(
     ``road_tangent`` is ``chord``, ``stored`` (tangent = stored road length) or ``circle``.
     ``prefab_tangent`` is ``chord`` or ``circle``.
     """
-    lines: list[LaneLine] = []
+    return list(iter_lane_lines(
+        mesh, looks, prefabs, steps,
+        apply_shift=apply_shift, road_tangent=road_tangent, prefab_tangent=prefab_tangent,
+    ))
+
+
+def iter_lane_lines(
+    mesh: SectorMesh,
+    looks: dict[str, RoadLook],
+    prefabs: PrefabLibrary | None,
+    steps: int = 12,
+    *,
+    apply_shift: bool = True,
+    road_tangent: str = "stored",
+    prefab_tangent: str = "chord",
+):
+    """``lane_lines`` one line at a time, in the same order, so a caller can pause between lines."""
     joined_by_uid = _join_laterals(mesh, looks, apply_shift)
     for road in mesh.roads:
         start = mesh.nodes.get(road.start_uid)
@@ -83,7 +99,7 @@ def lane_lines(
         joined = joined_by_uid.get(road.uid)
         for index, lateral in enumerate(laterals):
             start_lat, end_lat = (joined[0][index], joined[1][index]) if joined else (lateral, lateral)
-            lines.append(LaneLine(
+            yield LaneLine(
                 "road",
                 road.look,
                 _lane_points(span, lateral, start_lat, end_lat),
@@ -93,9 +109,9 @@ def lane_lines(
                 len(laterals),
                 lateral,
                 travels[index],
-            ))
+            )
     if prefabs is None:
-        return lines
+        return
     for item in mesh.prefabs:
         if not item.node_uids:
             continue
@@ -118,7 +134,7 @@ def lane_lines(
                 _steps_for(chord, steps),
                 mag,
             )
-            lines.append(LaneLine(
+            yield LaneLine(
                 "prefab",
                 item.model,
                 tuple((x, y, z) for x, y, z, _fx, _fz in span),
@@ -128,8 +144,7 @@ def lane_lines(
                 len(desc.curves),
                 0.0,
                 1,
-            ))
-    return lines
+            )
 
 
 def _travels(look, count: int) -> list[int]:
