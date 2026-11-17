@@ -429,6 +429,22 @@ class AEBCalibration:
     lane_return_min_free_m: float = 1.2
     # A body the map holds on ego's own track counts as in ego's lane for the engage grade.
     lane_track_certain: bool = True
+    # Target follow (README): a mover following its own map lane is judged on the road
+    # path's prediction of it, joined to its lane over a short ramp.
+    target_follow_enabled: bool = True
+    target_follow_max_offset_m: float = 1.2
+    target_follow_max_heading_deg: float = 8.0
+    target_follow_heading_lead_s: float = 0.5
+    target_follow_max_lat_rate_ms: float = 1.0
+    target_follow_max_ego_drift_ms: float = 0.3
+    target_follow_max_ego_away_m: float = 0.8
+    target_follow_hold_s: float = 0.25
+    target_follow_tol_ms2: float = 0.5
+    target_follow_ramp_s: float = 0.5
+    target_follow_ramp_min_m: float = 5.0
+    target_follow_clear_m: float = 0.0
+    target_follow_max_branches: int = 12
+    target_follow_max_lat_ms2: float = 10.0
 
 
 DEFAULT = AEBCalibration()

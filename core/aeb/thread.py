@@ -10,7 +10,7 @@ import threading
 import time
 from collections import deque
 from dataclasses import dataclass, field, replace
-from functools import partial
+from functools import cache, partial
 
 from core.thread_management.base_thread import BaseThread, ThreadData
 from core.thread_management.registry import registry
@@ -892,6 +892,7 @@ class AEBThread(BaseThread):
         self._overlap_ghosts = OverlapGhostHold()
         self._lane_track = LaneTrackHold()
         self._lane_clear = LaneTrackHold()
+        self._target_follow = LaneTrackHold()
         # Rate-limit for gap/collision box debug (Settings.debug only).
         self._gap_debug_last_mono: float = 0.0
         self._gap_debug_was_engaged: bool = False
@@ -1334,6 +1335,10 @@ class AEBThread(BaseThread):
             bent = self._road_paths.bend_ego([ego_arc], ego_curvature)[0]
             if isinstance(bent, BentPath):
                 road_arc = bent
+        # Ego along every lane it could take, for target follow's verdict (README); built on
+        # first use, so a frame with no body reaching that stage pays nothing.
+        ego_follow_fn = (cache(partial(self._road_paths.follow_ego, ego_arc, cal))
+                         if cal.target_follow_enabled and self._road_paths.active else None)
         # Ego's place on its map lane, by position: the stages' second opinion (README lane track).
         lane_bound = run_collision and self._road_paths.bind_ego_lane(
             ego_x, ego_z, cal, ego_speed * _ego_fwd_x, ego_speed * _ego_fwd_z, ego_curvature,
@@ -1691,6 +1696,29 @@ class AEBThread(BaseThread):
                 lane_keep_fn = partial(
                     keeps_own_lane, self._road_paths, v, v_yaw_rad, travel_sign(v.speed, cal),
                     v_curvature, abs(ego_speed), ego_hw + v_hw, cal)
+            follow_fn, follow_s = None, 0.0
+            if (cal.target_follow_enabled and self._road_paths.active and all_target_arcs
+                    and abs_v_speed >= cal.sweep_pass_max_target_speed):
+                following = self._road_paths.target_following(
+                    v.id, vx, vz, all_target_arcs[0].curvature, abs_v_speed, cal)
+                follow_s = self._target_follow.step(v.id, following, now_mono)
+                # Ego on a known lane, not moving across toward the body and not pushed off
+                # centre away from it, as a driver evading it is (README target follow).
+                keep = self._road_paths.keep_frame
+                side = 1.0 if (-dx * ego_fwd_z + dz * ego_fwd_x) > 0.0 else -1.0
+                on_lane = (keep is not None and abs(keep[0]) <= cal.lane_track_max_offset_m
+                           and abs(keep[3]) <= math.radians(cal.lane_keep_max_ego_heading_deg))
+                # A body the map puts in ego's own lane is not one keeping to another.
+                in_lane = False
+                if on_lane:
+                    ksight = lane_sight(self._road_paths, v, v_yaw_rad, travel_sign(v.speed, cal),
+                                        keep=True)
+                    in_lane = ksight is not None and ksight.reach < cal.lane_half_width
+                if (following and on_lane and not in_lane
+                        and side * keep[1] <= cal.target_follow_max_ego_drift_ms
+                        and -side * keep[0] <= cal.target_follow_max_ego_away_m):
+                    follow_fn = partial(self._road_paths.follow_target, v.id, all_target_arcs, cal,
+                                        (ego_x, ego_z))
 
             # Build FilterContext and run pipeline
             ctx = FilterContext(
@@ -1732,11 +1760,16 @@ class AEBThread(BaseThread):
                 lane_track_s=lane_track_s,
                 lane_clear_s=lane_clear_s,
                 lane_keep_fn=lane_keep_fn,
+                follow_fn=follow_fn,
+                follow_s=follow_s,
+                ego_road_arc=road_arc,
+                ego_follow_fn=ego_follow_fn,
             )
             # A road-ahead target keeps today's evaluation whenever today, without the map lane
             # rules, would flag it; the road path only judges what today lets go (README).
             if v.id in road_ahead and not _plain_flags(
-                    replace(ctx, lane_track_s=0.0, lane_clear_s=0.0, lane_keep_fn=None),
+                    replace(ctx, lane_track_s=0.0, lane_clear_s=0.0, lane_keep_fn=None,
+                            follow_fn=None),
                     self._pipeline, cal, plain_set[0]):
                 ego_arc, ego_braked_arc, ego_evasion_left, ego_evasion_right = road_set
                 all_target_arcs, precomputed_cross_arcs = road_ahead[v.id]
@@ -2068,6 +2101,7 @@ class AEBThread(BaseThread):
         self._curvature_blender.prune(_active_vids)
         self._lane_track.prune(_active_vids)
         self._lane_clear.prune(_active_vids)
+        self._target_follow.prune(_active_vids)
         for vid in list(self._los_tracks.keys()):
             if vid not in _active_vids:
                 del self._los_tracks[vid]

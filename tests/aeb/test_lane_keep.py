@@ -31,7 +31,7 @@ _SHIFT_M = 9.0
 _RADIUS_M = 60.0
 _S_START = 60.0
 CAL = DEFAULT
-OFF = replace(DEFAULT, lane_keep_enabled=False)
+OFF = replace(DEFAULT, lane_keep_enabled=False, target_follow_enabled=False)
 
 logging.getLogger("ui.popup.popup_window").setLevel(logging.CRITICAL)
 

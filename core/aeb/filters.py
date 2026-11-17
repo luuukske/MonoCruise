@@ -352,6 +352,14 @@ class FilterContext:
     lane_clear_s: float = 0.0
     # () -> bool: this mover keeps its own map lane clear of ego's track. None without one.
     lane_keep_fn: object | None = None
+    # () -> branch arc lists: the mover predicted along its own lane (README target follow),
+    # and how long it has followed that lane. None and 0 without a map.
+    follow_fn: object | None = None
+    follow_s: float = 0.0
+    # Ego's road path this frame, or None, and () -> ego along every lane it could take
+    # (README target follow): a map-predicted body is judged against them too.
+    ego_road_arc: object | None = None
+    ego_follow_fn: object | None = None
 
     @property
     def reversing(self) -> bool:
@@ -1149,6 +1157,7 @@ def build_pipeline(cal: AEBCalibration) -> list:
     from core.aeb.avoidability import AvoidabilityGate
     from core.aeb.bend_chain import BendChainFilter
     from core.aeb.lane_keep import LaneKeepFilter
+    from core.aeb.target_follow import TargetFollowFilter
     from core.aeb.turn_completion import TightTurnFilter, TurnCompletionFilter
 
     return [
@@ -1170,5 +1179,6 @@ def build_pipeline(cal: AEBCalibration) -> list:
         TightTurnFilter(cal),
         EgoEvasionFilter(cal),
         LaneKeepFilter(cal),
+        TargetFollowFilter(cal),
     ]
 

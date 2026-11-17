@@ -12,12 +12,12 @@ from __future__ import annotations
 import math
 
 from core.aeb.calibration import AEBCalibration
-from core.radar.bent_path import bend_arc
+from core.radar.bent_path import BentPath, bend_arc
 from core.radar.traffic import ArcPath
 from core.road_layout.ego_route import route_behind
 from core.road_layout.road_bend import (
-    BendParams, _curve_heading, _frange, bend_profile, fast_offset, foot_kappa, lateral_offset,
-    rank_routes, road_curve,
+    BendParams, _arc_xy, _curve_heading, _curve_point, _frange, _held_offset, _smoothstep, _wrap,
+    bend_profile, fast_offset, foot_kappa, foot_offset, lateral_offset, rank_routes, road_curve,
 )
 
 _MIN_SPEED_MS = 3.0
@@ -108,6 +108,149 @@ class RoadPaths:
                 return arcs
         route = (getattr(self._snap, "target_routes", None) or {}).get(vid)
         return self._bend(vid, route, arcs, kappa)
+
+    def target_following(self, vid: int, x: float, z: float, kappa: float, speed: float,
+                         cal: AEBCalibration) -> bool:
+        """The mover sits on its own map lane, turned along it and turning as it does (README)."""
+        route = (getattr(self._snap, "target_routes", None) or {}).get(vid) if self._snap else None
+        if route is None or speed < _MIN_SPEED_MS or self._params is None or len(route.pts) < 2:
+            return False
+        if abs(route.offset_m) > cal.target_follow_max_offset_m:
+            return False
+        # Its turn against its lane's over the next stretch on any branch and the stretch
+        # behind, as lane keep reads it: a measured turn trails the lane (README lane keep).
+        reach = max(speed * cal.lane_keep_follow_s, cal.lane_keep_follow_min_m)
+        lead = max(speed * cal.target_follow_heading_lead_s, _FOLLOW_STEP_M)
+        ks: list[float] = []
+        lane_turn = 0.0
+        branches = [route.pts] + list(getattr(route, "alternatives", ()))
+        tol = cal.target_follow_tol_ms2 / max(speed * speed, 25.0)
+
+        def holds(turn: float) -> bool:
+            # Turning a little early or late reads as heading error where the lane turns: the
+            # lane's turn within the lead time is excused, the rest is a move across it (README).
+            excess = max(abs(route.heading_err_rad) - turn, 0.0)
+            return bool(ks) and (excess <= math.radians(cal.target_follow_max_heading_deg)
+                                 and speed * math.sin(excess) <= cal.target_follow_max_lat_rate_ms
+                                 and min(ks) - tol <= kappa <= max(ks) + tol)
+
+        # Other branches and the lane behind only widen both allowances: each is read only
+        # when what came before falls short, the vehicle's own lane first.
+        for pick, pts in enumerate(branches[:cal.target_follow_max_branches]):
+            curve = self._route_curve(route, pick, pts)
+            if curve is None:
+                continue
+            s_off = foot_offset(curve, x, z)
+            if abs(_held_offset(curve, s_off, (x, z, 1.0, 0.0))) > cal.target_follow_max_offset_m:
+                continue
+            ks.extend(curve.kappa_at(s_off + d) for d in _frange(0.0, reach, _GAP_STEP_M))
+            lane_turn = max(lane_turn, abs(_lane_turn(curve, s_off, lead)))
+            if holds(lane_turn):
+                return True
+        if not ks:
+            return False
+        back = self._behind_curve(route, x, z)
+        if back is not None:
+            # The lane behind runs backwards from the vehicle: its turns read mirrored.
+            ks.extend(-back.kappa_at(d) for d in _frange(0.0, back.length, _GAP_STEP_M))
+            lane_turn = max(lane_turn, abs(_lane_turn(back, 0.0, lead)))
+        return holds(lane_turn)
+
+    def _behind_curve(self, route, x: float, z: float):
+        """The vehicle's lane over the stretch just behind it, run backwards, or None."""
+        (ax, az), (bx, bz) = route.pts[0], route.pts[1]
+        hop = math.hypot(bx - ax, bz - az)
+        if hop <= 1e-6:
+            return None
+        behind = route_behind(getattr(self._snap, "window", None), route.lane_index, x, z,
+                              (bx - ax) / hop, (bz - az) / hop, 2.0 * _RECENT_M)
+        return road_curve(behind) if len(behind) >= 2 else None
+
+    def follow_target(self, vid: int, arcs: list[ArcPath], cal: AEBCalibration,
+                      ego_xz: tuple[float, float] | None = None) -> list[list[ArcPath]] | None:
+        """The mover's arcs along every branch of its lane, joined by position (README target follow).
+
+        None when any branch cannot be followed: no verdict, the plain arcs stand.
+        """
+        route = (getattr(self._snap, "target_routes", None) or {}).get(vid) if self._snap else None
+        if route is None or not arcs or self._params is None:
+            return None
+        lead = arcs[0]
+        if lead.speed < _MIN_SPEED_MS or _reversing(lead):
+            return None
+        branches = [route.pts] + list(getattr(route, "alternatives", ()))
+        if len(branches) > cal.target_follow_max_branches:
+            return None
+        merge_pick = getattr(route, "merge_index", None)
+        merge_pick = None if merge_pick is None else merge_pick + 1
+        length = lead.arc_length + 10.0
+        ramp = max(cal.target_follow_ramp_min_m, lead.speed * cal.target_follow_ramp_s)
+        out: list[list[ArcPath]] = []
+        for pick, pts in enumerate(branches):
+            curve = self._route_curve(route, pick, pts)
+            if curve is None:
+                return None
+            s_off = foot_offset(curve, lead.start_x, lead.start_z)
+            pose = (lead.start_x, lead.start_z, lead.fwd_x, lead.fwd_z)
+            # An overlapping lane the vehicle is not on is not one of its branches.
+            if abs(_held_offset(curve, s_off, pose)) > cal.target_follow_max_offset_m:
+                continue
+            # Nor is one it could not drive at its speed (a prefab's U-turn curve).
+            if any(lead.speed * lead.speed * abs(curve.kappa_at(s_off + d)) > cal.target_follow_max_lat_ms2
+                   for d in _frange(0.0, min(length, curve.length - s_off), _GAP_STEP_M)):
+                continue
+            merge_s = getattr(route, "merge_s", None) if pick in (0, merge_pick) else None
+            drift = _lane_drift(curve, s_off, lead, cal)
+            # Only a move toward ego counts, as in lane keep: one away is no room to rely on.
+            if ego_xz is None:
+                drift = _NO_DRIFT
+            else:
+                ego_side = _held_offset(curve, foot_offset(curve, *ego_xz), (*ego_xz, 1.0, 0.0))
+                toward = ego_side - _held_offset(curve, s_off, (lead.start_x, lead.start_z, 1.0, 0.0))
+                if drift[0] * toward <= 0.0:
+                    drift = _NO_DRIFT
+            branch: list[ArcPath] = []
+            # Each body (tractor, trailers) joins the lane from where it is.
+            for arc in arcs:
+                path = _follow_path(curve, arc, length, ramp, merge_s, drift)
+                if path is None:
+                    return None
+                branch.append(path)
+            out.append(branch)
+        return out or None
+
+    def follow_ego(self, ego_arc: ArcPath, cal: AEBCalibration) -> list[ArcPath]:
+        """Ego along every lane of its route it could take, the way a target is followed (README).
+
+        Through a junction ego's branch is not known until it steers for it.
+        """
+        route = getattr(self._snap, "route", None) if self._snap is not None else None
+        if route is None or ego_arc.speed < 1e-3:
+            return []
+        branches = [route.pts] + list(getattr(route, "alternatives", ()))
+        length = ego_arc.arc_length + 10.0
+        ramp = max(cal.target_follow_ramp_min_m, ego_arc.speed * cal.target_follow_ramp_s)
+        pose = (ego_arc.start_x, ego_arc.start_z, ego_arc.fwd_x, ego_arc.fwd_z)
+        out: list[ArcPath] = []
+        for pick, pts in enumerate(branches[:cal.target_follow_max_branches]):
+            curve = self._route_curve(route, pick, pts)
+            if curve is None:
+                continue
+            s_off = foot_offset(curve, ego_arc.start_x, ego_arc.start_z)
+            if abs(_held_offset(curve, s_off, pose)) > cal.lane_track_max_offset_m:
+                continue
+            path = _follow_path(curve, ego_arc, length, ramp)
+            if path is not None:
+                out.append(path)
+        return out
+
+    def _route_curve(self, route, pick: int, pts):
+        ckey = (id(route), pick)
+        entry = self._curves.get(ckey)
+        if entry is None or entry[0] is not route:
+            entry = (route, road_curve(pts))
+            self._curves[ckey] = entry
+        return entry[1]
 
     def _bend(self, key, route, arcs: list[ArcPath], kappa: float) -> list[ArcPath]:
         if route is None or not arcs or self._params is None:
@@ -341,6 +484,118 @@ class RoadPaths:
             return False
         s, right = lateral_offset(curve, x, z)
         return 0.0 < s < curve.length and abs(right) <= half_width
+
+
+_FOLLOW_STEP_M = 2.0
+_NO_DRIFT = (0.0, 0.0)
+
+
+def _lane_turn(curve, s_offset: float, length: float) -> float:
+    """Heading change of ``curve`` over ``length`` metres from ``s_offset``, radians."""
+    end = min(s_offset + length, curve.length)
+    return sum(curve.kappa_at(s) * _FOLLOW_STEP_M
+               for s in _frange(s_offset + 0.5 * _FOLLOW_STEP_M, end, _FOLLOW_STEP_M))
+
+
+def _lane_drift(curve, s_offset: float, lead: ArcPath, cal: AEBCalibration) -> tuple[float, float]:
+    """The vehicle's move across its lane, beyond the lane's own turn and lane keep's slack.
+
+    ``(metres right per metre of travel, metres it lasts)``: lane keep's 1.5 s horizon.
+    """
+    h = _curve_heading(curve, s_offset)
+    if h is None or lead.speed < 1e-3:
+        return _NO_DRIFT
+    # Lane's right-hand normal is (-sin h, cos h) in the curve's atan2(dz, dx) convention.
+    across = lead.fwd_x * -math.sin(h) + lead.fwd_z * math.cos(h)
+    excused = abs(_lane_turn(curve, s_offset, max(lead.speed * cal.target_follow_heading_lead_s,
+                                                  _FOLLOW_STEP_M)))
+    excused = math.sin(min(excused + math.radians(cal.lane_keep_heading_slack_deg), math.pi / 2))
+    rate = math.copysign(max(abs(across) - excused, 0.0), across)
+    return rate, lead.speed * cal.lane_keep_horizon_s
+
+
+def _follow_points(curve, s_offset: float, pose, kappa_now: float, length: float,
+                   ramp: float, merge_s: float | None = None,
+                   drift: tuple[float, float] = (0.0, 0.0)) -> list[tuple[float, float]]:
+    """World points every 2 m from the vehicle onto its lane at the offset it holds (README).
+
+    ``drift`` (metres right per metre of travel, metres of travel it lasts) carries a move
+    across the lane on, as lane keep counts it.
+    """
+    x0, z0, fx, fz = pose
+    rx, rz = -fz, fx
+    held0 = _held_offset(curve, s_offset, pose)
+    pts = []
+    s = 0.0
+    while s <= length + _FOLLOW_STEP_M + 1e-9 and s_offset + s <= curve.length:
+        lp = _curve_point(curve, s_offset + s)
+        lh = _curve_heading(curve, s_offset + s)
+        if lp is None or lh is None:
+            break
+        held = held0 * (1.0 - _smoothstep(s / merge_s)) if merge_s else held0
+        held += drift[0] * min(s, drift[1])
+        wx = lp[0] - held * math.sin(lh) - x0
+        wz = lp[1] + held * math.cos(lh) - z0
+        lx, ly = wx * fx + wz * fz, wx * rx + wz * rz
+        ax, ay = _arc_xy(kappa_now, s)
+        g = _smoothstep(s / ramp) if ramp > 0.0 else 1.0
+        px, py = ax + g * (lx - ax), ay + g * (ly - ay)
+        pts.append((x0 + px * fx + py * rx, z0 + px * fz + py * rz))
+        s += _FOLLOW_STEP_M
+    return pts
+
+
+def _follow_path(curve, arc: ArcPath, length: float, ramp: float,
+                 merge_s: float | None = None,
+                 drift: tuple[float, float] = (0.0, 0.0)) -> BentPath | None:
+    """``arc`` joining its lane from where its body is (README target follow), or None.
+
+    The path is the points themselves, not a curvature profile: integrating one on the
+    path's own grid put a 10 m radius prefab turn up to 0.9 m off its lane.
+    """
+    pose = (arc.start_x, arc.start_z, arc.fwd_x, arc.fwd_z)
+    pts = _follow_points(curve, foot_offset(curve, arc.start_x, arc.start_z), pose,
+                         arc.curvature, length, ramp, merge_s, drift)
+    if len(pts) < 3:
+        return None
+    path = BentPath(
+        start_x=arc.start_x, start_z=arc.start_z, yaw_rad=arc.yaw_rad, speed=arc.speed,
+        curvature=arc.curvature, half_width=arc.half_width, horizon=arc.horizon,
+        decel=arc.decel, accel=arc.accel, fwd_len=arc.fwd_len, back_len=arc.back_len,
+        parallel_margin_scale=arc.parallel_margin_scale,
+        kappa_s=(0.0,), kappa_k=(arc.curvature,),
+    ).build()
+    n, ds = len(path._xs), path._ds
+    cum = [0.0]
+    for (ax, az), (bx, bz) in zip(pts, pts[1:]):
+        cum.append(cum[-1] + math.hypot(bx - ax, bz - az))
+    xs, zs = [], []
+    j = 0
+    for k in range(n):
+        d = k * ds
+        while j < len(pts) - 2 and cum[j + 1] < d:
+            j += 1
+        seg = max(cum[j + 1] - cum[j], 1e-9)
+        f = (d - cum[j]) / seg
+        (ax, az), (bx, bz) = pts[j], pts[j + 1]
+        xs.append(ax + f * (bx - ax))
+        zs.append(az + f * (bz - az))
+    # Bodies point along the motion here, not the §8 mirror: a new consumer, nothing tuned on it.
+    body = arc.yaw_rad - math.atan2(-arc.fwd_x, -arc.fwd_z)
+    hs: list[float] = []
+    h_prev = None
+    for k in range(n):
+        a, b = max(k - 1, 0), min(k + 1, n - 1)
+        if k == 0 or b == a:
+            h = math.atan2(-arc.fwd_x, -arc.fwd_z)
+        else:
+            h = math.atan2(-(xs[b] - xs[a]), -(zs[b] - zs[a]))
+        if h_prev is not None:
+            h = h_prev + _wrap(h - h_prev)
+        h_prev = h
+        hs.append(h + body)
+    path._xs, path._zs, path._hs = xs, zs, hs
+    return path
 
 
 def _frame(curve, reach: float, x: float, z: float, vel_x: float, vel_z: float, kappa: float = 0.0):

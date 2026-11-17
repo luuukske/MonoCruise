@@ -303,6 +303,7 @@ pass, the vehicle enters collision evaluation.
 | `TightTurnFilter` | Walking-pace turn (radius 10 m or less) whose arc wraps onto a body the measured line is not closing on |
 | `EgoEvasionFilter` | Ego can steer around target within 0.08 g (runs for `Lane.EGO` too) |
 | `LaneKeepFilter` | Map only: a mover following its own map lane, whose lane stays clear of ego's track (Map lane rules) |
+| `TargetFollowFilter` | Map only: a mover following its own map lane, judged on its lane-following path against ego's corridor (Target follow) |
 
 `OutOfLaneParallelFilter`, `SweepPassFilter`, both corner-entry stages and
 `BendChainFilter` run inside `AvoidabilityGate` (see "Avoidability gate" below).
@@ -1131,6 +1132,167 @@ computed from separately sorted samples, not paired timings. Lane keep itself
 is lazy: it runs only for movers every other stage let through.
 
 Tests: `tests/aeb/test_lane_track.py`, `tests/aeb/test_lane_keep.py`.
+
+### Target follow
+
+Lane keep and the turn completion stage each carry their own picture of where a
+mover goes: lane keep the distance from its lane polyline to ego's track (only
+while ego's own lane is known and ego is centred in it), turn completion a turn
+held at the measured curvature. Target follow asks `RoadPaths`, the module that
+builds ego's road path, for one prediction of the mover along its own map lane.
+`TargetFollowFilter` is the last stage, so it only judges what every other stage
+let through, never a latched or crash-confirmed id, and with no map or
+`target_follow_enabled` off it never acts. On by default since Lukas checked every
+change by hand (below).
+
+**Following** (`RoadPaths.target_following`, the tipping point). The mover is
+within `target_follow_max_offset_m` (1.2 m) of its lane; its measured turn lies
+inside the curvature of any of its branches over the next second and of the
+15 m behind, give or take `target_follow_tol_ms2` (0.5 m/s^2, lane keep's
+bend tolerance); and its heading error, less what the lane itself turns within
+`target_follow_heading_lead_s` (0.5 s) ahead or behind, is under
+`target_follow_max_heading_deg` (8) and moves it across at no more than
+`target_follow_max_lat_rate_ms` (1 m/s). The lane-turn allowance is what lets a
+car turning slightly early or late through a 10 m prefab turn count (`12dc00f0`
+read 9.5 degrees there); the rate bound is what stops it excusing a swerve on a
+gentle bend: without it the slip-road truck of `test_lane_keep` that leaves its
+lane at 12 degrees was braked for 0.33 s later than lane keep alone. Held
+`target_follow_hold_s` (0.25 s) unbroken.
+
+**The path** (`RoadPaths.follow_target`). Every branch of the mover's route,
+skipping overlapping lanes it is not on (more than the offset bar away) and
+branches it could not drive at its speed (`target_follow_max_lat_ms2`, 10:
+prefab U-turn curves of 3 to 6 m radius read 14 to 26 m/s^2 at 9 m/s). On each,
+each body (tractor and trailers) leaves its own pose on its own curvature and
+joins the lane at the offset it holds, by position, over `target_follow_ramp_s`
+(0.5 s, at least `target_follow_ramp_min_m`, 5 m), faded onto the merged lane by
+`merge_s` as on the road path. A body moving across its lane keeps moving: its
+heading against the lane, beyond what the lane turns within the lead time and
+lane keep's 1 degree slack, carries on for lane keep's 1.5 s (`_lane_drift`).
+Without it a TruckersMP truck sliding toward ego in its blind spot (`f9f9b2eb`, 5
+degrees, offset 0.9 to 1.2 m) passed the following test each tick and was
+snapped back onto its lane. The path is those points, resampled onto the
+`BentPath` grid, not a curvature profile: integrating one put a 10 m radius turn
+0.9 m off its lane after 26 m; the points stay within 0.3 m. Bodies on it point
+along the motion, not the §8 mirror: it is a new consumer and nothing was tuned
+on the mirror here, while in a tight turn the mirror swings a car's length
+across the corridor. More than `target_follow_max_branches` (12), or any branch
+it cannot build, gives no verdict.
+
+**The verdict is spatial.** The mover is dropped when no body on any branch
+comes within ego's corridor (ego and body half widths, `corridor_margin`, plus
+`target_follow_clear_m`, 0) anywhere along ego's reach, on ego's plain arc or on
+its road path when it has one. Where, not when: a time-aligned miss on bare
+bodies dropped a crosser whose lane does cross ego's path because the timing
+worked out (`affb36ba`), the uncertainty the crosser halo exists for. Turn
+completion and lane keep judge by place for the same reason.
+
+TruckersMP vehicles are judged the same way, by decision (Lukas, 2026-11-16): a
+player who keeps the lane is filtered like AI, one who does not fails the
+following test. Excluding them was tried; the two TMP positives it protected
+(`652e5aa8`, `f9f9b2eb`) turned out to be gaps in the general guards, fixed below.
+
+**Guards.** The first full run with a time-aligned verdict and none of these
+cleared 42 false brakes and 3 false warnings but lost 29 true positives, delayed
+2 and turned 2 late ones into misses, the same trade as the plain lane keep
+above. Each guard answers one class of them:
+
+| Guard | Class it keeps |
+|---|---|
+| Ego's road path checked as well as the plain arc | A lead in ego's lane on a bend: predicted along the lane it parted from ego's straight plain arc 50 m out (`6b1d35ec`) |
+| Ego along every lane of its route it could take (`RoadPaths.follow_ego`, the same follow path) checked too | At a junction ego's branch is unknown until it steers: ego about to turn left across an oncoming car (`a839180c`), into a 90 degree bend at 28 km/h (`6260049a` partly) |
+| No verdict for a body in ego's lane band on either path (`ctx.lane == EGO` or any body sample) | Leads in ego's own lane, cut-ins already in it |
+| Ego on its lane frame (within `lane_track_max_offset_m`, 2.5 m, and lane keep's 20 degrees), not moving across toward the body faster than `target_follow_max_ego_drift_ms` (0.3 m/s, lane keep's) | Ego changing lanes into a vehicle that keeps its own (`b5880bda` at 3.2 m/s); ego 33 degrees off the junction lane it was read on (`f9f9b2eb`) |
+| No verdict for a body the map puts in ego's lane (its nearest end within `lane_half_width` of ego's own track in the lane frame) | A slow truck dead ahead in ego's lane on a gentle bend while ego had no road path, so the plain arc read it outside (`652e5aa8`) |
+| Ego not off centre away from the body by more than `target_follow_max_ego_away_m` (0.8 m) | A driver evading it (`72eb3a97`); every positive at lane keep's 1.0 m ego-offset cliff had ego off centre away from the target. Off centre toward it is allowed: the room is measured from ego's own track (`f0dca9e1`, 1.4 m toward a merger) |
+| Not `head_on` | Oncoming traffic that `OppositeLaneFilter`'s measured-closing rescue kept |
+
+Requiring ego's road path (ego following its lane) for any verdict was tried for
+`a839180c` and dropped: at 96 km/h `f0dca9e1`'s ego, 1.4 m off centre, has no road
+path. Following ego along every branch fixed it instead.
+
+**Distances off the arc itself.** The corridor test and the lane-band check read
+ego's plain arc as a path (`bend_arc` at its own curvature), not through
+`project_to_ego_arc`, whose `max(d_arc, d_straight)` guard exists to keep ego's
+steering from pulling oncoming cars into the ego bucket. Here it hid ego curving
+into the next lane: at 90 km/h `c0686b57`'s ego curved left at about 10 m/s^2 while
+the road bent right, toward a slower car in the left lane; a point on ego's arc
+24 m out read 4.55 m off it.
+
+**Measured** (2026-11-16, map corpus, against `latest_tune_base_full.json`, brake
+onsets compared as well as verdicts: the geometry scorer counts a positive whose
+brake starts later as a hit). The last full run (TruckersMP included, guards up to
+the map-lane row) changed 39 clips; each later fix only keeps more, so the 255
+clips any run had changed cover the current version. On them: 10 false brakes
+cleared (`f0dca9e1`, `12dc00f0`, TMP `d7cb4f5e` among them), none added;
+`09366bc8` brakes 4.48 to 4.69 s (a roundabout entry Lukas judged braked early
+anyway); `df0e9ffd` loses a stray brake 1.8 s before its window, braking in it
+neither way; `6260049a` is relabelled ignore. On the 487 unlabelled local clips on
+the map, three change: `69c3b696` and `c8861dfa` lose a brake, TMP `0360826c`
+brakes 4.56 to 4.77 s. Checked by hand (Lukas, 2026-11-16): every change is right.
+`69c3b696` and `c8861dfa` were early or false brakes (labelled fp); `0360826c` is a
+merging lane that turns into ego's, its first brake false while the car still
+followed its lane; `09366bc8` braked too early anyway; `df0e9ffd`'s early brake is
+false; TMP `d7cb4f5e` clearly follows its lane. A minimum reach of 20 m for slow ego
+was tried for `69c3b696` and dropped: it brought both fp brakes back. Switched on
+by default after that check (Lukas, 2026-11-16).
+
+**Ego's front counts.** The corridor runs from ego's path point to the end of its
+arc plus ego's front overhang (`fwd_len`), as the hit test's capsule does. Ending
+it at the arc's end missed a crosser just in front of a slow ego's bumper:
+`5118b3f6` (ego pulling out left at 15 km/h on the gas, a car crossing 10 m ahead at
+50 km/h, Lukas: a clear true positive) braked 0.48 s later and half as long. The
+price, by decision: `69c3b696` (driver already at full brake), `c8861dfa` and
+`4bf4c6af` brake again, as without target follow. Behind the path point is left
+out: braking cannot help a conflict there.
+
+**Measured** (2026-11-17). Full map run on the defaults before the front fix
+(`latest_tf_final_full.json`, 4385 shared clips): -29.00, 10 false brakes cleared,
+nothing worse, positives changed only `09366bc8` and `df0e9ffd`. With the front fix,
+off against on over the 323 clips any run or review had touched (the fix only
+keeps more, so they cover it): no positive lost or later except `0360826c` (4.56 to
+4.77 s, before its window; its first brake false, by review) and `df0e9ffd` (stray
+brake gone); 14 labelled false brakes cleared entirely (`f0dca9e1`, `12dc00f0`, TMP
+`d7cb4f5e`, `326d3686`, `96759a57`, `8f11e0e0`, `01f87a22`, `f1c06b45` among them),
+7 reduced (`133eb85a`, `8f502aaa`, `22e2edf8`, all false the whole clip). On the
+unlabelled contributed store (7151 clips on the local map) the version before the
+front fix changed 65, listed in
+`tools/aeb_corpus_run/corpus_agent_improvement/ids_target_follow_review.txt`; Lukas
+rated the largest (all of them false brakes but `5118b3f6`, fixed above, `b84716ac`
+a bad capture and `22e2edf8` unclear). No map: the standard corpus replay without a
+map is identical on all 4386 shared clips.
+
+**Joining its lane, tried and dropped** (2026-11-17). `3f41d3fe` (labelled fp): a car
+pulling out of a side road ahead-right, still turning into the next lane (curvature
+0.076, 10 degrees off it), is held on that turn by its plain arc into ego's lane,
+counted as following only from 4.48 s, and latched when AEB engages at 4.66 s, before
+the 0.25 s hold ends. Counting a car turning back into line within 0.5 m of a move as
+following, with its predicted move across stopping once aligned, made it count from
+4.1 s, but the brake stayed: pointing 10 to 14 degrees toward ego while it straightens,
+and with ego drifting toward it at up to 0.8 m/s, its path comes within the corridor
+margin of ego's (2.1 to 3.1 m against a 2.68 m bar). On the full map run it cleared no
+new false brake and moved TMP positive `e41293d2` 0.04 s later, so it is out. What is
+left there is margin, not prediction.
+
+**TruckersMP weaves, tried and dropped** (2026-11-17). `e41293d2` (TMP, labelled tp)
+warns at 2.94 s and brakes in the warm-up for vid 117, a car alongside in the next lane
+that keeps it (0.1 m off, under 1 degree): its 0.4 to 0.6 s lane-keeping weaves read
+0.002 to 0.0035 1/m from both curvature sources, the arc holds that for 3 s (7 to 10 m
+of drift into ego's lane) and the following test reads it as 1 to 2.7 m/s^2 of turn
+out of its lane. The radar's 25-sample fit halves the spikes but stays past the
+tolerance. The triggers date from `a3392d2` (the TMP speed floor removal), not from
+this stage. Counting a car within 0.5 m and 2 degrees of its lane as following through
+a curvature spike, with the turn carried 0.5 s, removed the early triggers but cleared
+no new false brake and lost `498282fa` (tp to miss) and `993fdee4` (tp to late, already
+lane keep's heading-slack cliff): a cut-in starts looking exactly like that. What tells
+a weave apart is time (it reverses within a second), which no single-frame test sees.
+
+**Cost** (12 map clips, 3716 ticks, two replays per mode, paired per tick): +0.55 ms
+p50, +3.7 ms p90, +31 ms worst, on 3.8 ms / 6.1 ms. Ego's every-lane paths are built
+only when a body reaches the stage, each target branch skips ego paths whose box
+cannot reach it, and the following test reads other branches and the lane behind
+only when the vehicle's own lane falls short; the three cut the first measurement
+(+1.0 / +7.9 / +72 ms) with every decision unchanged on the 323 clips. Tests: `tests/aeb/test_target_follow.py`.
 
 ### `BendChainFilter`
 
@@ -2676,6 +2838,34 @@ the plain arcs until the overlay is ready. No installed map, or a drive that
 does not sit on one, leaves the plain view and says so next to the checkbox.
 The overlay is draw-only: recorded decisions and the label form do not change.
 The review scene never reads the live map worker.
+
+### Current decisions
+
+The scene, the decision strip and the readout show what the build that recorded
+the clip decided. A clip from before a filter change keeps braking there however
+the filter changed, and on a v1.2 build the map lane rules act only with a map,
+which the plain replay and the standard corpus score leave out. The Now checkbox
+(off by default) re-runs this working tree's AEB over the clip on its own thread
+(`tools/aeb_review_now.py`, `run_headless(..., keep_snapshots=True)`) and shows
+that run's snapshots and decisions instead: arcs, colliding and suppressed ids,
+state, ttc. With Map on the re-run uses the local game map, as live AEB does; the
+label next to the checkbox says which (`now, ets2`, `now, no map match`). The C
+window's now row follows the same toggles; its rec row stays the recording.
+
+The proposal (W) and the landing frame are read off the recording only: a window
+copied from the current code's reaction is still AEB judging itself.
+
+The hit cross means two things. Recorded, it marks the colliding vehicle where it is
+now: clips do not store the predicted hit point, so the replay puts it on the nearest
+colliding body. With Now it is AEB's own predicted contact point, where ego and the
+body meet at the time to collision along their paths, which can sit well ahead of the
+vehicle (`35ead5ef` at 4.66 s: the car 9.7 m ahead, the hit 25.7 m ahead on ego's
+left-bending path, the same 1.95 s to collision).
+
+Measured on the clips that prompted it (2026-11-16): `ea1ca85d` and `2f0c1e39`
+brake without the map and are silent with it (lane keep and lane return, which
+no recording had live); `41f16dd7` is silent either way; `f0dca9e1` and
+`12dc00f0` still brake with the map.
 
 ### The clip list
 
