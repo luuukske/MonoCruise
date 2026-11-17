@@ -478,6 +478,64 @@ def test_map_worker_replays_through_the_clip_map(qapp, monkeypatch):
     assert got[0][1][1]
 
 
+def test_now_frames_take_the_rerun_decision_and_keep_the_recording_elsewhere():
+    from types import SimpleNamespace
+
+    from core.aeb.clip_eval import EvalTick
+    from tools.aeb_review_now import now_frames
+
+    recorded = [_frame(0.0, brake=True, ttc=1.0), _frame(0.1, brake=True, ttc=1.0)]
+    snap = SimpleNamespace(suppression_reasons={7: [SimpleNamespace(reason="LaneKeepFilter")]})
+    tick = EvalTick(t_rel=0.0, t_mono=0.0, aeb_warn=False, aeb_brake=False, engaged=False,
+                    target_decel_ms2=0.0, required_decel_ms2=0.0, time_to_brake=1e9,
+                    time_to_collision=1e9, suppressed_ids={7}, snapshot=snap)
+    out = now_frames(recorded, [tick])
+    assert out[0].live_aeb.aeb_brake is False
+    assert out[0].snapshot is snap
+    assert out[0].live_aeb.suppression_reasons == {"7": ["LaneKeepFilter"]}
+    assert out[1] is recorded[1]
+    # The proposal is read off the recording, never off the re-run.
+    assert recorded_band(recorded) == (0.0, 0.1)
+
+
+def test_now_toggle_shows_the_rerun_and_falls_back_to_the_recording(tmp_path, qapp):
+    win, store, path = _seeded_window(tmp_path, qapp)
+    try:
+        clip = store.load(path)
+        win._loaded = Loaded(
+            clip=clip, frames=win._frames, proposal=win._proposal, action_idx=0,
+        )
+        win._clip = clip
+        kicked = []
+        win._kick_now = lambda p, use_map: kicked.append((p, use_map))
+        win._now_chk.setChecked(True)
+        assert kicked == [(str(path), False)]
+        assert win._now_lbl.text() == "running..."
+
+        rerun = [replace(f, live_aeb=replace(f.live_aeb, aeb_brake=False, aeb_warn=False))
+                 for f in win._loaded.frames]
+        win._on_now(str(path), False, ("now", rerun))
+        assert win._frames is rerun
+        assert win._now_lbl.text() == "now"
+        assert win._decision_lbl.text().startswith("now:")
+
+        # Map on asks for the re-run on the map; until it lands the recording shows.
+        win._kick_map = lambda p: None
+        win._map_chk.setChecked(True)
+        assert kicked[-1] == (str(path), True)
+        assert win._frames is not rerun
+        assert win._decision_lbl.text().startswith("recorded:")
+
+        win._map_chk.setChecked(False)
+        assert win._frames is rerun
+        win._now_chk.setChecked(False)
+        assert win._frames is win._loaded.frames
+        assert win._decision_lbl.text().startswith("recorded:")
+        assert win._proposal == recorded_band(win._loaded.frames)
+    finally:
+        win.close()
+
+
 def test_map_worker_skips_replay_when_the_drive_matches_nothing(qapp, monkeypatch):
     class Fake:
         game = None

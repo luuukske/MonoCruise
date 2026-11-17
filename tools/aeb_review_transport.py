@@ -65,8 +65,9 @@ class ReviewTransport:
         state = "BRAKE" if la.aeb_brake else ("WARN" if la.aeb_warn else "standby")
         in_win = self._window is not None and self._window[0] <= f.t_rel <= self._window[1]
         truth = "should-trigger" if in_win else ("must-not" if self._window is None else "outside")
+        source = getattr(self, "_decision_source", "recorded")
         self._decision_lbl.setText(
-            f"recorded: {state}  demand={f.raw_target_ms2:.1f}"
+            f"{source}: {state}  demand={f.raw_target_ms2:.1f}"
             f" (sent {la.target_decel_ms2:.1f})  ttc={_fmt(la.time_to_collision)}"
             f"  |  truth: {truth}"
         )

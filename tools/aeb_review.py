@@ -24,6 +24,7 @@ from core.aeb.clip_store import ClipInfo, ClipStore
 from tools.aeb_fetch import safe_pull_root
 from tools.aeb_review_claims import claims_setup
 from tools.aeb_review_map import map_toggle
+from tools.aeb_review_now import now_toggle
 from tools.aeb_review_remote import ReviewClient, review_stores
 from tools.aeb_review_sync import import_labels, on_pulled, start as start_sync, stop_sync, sync_setup
 from tools.aeb_review_transport import ReviewTransport
@@ -48,6 +49,7 @@ class ReviewWindow(ReviewTransport, QMainWindow):
     scan_requested = Signal(object)
     pull_requested = Signal(object)
     map_requested = Signal(str, object, object)
+    now_requested = Signal(str, object, object, bool)
     remote_requested = Signal(str, object)
 
     def __init__(self, stores: ClipStore | list[ClipStore], *,
@@ -166,6 +168,7 @@ class ReviewWindow(ReviewTransport, QMainWindow):
         self._veh_paths.toggled.connect(self._scene.set_vehicle_paths)
         transport.addWidget(self._veh_paths)
         transport.addWidget(map_toggle(self))
+        transport.addWidget(now_toggle(self))
         transport.addSpacing(12)
         transport.addWidget(QLabel("F1 keys"))
         transport.addStretch(1)
@@ -544,6 +547,7 @@ class ReviewWindow(ReviewTransport, QMainWindow):
         self._refresh()
         self._prefetch()
         self._note_map()
+        self._note_now()
 
     # Label form
 
@@ -699,8 +703,12 @@ class ReviewWindow(ReviewTransport, QMainWindow):
         """Hand the chart window the decoded clip, and ask for the re-run band."""
         if self._charts is None or self._loaded is None:
             return
-        self._charts.show_clip(self._loaded, self._frames, self._window,
+        # The rec row stays the recording; the now row follows the Now and Map toggles.
+        self._charts.show_clip(self._loaded, self._loaded.frames, self._window,
                                self._target_vid, self._cur_t())
+        now = self._now_track()
+        if now is not None:
+            self._charts.set_replayed(now)
         if self._loaded.trace is None:
             self.trace_requested.emit(str(self._path), self._loaded.clip, self._loaded.stream)
         if self._loaded.evaluated is None:
@@ -712,7 +720,8 @@ class ReviewWindow(ReviewTransport, QMainWindow):
         cached = self._cache.get(path)
         if cached is not None:
             cached.evaluated = track or []
-        if path == str(self._path) and self._charts is not None:
+        if (path == str(self._path) and self._charts is not None
+                and self._now_track() is None):
             self._charts.set_replayed(track or [])
 
     def closeEvent(self, event) -> None:
@@ -722,6 +731,7 @@ class ReviewWindow(ReviewTransport, QMainWindow):
             self._charts = None
         stop_review_workers(self)
         self._stop_map()
+        self._stop_now()
         self._stop_claims()
         stop_sync(self)
         super().closeEvent(event)

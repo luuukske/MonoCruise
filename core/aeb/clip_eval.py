@@ -44,6 +44,8 @@ class EvalTick:
     clearance_clears_ids: set = field(default_factory=set)
     geom_engage: bool = False
     engage_eligible_ids: set = field(default_factory=set)
+    # The whole AEBSnapshot, kept only on request (review tool's current-code view).
+    snapshot: object = None
 
 
 class _NoSound:
@@ -134,11 +136,14 @@ def exit_ghosts_by_frame(clip: Clip, veh_by_t, ego_by_t, frame_t) -> dict[float,
 
 
 def run_headless(clip: Clip, cal: AEBCalibration = _CAL_DEFAULT,
-                 warm: bool = True, stream=None) -> list[EvalTick]:
+                 warm: bool = True, stream=None, map_provider=None,
+                 keep_snapshots: bool = False) -> list[EvalTick]:
     """Re-run the AEB pipeline over the clip under ``cal``; one EvalTick per tick.
 
     ``stream`` accepts an existing ``decode_radar_stream`` result so a caller that
-    already decoded the clip does not pay for it twice.
+    already decoded the clip does not pay for it twice. ``map_provider`` replays on
+    a map without touching ``REPLAY_MAP_FACTORY``; ``keep_snapshots`` keeps each tick's
+    AEBSnapshot on its EvalTick.
     """
     veh_by_t, ego_by_t, frame_t, off_by_t = (
         stream if stream is not None else decode_radar_stream(clip)
@@ -155,7 +160,8 @@ def run_headless(clip: Clip, cal: AEBCalibration = _CAL_DEFAULT,
     t._read_ego_geometry = lambda: geometry
     if warm:
         _apply_warm_state(t, clip.metadata.aeb_warm_state)
-    map_provider = REPLAY_MAP_FACTORY(clip) if REPLAY_MAP_FACTORY is not None else None
+    if map_provider is None and REPLAY_MAP_FACTORY is not None:
+        map_provider = REPLAY_MAP_FACTORY(clip)
 
     ticks = sorted(clip.aeb_ticks, key=lambda x: x.t_mono)
     all_t = [f.t_mono for f in clip.radar_frames] + [tk.t_mono for tk in ticks]
@@ -220,6 +226,7 @@ def run_headless(clip: Clip, cal: AEBCalibration = _CAL_DEFAULT,
             clearance_clears_ids=set(snap_out.clearance_clears_ids),
             geom_engage=bool(snap_out.geom_engage),
             engage_eligible_ids=set(snap_out.engage_eligible_ids),
+            snapshot=snap_out if keep_snapshots else None,
         ))
     return out
 

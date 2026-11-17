@@ -67,6 +67,7 @@ def map_toggle(win) -> QWidget:
     win._stop_map = lambda: stop_map(win)
     win._kick_map = lambda path: kick_map(win, path)
     win._on_mapped = lambda path, result: on_mapped(win, path, result)
+    win._refresh_frames = lambda: refresh_frames(win)
 
     box = QWidget()
     row = QHBoxLayout(box)
@@ -107,13 +108,19 @@ def note_shown(win) -> None:
 
 def toggle_map(win, on: bool) -> None:
     win._map_on = bool(on)
+    # The current-code view re-runs on or off the map with it.
+    note_now = getattr(win, "_note_now", None)
     if not win._map_on:
         win._scene.map_window = None
         win._map_lbl.setText("")
         if win._loaded is not None:
             swap_frames(win, win._loaded.frames)
+        if note_now is not None:
+            note_now()
         return
     ensure_map(win)
+    if note_now is not None:
+        note_now()
 
 
 def ensure_map(win) -> None:
@@ -141,11 +148,24 @@ def kick_map(win, path: str) -> None:
 
 
 def swap_frames(win, frames: list) -> None:
+    now = getattr(win, "_now_frames", None)
+    if now is not None:
+        frames = now(frames)
     t = win._frames[win._idx].t_rel if win._frames else 0.0
     win._frames = frames
     if frames:
         win._idx = min(range(len(frames)), key=lambda i: abs(frames[i].t_rel - t))
+        win._strip.set_frames(frames, frames[-1].t_rel)
     win._refresh()
+
+
+def refresh_frames(win) -> None:
+    """Show the map's frames when Map is on and they are ready, else the decoded ones."""
+    path = win._path
+    if win._map_on and path in win._map_cache:
+        apply_cached(win, path)
+    elif win._loaded is not None:
+        swap_frames(win, win._loaded.frames)
 
 
 def apply_cached(win, path: str) -> None:
