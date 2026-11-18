@@ -5,15 +5,19 @@ from __future__ import annotations
 
 import math
 import random
+from collections import deque
 
 import pytest
 
+from core.cruise_control_thread import acc_controller, approach_profile
 from core.cruise_control_thread.acc_controller import (
     T_HEADWAY_BY_LEVEL_S, AdaptiveCruiseController, _LeadSnapshot,
 )
 from core.cruise_control_thread.approach_profile import (
     approach_band, brake_follow_limit, slew_delta,
 )
+from core.cruise_control_thread.blinker_arbitration import BlinkerState
+from core.radar.traffic import _smooth_vehicle_kinematics
 from core.settings import Settings
 
 DT = 1.0 / 60.0
@@ -87,6 +91,80 @@ def test_closing_on_a_braking_lead_is_not_braked_past_that_decel():
     assert brake_follow_limit(cfg, -5.0, lead, 22.0, 1.1, gap_excess_ms=3.0) == -5.0
     cfg.follow_share = 0.0
     assert brake_follow_limit(cfg, -5.0, lead, 22.0, 1.1, gap_excess_ms=0.0) == -5.0
+
+
+def test_the_follow_limit_is_for_a_braking_lead_only():
+    """A smoothed accel trailing off just below 0 is a lead that stopped braking, not one braking."""
+    cfg = _cfg()
+    for a_lead in (-0.01, -0.05, -0.3):
+        assert brake_follow_limit(cfg, -1.5, _lead(25.0, 18.0, a_lead), 22.0, 1.1,
+                                  gap_excess_ms=0.0) == -1.5
+    eased = brake_follow_limit(cfg, -1.5, _lead(25.0, 18.0, -0.45), 22.0, 1.1, gap_excess_ms=0.0)
+    full = -(cfg.approach_upper_gain * 0.45 + cfg.approach_upper_margin_ms2)
+    assert -1.5 < eased < full, "the gate fades in, it does not step"
+
+
+def _far_lead_short_slowdown(level, v0_kmh, monkeypatch, old_gate=False):
+    """Ego at 1.6x its wanted gap closing at 5 m/s, then the lead brakes 2.4 m/s^2 for 1 s and holds.
+
+    The lead is seen through the ACC radar chain. Returns the smallest gap as a share of the wanted."""
+    if old_gate:
+        monkeypatch.setattr(approach_profile, "FOLLOW_BRAKING_ZERO_MS2", 0.0)
+        monkeypatch.setattr(approach_profile, "FOLLOW_BRAKING_FULL_MS2", 0.0)
+    previous = Settings.instance().acc_gap_level
+    Settings.instance().acc_gap_level = level
+    try:
+        ctrl = AdaptiveCruiseController()
+        s0, t_h = ctrl.config.s0_m, T_HEADWAY_BY_LEVEL_S[level]
+        clock = [100.0]
+        monkeypatch.setattr(acc_controller.time, "monotonic", lambda: clock[0])
+        v_e = v0_kmh / 3.6
+        v_l, v_end = v_e - 5.0, v_e - 5.0 - 2.4
+        x_e, x_l, a_truck = 0.0, 1.6 * (s0 + v_e * t_h) + 5.0 * 2.0, 0.0
+        positions: deque[tuple[float, float]] = deque(maxlen=20)
+        chain = [None] * 7 + [False, 0.0]
+        seen, t, next_radar, worst = (v_l, 0.0), 0.0, 0.0, math.inf
+        while t < 20.0:
+            if t >= 2.0 and v_l > v_end:
+                v_l = max(v_end, v_l - 2.4 * DT)
+            x_l += v_l * DT
+            if t >= next_radar - 1e-9:
+                next_radar += 0.05
+                positions.append((t, x_l))
+                raw = v_l
+                if len(positions) >= 2:
+                    tm = sum(p[0] for p in positions) / len(positions)
+                    xm = sum(p[1] for p in positions) / len(positions)
+                    raw = (sum((p[0] - tm) * (p[1] - xm) for p in positions)
+                           / sum((p[0] - tm) ** 2 for p in positions))
+                out = _smooth_vehicle_kinematics(raw, raw, 100.0 + t, 0.05, *chain)
+                chain = [out[0], out[1], out[3], out[4], out[5], out[6], out[7], out[8], out[9]]
+                seen = (out[7], out[5])
+            lead = _LeadSnapshot(vid=1, dist_m=x_l - x_e, v_lead_ms=seen[0], a_lead_ms2=seen[1],
+                                 score=6.0)
+            monkeypatch.setattr(ctrl, "_read_acc_snapshot",
+                                lambda lead=lead: ([lead], None, BlinkerState()))
+            clock[0] += DT
+            cap = ctrl.accel_cap_ms2(v_e)
+            if t >= 2.0:
+                # Ego held its speed up to the lead's brake, so the onset state is exact.
+                a_truck += (min(cap, 1.0) - a_truck) * (1.0 - math.exp(-DT / 0.35))
+                v_e = max(0.0, v_e + a_truck * DT)
+                worst = min(worst, (x_l - x_e) / (s0 + v_e * t_h))
+            x_e += v_e * DT
+            t += DT
+        return worst
+    finally:
+        Settings.instance().acc_gap_level = previous
+
+
+@pytest.mark.parametrize("level, v0_kmh", [(3, 90.0), (2, 60.0)])
+def test_ego_keeps_its_gap_after_a_far_lead_slows_briefly(level, v0_kmh, monkeypatch):
+    """Card 152: the limit kept easing the brake on the decaying accel and ego settled at 0.7-0.8."""
+    new = _far_lead_short_slowdown(level, v0_kmh, monkeypatch)
+    old = _far_lead_short_slowdown(level, v0_kmh, monkeypatch, old_gate=True)
+    assert old < 0.85, "the fixture must reproduce ego settling inside its gap"
+    assert new > 0.9
 
 
 def test_a_matched_or_critical_brake_keeps_the_law():

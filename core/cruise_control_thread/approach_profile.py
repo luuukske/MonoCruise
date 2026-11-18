@@ -61,6 +61,10 @@ FOLLOW_TTC_FULL_S: float = 4.0
 FOLLOW_GAP_EXCESS_MS: float = 2.5
 # The most this may take off a too-hard brake. Releasing it fully made a hard stop late.
 FOLLOW_LIFT_MAX_MS2: float = 1.0
+# Only for a lead that is braking: none above the first decel (m/s^2), full past the second. The
+# smoothed accel trails off just below 0 for seconds after a brake and ego settled inside its gap.
+FOLLOW_BRAKING_ZERO_MS2: float = 0.3
+FOLLOW_BRAKING_FULL_MS2: float = 0.6
 
 
 def approach_band(
@@ -117,9 +121,10 @@ def brake_follow_limit(
     gap_excess_ms: float | None = None,
 ) -> float:
     """Raise a braking law that has run past the lead's decel while closing on it."""
-    if (a_law >= 0.0 or cfg.follow_share <= 0.0 or lead.a_lead_ms2 >= 0.0
+    if (a_law >= 0.0 or cfg.follow_share <= 0.0 or lead.a_lead_ms2 >= -FOLLOW_BRAKING_ZERO_MS2
             or gap_excess_ms is None or gap_excess_ms > FOLLOW_GAP_EXCESS_MS):
         return a_law
+    braking = 1.0 - idm_cah.fade(-lead.a_lead_ms2, FOLLOW_BRAKING_ZERO_MS2, FOLLOW_BRAKING_FULL_MS2)
     dv = v_ego - lead.v_lead_ms
     closing = 1.0 - idm_cah.fade(dv, cfg.follow_dv_lo_ms, cfg.follow_dv_hi_ms)
     room = lead.dist_m - cfg.s0_m
@@ -132,7 +137,7 @@ def brake_follow_limit(
     upper = -(cfg.approach_upper_gain * need + cfg.approach_upper_margin_ms2)
     extra = cfg.approach_stopped_upper_extra_ms2 * idm_cah.fade(
         lead.v_lead_ms, cfg.approach_stopped_full_ms, cfg.approach_stopped_zero_ms)
-    weight = (closing * far * cfg.follow_share * _room_weight(cfg, room)
+    weight = (closing * far * braking * cfg.follow_share * _room_weight(cfg, room)
               * idm_cah.fade(need, cfg.approach_upper_full_ms2 + extra,
                              cfg.approach_upper_zero_ms2 + extra))
     if weight <= 0.0 or a_law >= upper:

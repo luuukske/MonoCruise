@@ -196,7 +196,11 @@ command by at most 1 m/s² when ego is already closing and the brake has run pas
 both the lead's deceleration and the constant deceleration that would meet its
 speed. It stays out when the gap is closing much faster than those speeds (the
 picture is late, and easing it made a hard stop late), when the gap is short in
-time, and in the last few metres. `follow_share` 0 disables it.
+time, and in the last few metres. `follow_share` 0 disables it. It acts only on a
+lead braking harder than 0.3 m/s², fully from 0.6. It used to act on any accel
+below zero, and the smoothed accel trails off just below zero for seconds after a
+brake: the limit kept easing the law toward `s0` instead of the wanted gap, and
+after a short slowdown ego settled at 0.7 to 0.8 of its wanted gap.
 
 ### Blinker arbitration
 
