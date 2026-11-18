@@ -23,6 +23,12 @@ FRONT_OVERHANG_M: float = REF_HALF_LENGTH_M + _REF_FRONT_AXLE_Z
 REAR_OVERHANG_M: float = REF_HALF_LENGTH_M - _REF_LAST_AXLE_Z
 TYRE_OUTBOARD_M: float = REF_HALF_WIDTH_M - _REF_MAX_TRACK_HALF_M
 
+# Measured (front, rear) overhangs past the end wheels where the reference rig's do not fit;
+# None keeps the reference rig's. Keyed by SDK truckId, see core/radar/README.md §17.
+MODEL_OVERHANGS_M: dict[str, tuple[float | None, float | None]] = {
+    "vehicle.volvo.9700_23": (2.79, None),
+}
+
 # A wheel this far behind the front-most one is not on the front axle.
 _FRONT_AXLE_BAND_M: float = 1.0
 _LIFTED: float = 0.5
@@ -75,6 +81,8 @@ def estimate_ego_geometry(
     zs: list[float],
     steerable: list[bool],
     lift: list[float] | None = None,
+    front_overhang_m: float = FRONT_OVERHANG_M,
+    rear_overhang_m: float = REAR_OVERHANG_M,
 ) -> EgoGeometry | None:
     """Body and path origin from per-wheel vehicle-space positions, or None if implausible.
 
@@ -114,8 +122,8 @@ def estimate_ego_geometry(
 
     return EgoGeometry(
         half_width_m=track_half + TYRE_OUTBOARD_M,
-        front_m=-z_front + FRONT_OVERHANG_M,
-        rear_m=z_last + REAR_OVERHANG_M,
+        front_m=-z_front + front_overhang_m,
+        rear_m=z_last + rear_overhang_m,
         path_origin_m=-z_path,
     )
 
@@ -130,11 +138,14 @@ def geometry_from_sdk(raw: dict) -> EgoGeometry | None:
         lift = raw.get("truck_wheelLift")
         if n <= 0 or xs is None or zs is None or steer is None:
             return None
+        front, rear = MODEL_OVERHANGS_M.get(str(raw.get("truckId", "") or ""), (None, None))
         return estimate_ego_geometry(
             [float(v) for v in xs[:n]],
             [float(v) for v in zs[:n]],
             [bool(v) for v in steer[:n]],
             [float(v) for v in lift[:n]] if lift is not None else None,
+            front_overhang_m=FRONT_OVERHANG_M if front is None else front,
+            rear_overhang_m=REAR_OVERHANG_M if rear is None else rear,
         )
     except (TypeError, ValueError):
         return None

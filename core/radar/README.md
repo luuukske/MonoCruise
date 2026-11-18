@@ -1819,7 +1819,18 @@ calibration body and its wheel layout, so retuning the body moves them with it
 (`tests/test_ego_geometry.py` pins both directions). They are a carry-over, not a
 measurement: only the reference rig is verified. A conventional (ATS) nose likely
 has a shorter overhang than the cab-over it was fitted on, which reads its front
-slightly long, the conservative side for AEB. Implausible layouts (under four
+slightly long, the conservative side for AEB. Vehicles the carry-over does not fit
+take measured overhangs from `MODEL_OVERHANGS_M`, keyed by the SDK `truckId`
+(either end may stay on the reference rig's). The Volvo 9700 coach
+(`vehicle.volvo.9700_23`) has its front axle 4.39 m ahead of placement and a 2.79 m
+nose: the carry-over put its bumper 1.25 m inside the real one, so AEB counted room
+that was not there. Measured 2026-11-18 with a parked car touching the nose, whose
+near edge sat 7.18 m ahead of placement; its rear is not measured yet. Do not use
+the front axle's distance from placement to pick a class instead: on the clip store
+trucks reach 3.38 m (long-nose rigs) and the coach 4.39 m, too close to call. A car
+(front axle 1.15 m ahead, track half 0.82 m, seen in clips of 2026-10-06) gets the
+cab-over's 1.54 m nose too, about 0.6 m long, and is not in the table yet.
+Implausible layouts (under four
 wheels, wheelbase outside 2 to 12 m, no rolling axle, non-finite values) give
 `None`, and every consumer then keeps its pre-wheel behaviour.
 

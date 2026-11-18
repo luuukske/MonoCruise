@@ -105,6 +105,43 @@ def test_sdk_dict_reader():
     assert geometry_from_sdk({**raw, "truckWheelCount": 0}) is None
 
 
+# vehicle.volvo.9700_23 coach as the SDK reported it on 2026-11-18: the tag axle steers.
+COACH_X = [-1.01, 1.01, -0.89, 0.89, -1.01, 1.01]
+COACH_Z = [-4.393, -4.393, 2.341, 2.341, 3.741, 3.741]
+COACH_STEER = [True, True, False, False, True, True]
+
+
+def _sdk(truck_id: str) -> dict:
+    return {
+        "truckId": truck_id,
+        "truckWheelCount": 6,
+        "truckWheelPositionX": COACH_X + [0.0] * 10,
+        "truckWheelPositionZ": COACH_Z + [0.0] * 10,
+        "truckWheelSteerable": COACH_STEER + [False] * 10,
+        "truck_wheelLift": [0.0] * 16,
+    }
+
+
+def test_the_coach_takes_its_measured_nose():
+    g = geometry_from_sdk(_sdk("vehicle.volvo.9700_23"))
+    # A parked car touching the coach's nose sat 7.18 m ahead of placement (2026-11-18).
+    assert g.front_m == pytest.approx(7.18, abs=0.02)
+    assert g.rear_m == pytest.approx(COACH_Z[-1] + eg.REAR_OVERHANG_M)
+    assert g.half_width_m == pytest.approx(1.01 + eg.TYRE_OUTBOARD_M)
+    # The steered tag axle is not the pivot: the drive axle alone is.
+    assert g.path_origin_m == pytest.approx(-COACH_Z[2])
+
+
+def test_an_unlisted_vehicle_keeps_the_reference_overhangs():
+    g = geometry_from_sdk(_sdk("vehicle.someone.else"))
+    assert g.front_m == pytest.approx(-COACH_Z[0] + eg.FRONT_OVERHANG_M)
+    assert g.rear_m == pytest.approx(COACH_Z[-1] + eg.REAR_OVERHANG_M)
+
+
+def test_the_reference_rig_keeps_the_calibrated_body():
+    assert "vehicle.volvo.fh_2024" not in eg.MODEL_OVERHANGS_M
+
+
 def test_clip_frames_carry_the_geometry_and_old_clips_carry_none():
     ego = EgoTelemetry()
     ego.set_geometry(_ref())
