@@ -1011,8 +1011,9 @@ mover also travels along the lane (cosine 0.9 or more), and that has held for
 - with `lane_track_certain` it counts as in ego's lane for the engage grade
   (`certain_geom_ids`) and its lane is trusted beyond `lane_confidence_range_m`.
 
-**Lane clear: a parked body clear of ego's track stays out of lane.** Off by
-default (`lane_clear_stationary`), see the end of this paragraph.
+**Lane clear: a parked body clear of ego's track stays out of lane.** On by
+default since 2026-11-18 (`lane_clear_stationary`, Lukas), see the end of this
+paragraph.
 `clear_of_ego_track`, stationary bodies only: at least `lane_clear_min_free_m`
 (1.3 m) between the body and ego's swept width; ego within
 `lane_clear_max_offset_m` (0.8 m) of its lane centre and moving across the lane
@@ -1033,7 +1034,13 @@ When the driver continues straight toward a car on that line, the truck is
 still centred on the shared approach at 6.40 s, when the plain arc first warns.
 Lane clear trusts the mapped bend and holds the warning until 7.07 s, when ego
 has started leaving the lane. Braking starts at 7.20 s either way. That warning
-delay keeps lane clear off by default.
+delay kept lane clear off by default until Lukas switched it on (2026-11-18),
+accepting it for the false brakes it removes: on the same synthetic bends it
+drops two brakes and three warnings for cars parked 4 to 4.5 m outside the bend
+and adds nothing. Both tests now pin the road path alone with lane clear off, and
+`test_lane_clear_drops_parked_cars_beside_a_bend_and_adds_nothing` and
+`test_lane_clear_delays_the_warning_for_a_driver_not_taking_the_bend_but_never_the_brake`
+pin the default: never a later brake, the warning at most 0.7 s later.
 
 **Drivable bend.** Lane clear and lane keep both assume ego follows its lane, so
 neither speaks where that lane, between ego and the body, bends harder than
@@ -1108,7 +1115,9 @@ reference, four positive clips start braking later before their labelled windows
 `66874532` by 0.34 s. The standard corpus score replays without a map; all
 4331 clips shared with its earlier baseline keep their verdict and cost. The
 current-default run includes the drivable-bend guard, the plain-flags rule
-below and lane clear's off default.
+below and lane clear's then off default; switching it on was measured in the
+lane clear row (6 false brakes and 7 false warnings with lane return, nothing
+lost), not as a separate full run.
 
 Road path first. A road-ahead candidate's `_plain_flags` run (Road-bent
 trajectories, step 6) sees no lane rule: with lane track passing the body on

@@ -400,8 +400,8 @@ class AEBCalibration:
     # more lateral accel than this at ego's speed (README).
     lane_follow_max_lat_ms2: float = 6.0
     # Lane clear (README): a parked body the map holds clear of ego's own track, with ego centred
-    # and calm in its lane, stays out-of-lane through a sweep of ego's arc. Off: awaits a decision.
-    lane_clear_stationary: bool = False
+    # and calm in its lane, stays out-of-lane through a sweep of ego's arc. On since 2026-11-18.
+    lane_clear_stationary: bool = True
     lane_clear_max_offset_m: float = 0.8
     lane_clear_max_drift_ms: float = 0.3
     lane_clear_min_free_m: float = 1.3

@@ -29,6 +29,8 @@ from .harness import make_vehicle
 
 _DT = 1.0 / 30.0
 _STRAIGHT = 150.0
+# The road path alone, lane clear off: the cases it pins must come out exactly as without the map.
+_NO_CLEAR = replace(CAL, lane_clear_stationary=False)
 
 logging.getLogger("ui.popup.popup_window").setLevel(logging.CRITICAL)
 
@@ -118,24 +120,53 @@ def test_crashed_car_in_lane_behind_a_bend_brakes_sooner_with_the_map():
             assert base_brake is None or map_brake <= base_brake - 0.5, (radius, ahead)
 
 
+_BESIDE_THE_BEND = ((-4.0, 25.0), (-4.5, 40.0), (-5.0, 60.0), (-4.5, 80.0), (4.5, 40.0))
+
+
 def test_the_map_changes_nothing_for_parked_cars_beside_a_bend():
     for radius, speed in ((250.0, 22.0), (150.0, 17.0)):
         lane = _Lane(radius)
-        for offset, ahead in ((-4.0, 25.0), (-4.5, 40.0), (-5.0, 60.0), (-4.5, 80.0), (4.5, 40.0)):
+        for offset, ahead in _BESIDE_THE_BEND:
             car = _parked(lane, _STRAIGHT + ahead, offset)
             end = _STRAIGHT + ahead + 5.0
-            base = _run(lane, car, speed, end, with_map=False)
-            assert _run(lane, car, speed, end, with_map=True) == base, (radius, offset, ahead)
+            base = _run(lane, car, speed, end, with_map=False, cal=_NO_CLEAR)
+            mapped = _run(lane, car, speed, end, with_map=True, cal=_NO_CLEAR)
+            assert mapped == base, (radius, offset, ahead)
 
 
-def test_a_driver_not_taking_the_bend_keeps_todays_braking():
+def test_lane_clear_drops_parked_cars_beside_a_bend_and_adds_nothing():
+    """On by default since 2026-11-18 (Lukas): today's warnings and brakes for these cars are false."""
+    bases = []
+    for radius, speed in ((250.0, 22.0), (150.0, 17.0)):
+        lane = _Lane(radius)
+        for offset, ahead in _BESIDE_THE_BEND:
+            car = _parked(lane, _STRAIGHT + ahead, offset)
+            end = _STRAIGHT + ahead + 5.0
+            bases.append(_run(lane, car, speed, end, with_map=False))
+            assert _run(lane, car, speed, end, with_map=True) == (None, None), (radius, offset, ahead)
+    assert sum(b[1] is not None for b in bases) >= 2, "the fixture must reproduce the false brakes"
+
+
+def _straight_on_toward_a_car_off_the_bend(cal):
     lane = _Lane(250.0)
     # Stopped on the straight line ego keeps to, off the road on the outside of the bend.
     car = make_vehicle(7, 0.0, -(_STRAIGHT + 60.0), 0.0, 0.0, width=1.9, length=4.6)
-    base = _run(lane, car, 22.0, _STRAIGHT + 55.0, with_map=False, straight_on=True)
-    mapped = _run(lane, car, 22.0, _STRAIGHT + 55.0, with_map=True, straight_on=True)
+    base = _run(lane, car, 22.0, _STRAIGHT + 55.0, with_map=False, cal=cal, straight_on=True)
+    mapped = _run(lane, car, 22.0, _STRAIGHT + 55.0, with_map=True, cal=cal, straight_on=True)
+    return base, mapped
+
+
+def test_a_driver_not_taking_the_bend_keeps_todays_braking():
+    base, mapped = _straight_on_toward_a_car_off_the_bend(_NO_CLEAR)
     assert base[1] is not None
     assert mapped == base
+
+
+def test_lane_clear_delays_the_warning_for_a_driver_not_taking_the_bend_but_never_the_brake():
+    """The accepted cost of lane clear (README, Map lane rules): warning 6.40 -> 7.07 s, brake 7.20 s."""
+    base, mapped = _straight_on_toward_a_car_off_the_bend(CAL)
+    assert base[1] is not None and mapped[1] == base[1]
+    assert mapped[0] is not None and mapped[0] - base[0] <= 0.7
 
 
 def test_oncoming_traffic_in_the_bend_is_left_alone():
