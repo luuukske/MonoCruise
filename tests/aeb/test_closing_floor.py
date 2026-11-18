@@ -63,7 +63,8 @@ def _braked(clip: Clip, cal) -> bool:
 
 def test_floor_silences_a_sub_bar_creep_into_the_lead():
     """0.6 m/s of closure onto a touching lead: the old bar braked, the floor does not."""
-    clip = _following_clip(ego_ms=20.0, lead_ms=19.4, gap_m=8.0)
+    # 0.2 m closer than at first: at a creep AEB stops 0.3 m short, not 0.5.
+    clip = _following_clip(ego_ms=20.0, lead_ms=19.4, gap_m=7.8)
     assert _braked(clip, _NO_FLOOR), "geometry must demand a brake without the floor"
     assert not _braked(clip, CAL)
 

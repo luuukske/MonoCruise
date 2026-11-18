@@ -30,7 +30,7 @@ from core.radar.tmp_state import ego_box
 from core.acc.trailer_lock import resolve_tractor
 from core.aeb.calibration import AEBCalibration, DEFAULT as _CAL_DEFAULT, ego_path_params
 from core.aeb.confirm import OccupancyConfirm
-from core.aeb.clearance import ClearanceResult, clearance_required
+from core.aeb.clearance import ClearanceResult, clearance_required, stop_buffer_m
 from core.aeb.lane_frame import project_to_ego_arc, classify, Lane, road_ahead_in_lane
 from core.aeb.capture import get_recorder, note_intervention
 from core.aeb.clip_schema import AEBTickRecord, AEBWarmState, ConsumedContext, LiveAEB
@@ -412,6 +412,7 @@ def _codir_required_cap(
     cal,
     response_s: float | None = None,
     response_dist_m: float | None = None,
+    buffer_m: float | None = None,
 ) -> float:
     """Co-directional required decel cap (moving vs stopped lead); min with relative frame."""
     if fwd_dot < cal.co_directional_dot:
@@ -420,13 +421,14 @@ def _codir_required_cap(
     gap_est = max(ego_travel - target_arc._dist_at_time(unbraked_ttc), 0.0)
     a_t = target_arc.decel if target_arc.decel > 1e-3 else 0.0
     reserve = _response_dist(v_closing, cal, response_s, response_dist_m)
-    d_move = max(gap_est - cal.stop_buffer - reserve, 1e-3)
+    buffer = stop_buffer_m(v_closing, cal) if buffer_m is None else buffer_m
+    d_move = max(gap_est - buffer - reserve, 1e-3)
     r_move = a_t + (v_closing * v_closing) / (2.0 * d_move)
     r_stop = 0.0
     if a_t > 0.0 and target_arc.speed > 1e-3:
         s_stop = (target_arc.speed * target_arc.speed) / (2.0 * a_t)
         d_stop = max(
-            gap_est + s_stop - cal.stop_buffer
+            gap_est + s_stop - buffer
             - _response_dist(abs_ego, cal, response_s, response_dist_m),
             1e-3,
         )
@@ -443,10 +445,12 @@ def _required_decel_two_frame(
     codir_cap: float = _INF,
     response_s: float | None = None,
     response_dist_m: float | None = None,
+    buffer_m: float | None = None,
 ) -> float:
     """Required decel: relative frame or ego fallback; optional co-dir cap (README continuous-decel)."""
+    buffer = stop_buffer_m(v_closing, cal) if buffer_m is None else buffer_m
     d_rel = (
-        closing_distance - cal.stop_buffer
+        closing_distance - buffer
         - _response_dist(v_closing, cal, response_s, response_dist_m)
     )
     abs_ego = abs(ego_speed)
@@ -454,7 +458,7 @@ def _required_decel_two_frame(
         required = (v_closing * v_closing) / (2.0 * d_rel)
     else:
         d_ego = max(
-            ego_travel - cal.stop_buffer
+            ego_travel - buffer
             - _response_dist(abs_ego, cal, response_s, response_dist_m),
             1e-3,
         )
@@ -833,6 +837,8 @@ class AEBThread(BaseThread):
         # Build-up reserve latched at engagement (m); None = compute from speed.
         self._engage_pad_dist_m: float | None = None
         self._engage_pad_at_mono: float = 0.0
+        # Stop buffer latched on the closing speed at engagement (README, clearance demand).
+        self._engage_buffer_m: float | None = None
         # Since when ego has been at standstill while engaged (README standstill release).
         self._standstill_since: float | None = None
         # Engage confirm: geometry-graded window_s each frame (README tiered entry).
@@ -1245,6 +1251,7 @@ class AEBThread(BaseThread):
 
         now_mono = self._now()
         engaged_pad_m = self._released_reserve_m(now_mono, cal)
+        engaged_buffer_m = self._engage_buffer_m if self._engaged else None
 
         # Ego path: steer-led with a learned gain, capped at what the vehicle is
         # measured to hold. See core/aeb/README.md §1. Never RadarData.ego_curvature.
@@ -1484,6 +1491,7 @@ class AEBThread(BaseThread):
                 pad_m=(engaged_pad_m or 0.0),
                 front_to_surface=ego_front_to_surface,
                 near_horizon_s=dynamic_horizon,
+                buffer_m=engaged_buffer_m,
             )
 
         # Follow-threat flags must be current before the precompute below sizes
@@ -1979,6 +1987,7 @@ class AEBThread(BaseThread):
                         ego_travel_t, closing_unbraked, ego_speed, cal,
                         response_s=load_response_s,
                         response_dist_m=engaged_pad_m,
+                        buffer_m=engaged_buffer_m,
                     )
 
                     # Clearance demand, once per vehicle across its arcs: the
@@ -2004,6 +2013,7 @@ class AEBThread(BaseThread):
                             ego_speed, cal, codir_cap_t,
                             response_s=load_response_s,
                             response_dist_m=engaged_pad_m,
+                            buffer_m=engaged_buffer_m,
                         )
                         pad_rate_t = closing_unbraked
 
@@ -2232,6 +2242,7 @@ class AEBThread(BaseThread):
                 logger.info("AEB released: ego is at a standstill")
                 self._engaged = False
                 self._engage_pad_dist_m = None
+                self._engage_buffer_m = None
                 self._standstill_since = None
                 for vid in list(self._latched_threat_ids):
                     self._release_latched(vid)
@@ -2240,6 +2251,7 @@ class AEBThread(BaseThread):
                     and not geom_threat_latched):
                 self._engaged = False
                 self._engage_pad_dist_m = None
+                self._engage_buffer_m = None
             self._engage_confirm.reset()
         else:
             # New engagements are gated by |ego_speed|: below the threshold
@@ -2262,6 +2274,8 @@ class AEBThread(BaseThread):
                             pad_rate, cal, load_response_s,
                         )
                         self._engage_pad_at_mono = now_mono
+                    self._engage_buffer_m = (stop_buffer_m(pad_rate, cal)
+                                             if 0.0 <= pad_rate < _INF else None)
 
         # The entry test with the demand bar taken out: filtering alone would let AEB
         # brake here. Never gates a brake; corpus scoring reads it (README).
@@ -2667,8 +2681,9 @@ class AEBThread(BaseThread):
 
         abs_v = abs(ego_speed)
         resp = abs(best_v_closing) * response_s
-        d_rel = best_closing_distance - cal.stop_buffer - resp
-        d_ego = best_ego_travel - cal.stop_buffer - abs_v * response_s
+        buffer = stop_buffer_m(abs(best_v_closing), cal)
+        d_rel = best_closing_distance - buffer - resp
+        d_ego = best_ego_travel - buffer - abs_v * response_s
         ttb_slam_s = cal.brake_ttb + cal.brake_response_window_s
         slam_ttb_reach_m = abs_v * ttb_slam_s
 
@@ -2814,6 +2829,7 @@ class AEBThread(BaseThread):
                 pass
         self._engaged = False
         self._engage_pad_dist_m = None
+        self._engage_buffer_m = None
         self._standstill_since = None
         self._engage_confirm.reset()
         self._warn_confirm.reset()

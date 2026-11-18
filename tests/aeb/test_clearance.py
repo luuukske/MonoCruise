@@ -15,7 +15,7 @@ import pytest
 
 from core.aeb.calibration import DEFAULT as CAL
 from core.aeb.clearance import (
-    clearance_required, min_decel_to_clear, occupancy_profile, required_at,
+    clearance_required, min_decel_to_clear, occupancy_profile, required_at, stop_buffer_m,
     sample_times,
 )
 from core.aeb.filters import _apply_cross_zone, _cross_zone_padding
@@ -88,7 +88,7 @@ def test_a_steady_lead_reproduces_the_relative_frame_formula(lag):
     for v0, vl, gap in _STEADY_CASES:
         res = _solve(_ego(v0), [_lead(gap, vl)], v0, lag_s=lag)
         assert res is not None
-        d_rel = gap - _FRONT_TO_SURFACE - CAL.stop_buffer - (v0 - vl) * lag
+        d_rel = gap - _FRONT_TO_SURFACE - stop_buffer_m(v0 - vl, CAL) - (v0 - vl) * lag
         classic = ((v0 - vl) ** 2 / (2.0 * d_rel)) if d_rel > 0.0 else math.inf
         if classic > 100.0:
             # Ten g. Both models mean "unavoidable" and the command clips at
@@ -104,7 +104,7 @@ def test_a_stationary_obstacle_reproduces_the_ego_frame_formula():
     """A parked body never clears, so the answer is stop-short: `v^2 / (2 * d)`."""
     for gap, v0 in ((40.0, 25.0), (30.0, 20.0), (20.0, 15.0), (60.0, 30.0)):
         res = _solve(_ego(v0), [_lead(gap, 0.0)], v0, lag_s=0.30)
-        d = gap - _FRONT_TO_SURFACE - CAL.stop_buffer - v0 * 0.30
+        d = gap - _FRONT_TO_SURFACE - stop_buffer_m(v0, CAL) - v0 * 0.30
         assert res.required_ms2 == pytest.approx(v0 * v0 / (2.0 * d), rel=0.02)
         assert not res.clears
 
@@ -118,8 +118,27 @@ def test_the_stop_point_is_the_physical_bumper_plus_stop_buffer():
     bumper_gap = 12.0
     for v0 in (1.7, 10.0, 25.0):
         res = _solve(_ego(v0), [_lead(_CAP_FWD + bumper_gap, 0.0)], v0)
-        room = bumper_gap - CAL.stop_buffer
+        room = bumper_gap - stop_buffer_m(v0, CAL)
         assert res.required_ms2 == pytest.approx(v0 * v0 / (2.0 * room), rel=0.02)
+
+
+def test_the_stop_buffer_follows_the_closing_speed():
+    """0.3 m closing at 10 km/h or slower, linear to stop_buffer at 60 km/h (Lukas, 2026-11-18)."""
+    for kmh, want in ((0.0, 0.3), (10.0, 0.3), (35.0, 0.4), (60.0, CAL.stop_buffer),
+                      (120.0, CAL.stop_buffer)):
+        assert stop_buffer_m(kmh / 3.6, CAL) == pytest.approx(want), kmh
+    flat = replace(CAL, stop_buffer_low_m=CAL.stop_buffer)
+    assert stop_buffer_m(1.0, flat) == CAL.stop_buffer
+    assert stop_buffer_m(float("nan"), CAL) == CAL.stop_buffer
+
+
+def test_a_slow_closing_lead_is_planned_to_the_short_buffer():
+    """A lead 6 km/h slower plans to 0.3 m, the same lead closing at 70 km/h to stop_buffer."""
+    lag = CAL.stop_buffer_response_s
+    for v0, vl, gap, buffer in ((20.0, 18.4, 12.0, 0.3), (25.0, 5.6, 60.0, CAL.stop_buffer)):
+        res = _solve(_ego(v0), [_lead(gap, vl)], v0, lag_s=lag)
+        d_rel = gap - _FRONT_TO_SURFACE - buffer - (v0 - vl) * lag
+        assert res.required_ms2 == pytest.approx((v0 - vl) ** 2 / (2.0 * d_rel), rel=0.02)
 
 
 def test_a_braking_lead_is_at_least_the_hand_rolled_stop_branch():
@@ -134,7 +153,7 @@ def test_a_braking_lead_is_at_least_the_hand_rolled_stop_branch():
                              (30.0, 25.0, 5.0, 40.0), (25.0, 10.0, 3.0, 20.0)):
         res = _solve(_ego(v0), [_lead(gap, vl, decel=a_t)], v0, lag_s=0.30)
         s_stop = vl * vl / (2.0 * a_t)
-        d = gap - _FRONT_TO_SURFACE - CAL.stop_buffer + s_stop - v0 * 0.30
+        d = gap - _FRONT_TO_SURFACE - stop_buffer_m(v0 - vl, CAL) + s_stop - v0 * 0.30
         r_stop = v0 * v0 / (2.0 * d)
         assert res.required_ms2 >= r_stop * 0.98
 

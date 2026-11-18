@@ -1598,6 +1598,20 @@ aeb.snapshot                       # AEBSnapshot: full debug state
    closes at) and `lag` goes to zero, cleared on disarm. Re-charging it every tick was
    the "brakes hard then fades out" complaint: the reserve shrinks with speed,
    so it hands metres back through the stop and the demand decays with it.
+   **The stop buffer follows the closing speed, latched at engagement** (Lukas,
+   2026-11-18). `stop_buffer_m` gives `stop_buffer_low_m` (0.3 m) at a closing speed of
+   `stop_buffer_low_kmh` (10) or less, linear up to `stop_buffer` (0.5 m) at
+   `stop_buffer_full_kmh` (60) and above. Idle, the closing speed is read off the
+   occupancy profile itself (ego speed less the rate `s_near` moves over its first
+   0.5 s, so a crosser or a parked body closes at ego's speed), which keeps the avoidability
+   gate, the warn lead and the engage test on the same buffer. At engagement it is
+   latched with the reserve, on the binding constraint's closing rate
+   (`_engage_buffer_m`), and cleared on disarm. Read live through the stop, every
+   stop ended on the short buffer, because any stop ends at a crawl: on the stop sim
+   60 and 90 km/h stops went 0.52 -> 0.33 m. Latched, those are unchanged and 25 to
+   40 km/h stops end 0.08 to 0.14 m nearer (0.41 to 0.54 m on the solo and trailer rigs);
+   engagement moves 0.1 to 0.17 m later there. `stop_buffer_low_m = stop_buffer`
+   restores the flat buffer (`tests/aeb/test_stop_buffer_latch.py`).
    Replayed on clip e9fb04c9 the commanded decel fell 10.68 to 0.41 m/s²
    across a 2.4 s event, with the warn still sounding at the end. Latched, the
    command holds, the event is 0.7-0.9 s shorter, and the residual gap grows

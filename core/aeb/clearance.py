@@ -32,6 +32,29 @@ class ClearanceResult:
     n_samples: int
 
 
+def stop_buffer_m(closing_ms: float, cal: AEBCalibration) -> float:
+    """Bumper gap AEB plans to stop at for this closing speed (README, clearance demand)."""
+    lo = cal.stop_buffer_low_kmh / 3.6
+    hi = cal.stop_buffer_full_kmh / 3.6
+    if not math.isfinite(closing_ms) or hi <= lo:
+        return cal.stop_buffer
+    frac = min(max((closing_ms - lo) / (hi - lo), 0.0), 1.0)
+    return cal.stop_buffer_low_m + frac * (cal.stop_buffer - cal.stop_buffer_low_m)
+
+
+# Span the closing speed is read over, from the first occupied sample.
+_CLOSING_SPAN_S = 0.5
+
+
+def _closing_ms(v0: float, profile: list[tuple[float, float]]) -> float:
+    """Ego's closing speed on the constraint along its own path; v0 when the profile cannot tell."""
+    t0, s0 = profile[0]
+    t1, s1 = next(((t, s) for t, s in profile[1:] if t - t0 >= _CLOSING_SPAN_S), profile[-1])
+    if t1 - t0 <= 1e-6:
+        return v0
+    return max(v0 - (s1 - s0) / (t1 - t0), 0.0)
+
+
 def extend_horizon(arc: ArcPath, horizon_s: float) -> ArcPath:
     """Same curve, longer reach. Only the `position_at_dist` clamp moves."""
     if horizon_s <= arc.horizon:
@@ -228,12 +251,18 @@ def min_decel_to_clear(
     lag_s: float,
     pad_m: float,
     front_to_surface: float,
+    buffer_m: float | None = None,
 ) -> ClearanceResult | None:
-    """Max over the occupancy profile of the per-sample decel requirement."""
+    """Max over the occupancy profile of the per-sample decel requirement.
+
+    ``buffer_m`` is the stop buffer latched at engagement; None reads it off the closing speed.
+    """
     if not profile or v0 <= 1e-3:
         return None
 
-    offset = front_to_surface + cal.stop_buffer + pad_m
+    if buffer_m is None:
+        buffer_m = stop_buffer_m(_closing_ms(v0, profile), cal)
+    offset = front_to_surface + buffer_m + pad_m
     n_measured = len(profile)
 
     def scan(seq, start, best, best_i, best_t, best_d):
@@ -326,6 +355,7 @@ def clearance_required(
     pad_m: float,
     front_to_surface: float,
     near_horizon_s: float,
+    buffer_m: float | None = None,
 ) -> ClearanceResult | None:
     """Clearance demand for one target. None means the caller must fall back."""
     if not target_arcs or ego_speed <= 1e-3:
@@ -341,5 +371,5 @@ def clearance_required(
         return None
     return min_decel_to_clear(
         ego_speed, profile, clears, cal,
-        lag_s=lag_s, pad_m=pad_m, front_to_surface=front_to_surface,
+        lag_s=lag_s, pad_m=pad_m, front_to_surface=front_to_surface, buffer_m=buffer_m,
     )

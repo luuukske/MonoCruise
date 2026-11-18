@@ -18,7 +18,7 @@ from dataclasses import replace
 import pytest
 
 from core.aeb.calibration import DEFAULT as CAL
-from core.aeb.clearance import min_decel_to_clear, sample_times
+from core.aeb.clearance import min_decel_to_clear, sample_times, stop_buffer_m
 from core.aeb.thread import AEBThread
 from core.sending_thread.accel_to_pedals import brake_curve_fraction
 from core.sending_thread.thread import _AEB_MEAS_TAU_S, AEBDecelController
@@ -67,7 +67,7 @@ class _Plant:
 
 
 def required_against_stationary(gap: float, v: float, cal, pad: float,
-                                pad_m: float | None) -> float:
+                                pad_m: float | None, buffer_m: float | None = None) -> float:
     """Shipped clearance demand for an obstacle sitting `gap` ahead of ego's front.
 
     A parked obstacle holds one arc-length forever, so its occupancy profile is
@@ -83,6 +83,7 @@ def required_against_stationary(gap: float, v: float, cal, pad: float,
         lag_s=(0.0 if pad_m is not None else pad),
         pad_m=(pad_m or 0.0),
         front_to_surface=0.0,
+        buffer_m=buffer_m,
     )
     return min(res.required_ms2, 1000.0) if res is not None else 0.0
 
@@ -108,15 +109,17 @@ def stop_against_stationary(
     engaged, published, last_change = False, 0.0, -1e9
     engage_gap, peak, sat, held = None, 0.0, 0, 0
     reserve = _Reserve(None, 0.0, engaged=False)
+    buffer = None
 
     while now < 90.0 and gap > 0.0:
         required = required_against_stationary(
-            gap, v, CAL, pad, reserve.released(now, CAL),
+            gap, v, CAL, pad, reserve.released(now, CAL), buffer,
         ) + downhill
         if not engaged:
             if required >= engage_bar and v * 3.6 >= CAL.aeb_min_engage_speed_kmh:
                 engaged, engage_gap = True, gap
                 reserve = _Reserve(pad * v, now)
+                buffer = stop_buffer_m(v, CAL)
 
         target_raw = max(0.0, min(required, effective_max)) if engaged else 0.0
         delta = target_raw - published
