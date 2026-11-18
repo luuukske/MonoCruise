@@ -44,6 +44,17 @@ _ACCEL_WINDOW_EXP_DEN: float = 1.0 - math.exp(-_ACCEL_WINDOW_K)
 # acc_speed step-4 tunables. See core/radar/README.md §7.
 _SPEED_EMA_HISTORY_LEN: int = 120
 
+# ACC lane, SDK-matched TMP only: once a short fit shows the lead stopped braking, the long
+# fit lets go toward it. Release only, never above 0. 0 disables. core/radar/README.md §7.
+_ACC_RELEASE_SHARE: float = 1.0
+_ACC_RELEASE_WINDOW_S: float = 0.4
+# Short slope (m/s^2): still braking at or below the first, stopped braking from the second.
+_ACC_RELEASE_BRAKING_MS2: float = -0.8
+_ACC_RELEASE_FLAT_MS2: float = -0.2
+# A short slope this far above zero is a netcode snap, not a lead letting off its brake.
+_ACC_RELEASE_JUMP_FULL_MS2: float = 2.5
+_ACC_RELEASE_JUMP_ZERO_MS2: float = 4.0
+
 # Accel-correction term clamp (m/s): caps how far accel·τ can shift a speed.
 _SPEED_CORR_CLAMP_MS: float = 3.0
 
@@ -397,6 +408,28 @@ def _accel_from_speed_history(
     return num / den
 
 
+def _release_weight(x: float, zero: float, full: float) -> float:
+    """C1 ramp: 0 at x <= zero, 1 at x >= full (zero < full)."""
+    if x <= zero:
+        return 0.0
+    if x >= full:
+        return 1.0
+    return 0.5 * (1.0 - math.cos(math.pi * (x - zero) / (full - zero)))
+
+
+def _brake_end_release(history: list[tuple[float, float]], accel_raw: float) -> float:
+    """Raise a braking long fit toward the short fit once the lead stopped braking. ACC lane only."""
+    if _ACC_RELEASE_SHARE <= 0.0 or accel_raw >= 0.0:
+        return accel_raw
+    short = _accel_from_speed_history(history, _ACC_RELEASE_WINDOW_S)
+    if short <= accel_raw:
+        return accel_raw
+    w = (_ACC_RELEASE_SHARE
+         * _release_weight(short, _ACC_RELEASE_BRAKING_MS2, _ACC_RELEASE_FLAT_MS2)
+         * (1.0 - _release_weight(short, _ACC_RELEASE_JUMP_FULL_MS2, _ACC_RELEASE_JUMP_ZERO_MS2)))
+    return accel_raw + w * (min(short, 0.0) - accel_raw)
+
+
 def _speed_corr_chain(
     raw_speed: float,
     t_now: float,
@@ -404,6 +437,7 @@ def _speed_corr_chain(
     prev_speed_ema: float | None,
     prev_accel: float | None,
     prev_speed_ema_history: list[tuple[float, float]] | None,
+    release: bool = False,
 ) -> tuple[float, float, float, list[tuple[float, float]]]:
     """Filter steps 1-3: speed_ema, accel, speed_corr. See core/radar/README.md §7."""
     # Step 1: plain EMA of raw speed (no lag compensation).
@@ -421,6 +455,8 @@ def _speed_corr_chain(
         history = history[-_SPEED_EMA_HISTORY_LEN:]
     accel_raw = _accel_from_speed_history(
         history, _ACCEL_FIT_WINDOW_S * _accel_window_scale(speed_ema))
+    if release:
+        accel_raw = _brake_end_release(history, accel_raw)
     if prev_accel is None:
         accel = accel_raw
     else:
@@ -520,6 +556,7 @@ def _smooth_vehicle_kinematics(
     prev_acc_speed: float | None,
     prev_acc_standstill: bool = False,
     prev_acc_release_s: float = 0.0,
+    acc_sdk: bool = False,
 ) -> tuple[float, float, float, list[tuple[float, float]],
            float, float, list[tuple[float, float]], float, bool, float]:
     """Dual AEB/ACC kinematics chains from raw speeds. See core/radar/README.md §7."""
@@ -531,7 +568,7 @@ def _smooth_vehicle_kinematics(
     # Separate AEB vs ACC filter state. See core/radar/README.md §7.
     acc_ema, acc_accel, acc_corr, acc_history = _speed_corr_chain(
         acc_raw_speed, t_now, dt,
-        prev_acc_speed_ema, prev_acc_accel, prev_acc_speed_ema_history,
+        prev_acc_speed_ema, prev_acc_accel, prev_acc_speed_ema_history, release=acc_sdk,
     )
 
     acc_speed, acc_standstill, acc_release_s = _acc_speed_step(
@@ -2008,6 +2045,7 @@ class Vehicle:
             prev._acc_speed_ema, prev._acc_smooth_accel,
             prev._acc_speed_ema_history, prev.acc_speed,
             prev._acc_standstill, prev._acc_release_s,
+            acc_sdk=self.sdk is not None and not self.crash_confirmed,
         )
         self._raw_speed = raw_speed
         self._speed_ema = speed_ema

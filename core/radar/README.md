@@ -407,6 +407,42 @@ is taken in full: tau 2.0 -> 0.1997, 1.6 -> 0.2462, 1.4 -> 0.2775, 1.2 -> 0.3158
 both chains, so a crashed vehicle reaches ACC through the same unfiltered
 estimate as AEB with nothing extra in between.
 
+**Brake-end release (ACC lane, SDK-matched TMP only, 2026-11-17).** The 1.5 s accel
+fit keeps reading a lead's short brake for about a second after it ended. In step 2
+of the ACC lane, `_brake_end_release` fits the last 0.4 s too: once that short slope
+is above -0.2 m/s² (none at -0.8) the long fit moves toward it before the EMA, never
+above zero and never below where it was, and not for a short slope of 2.5 to 4 m/s²
+or more, which is a snap, not a lead letting go. AEB's lane is untouched.
+`_ACC_RELEASE_SHARE = 0` disables it.
+
+- Measured on a closed-loop stomp (lead -2.4 m/s² for 0.5 to 2 s, SDK speed at 4.5 Hz
+  through the pre-filter, real controller): `acc_accel` back at zero about 0.5 s
+  sooner, peak brake for a 0.5 s stomp about 30 % lower (-0.81 -> -0.54 at 90 km/h,
+  level 2), up to 2 km/h less speed lost, the seen lead speed 1.5 s later 1.1 to
+  2.5 km/h behind the truth instead of 1.8 to 4.1. Getting back on the gas is not
+  faster (within 0.25 s either way when the lead pulls away again): the lead speed
+  lag, the gap deficit and the gas pace after a brake decide that, not `a_lead`.
+- Convoy sim with SDK speed (seeds 1 to 3): no contacts anywhere, unprovoked brakes
+  unchanged, a little less speed swing (slowdown 11.84 -> 11.48 km/h std, laggy
+  client 3.19 -> 2.92). One cost: `blackout_brake`'s closest gap 16.1 -> 14.6 m.
+- **Not on the position path.** There the netcode's braking overshoot reads as a
+  flat short slope in the middle of a real brake: `hard_brake` gained contacts
+  (1 -> 2) and the laggy client a phantom jam to 41 km/h, failing both ratchets in
+  `tests/acc/test_platoon.py`. Every TruckersMP client sends SDK speed, so that path
+  only runs on a match dropout; a crash-confirmed body is excluded too.
+- **Getting back on the gas sooner is not a perception problem** (measured, not
+  shipped, same probe). With the release in, `acc_speed` still trails a lead pulling
+  away again at 0.6 m/s² by 2 to 3 km/h, mostly in step 4: the 4 s consistency
+  window holds the 1.5 s trend's opposite sign for about 2 s after a brake-to-pull
+  reversal, so the feed-forward and the fast tau are off. Neither a shorter window for
+  SDK leads (1.5 to 2.5 s) nor a rise-only fast tau helped: at most 0.2 s sooner on
+  the gas, and the shorter window braked short stomps harder (1 s stomp at 90 km/h,
+  level 3: -1.41 -> -1.69). The bound settles it: with perfect lead speed and accel
+  ACC let go of the brake sooner but got back on the gas no sooner (2.3 to 4.5 s
+  after the stomp, against 2.2 to 2.6 s on this chain), braked a 0.5 s stomp twice as
+  hard, and the gas pace after a brake changed nothing. The wait is the law matching
+  the lead and restoring the gap, which a perception change cannot shorten.
+
 Position mismatch holds the *brake-transient* state without advancing it and
 clears an unconfirmed entry; the speed itself does advance, see "Held frames
 coast" below. Sub-frames copy state unchanged. Lag-freeze early returns
