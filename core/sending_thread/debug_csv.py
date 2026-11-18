@@ -64,6 +64,7 @@ BRAKE_LOG_HEADER: list[str] = [
     "surface",
     "truck_slip",          # worst grounded wheel: 0 rolling free, 1 locked
     "trailer_slip",
+    "wetness",             # traction plugin road wetness, empty without it
 ]
 
 # Gas learning inputs while the pedal is down, whoever owns it. The mapper log only

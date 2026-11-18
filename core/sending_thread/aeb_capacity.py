@@ -246,6 +246,10 @@ class FullPedalRun:
         self._reset()
         return done
 
+    def abandon(self) -> None:
+        """Drop the stop in progress without measuring it (a wet road caps it by grip)."""
+        self._reset()
+
     def _measure(self) -> tuple[str, float, float] | None:
         samples = self._samples
         if (self._key is None or len(samples) < _FULL_MIN_SAMPLES

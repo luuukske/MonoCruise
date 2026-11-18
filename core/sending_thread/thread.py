@@ -42,6 +42,8 @@ from .aeb_capacity import (
     full_pedal_key,
     truck_key,
 )
+from core.traction.reader import TractionReader, is_wet, wet_grip_factor
+
 from .debug_csv import BrakeDebugLog, GasLearnDebugLog, open_debug_csv
 from .recent_brake import RecentBrakeOutputs
 from .hold_controller import (
@@ -419,6 +421,7 @@ class SendingThread(BaseThread):
         self._aeb_capacity = AebCapacityStore()
         self._full_pedal = FullPedalStore()
         self._full_run = FullPedalRun()
+        self._traction = TractionReader()
         self._brake_intensity = BrakeIntensityCache()
         self._low_i_aeb_warn = LowBrakeIntensityAebWarning()
         self._aeb_controller = AEBDecelController()
@@ -1695,14 +1698,21 @@ class SendingThread(BaseThread):
             aeb_active=_aeb_active,
             brake_intensity=intensity,
         )
+        # A wet road caps the stop by grip, so AEB's capacity learners only learn dry.
+        wetness = self._traction.wetness(now_ctrl)
+        wet_road = is_wet(wetness)
         settled = self._capacity_tracker.last_settled_brake_sample
-        if settled is not None:
+        if settled is not None and not wet_road:
             self._aeb_capacity.observe(aeb_key, settled[0], settled[1], intensity)
         full_key = full_pedal_key(aeb_key, intensity)
-        full_stop = self._full_run.tick(
-            full_authority and sent_b >= FULL_SENT, full_key, mass_kg, _base_brake,
-            speed_ms, mapper_road_load_ms2, now_ctrl,
-        )
+        if wet_road:
+            self._full_run.abandon()
+            full_stop = None
+        else:
+            full_stop = self._full_run.tick(
+                full_authority and sent_b >= FULL_SENT, full_key, mass_kg, _base_brake,
+                speed_ms, mapper_road_load_ms2, now_ctrl,
+            )
         if full_stop is not None:
             self._full_pedal.observe_stop(*full_stop)
             logger.debug(
@@ -1712,7 +1722,11 @@ class SendingThread(BaseThread):
             )
         aeb_scale = self._aeb_capacity.scale(aeb_key)
         aeb_full = self._full_pedal.ratio(full_key, mass_kg)
-        aeb_max_brake = aeb_capacity_ms2(_base_brake, aeb_scale, intensity, aeb_full)
+        # Only what AEB plans with drops on a wet road: the pedal model and the decel loop keep
+        # the dry brake, which below the grip limit brakes the same.
+        aeb_max_brake = aeb_capacity_ms2(
+            _base_brake, aeb_scale, intensity, aeb_full,
+        ) * wet_grip_factor(wetness)
         if a > 0.01:
             # Creep subtracted so gear-1 samples learn the throttle-commanded
             self._capacity_tracker.update_accel(
@@ -1769,6 +1783,7 @@ class SendingThread(BaseThread):
                         "wheels_on_ground": wheels_on_ground,
                         "trailer_count": ego_trailer_count,
                         **grip_fields,
+                        "wetness": math.nan if wetness is None else wetness,
                     },
                 )
             except Exception:
@@ -1902,6 +1917,7 @@ class SendingThread(BaseThread):
         self._prev_measured_decel_ms2 = 0.0
         self._prev_aeb_loop_mono = None
         self._accel_mapper.close()
+        self._traction.close()
         self._close_coast_log()
         self._brake_log.close()
         self._gas_learn_log.close()

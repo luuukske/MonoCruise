@@ -786,8 +786,18 @@ on 2026-10-04 even with the onset guard. The extra cannot be predicted (same tra
   gap at or above +0.12 m,
   including extra-braking shapes the axis does not assume. A measurement 5% high lands at
   the bumper (-0.03 m) only with the p90 build-up, which no AEB slam has shown.
-- Rain is not visible in telemetry. If wet grip cuts the extra, a dry measurement
-  over-reads it; this was accepted on 2026-10-04 for a later, more precise trigger.
+- **Wet roads** (2026-11-18). The SDK does not show rain; the traction plugin does
+  (`plugins/traction/README.md`, read by `core/traction/reader.py`). On a wet road the
+  capacity AEB plans with, `aeb_max_brake_ms2`, is multiplied by `1 - 0.42 x wetness`:
+  12 grip-limited stops on the FH at 115 % lost 17 % at wetness 0.42, and a dry credit
+  over-read the wet truck by that much. Only the plan drops. `aeb_cap`, which the pedal axis
+  and `AEBDecelController` use, stays dry: below the grip limit the same pedal brakes the
+  same, and a lower model there would push a harder pedal for every target. The scale
+  learner and `FullPedalRun` skip a wet road (above 0.05; a run in progress is dropped,
+  not measured), so the dry values are not dragged down by grip. No plugin, a stale one, or
+  weather it cannot read means wetness unknown: factor 1.0, bit-identical to before.
+  The factor is conservative where the truck is brake limited on dry (100 % slider):
+  there wet grip may still exceed the brakes and AEB starts somewhat early in rain.
 
 ## Debug logs (`debug_csv.py`)
 
