@@ -70,6 +70,22 @@ def clear_of_ego_track(
     return free - max(toward, 0.0) * t_reach >= cal.lane_clear_arrival_free_m
 
 
+def lane_change_clear(road_paths: "RoadPaths", v: "Vehicle", yaw_rad: float, ego_hw: float,
+                      ego_speed: float, cal: AEBCalibration) -> bool:
+    """A parked body clear of both lanes of ego's lane change (README lane change clear)."""
+    seen = road_paths.lane_change_free(v, yaw_rad, ego_hw)
+    keep = road_paths.keep_frame
+    if seen is None or keep is None:
+        return False
+    far, near, ahead, side = seen
+    # On the side ego leaves, a turn back toward the body counts (1d7eb731 swerved back at 5 m/s^2).
+    t_reach = min(ahead / max(ego_speed, 1.0), cal.lane_clear_drift_horizon_s)
+    near -= _excursion(-side * keep[1], -side * keep[2], t_reach)
+    if max(far, near) < cal.lane_change_min_free_m:
+        return False
+    return lane_drivable(road_paths, ahead, ego_speed, cal, keep=True)
+
+
 def lane_drivable(road_paths: "RoadPaths", ahead: float, ego_speed: float,
                   cal: AEBCalibration, keep: bool = False) -> bool:
     """Ego's lane over the next ``ahead`` metres bends no harder than a truck at this speed can follow."""
@@ -88,11 +104,12 @@ def _excursion(rate: float, accel: float, t: float) -> float:
 def lane_keep_free(
     road_paths: "RoadPaths", v: "Vehicle", yaw_rad: float, travel: float, kappa: float,
     ego_speed: float, clear_bar: float, cal: AEBCalibration,
-    min_free: float | None = None, turn_credit: bool | None = None,
+    min_free: float | None = None, turn_credit: bool | None = None, out: dict | None = None,
 ) -> float | None:
     """Metres to spare between ego's track and a mover keeping its own map lane.
 
     None when the map cannot say: no lane frame, ego or the mover off its lane, a branch unknown.
+    ``out``, when given, receives the mover's turn toward ego beyond its lane (``toward``, m/s^2).
     """
     min_free = cal.lane_keep_min_free_m if min_free is None else min_free
     turn_credit = cal.lane_keep_own_turn_credit if turn_credit is None else turn_credit
@@ -147,6 +164,8 @@ def lane_keep_free(
     if turn_credit and own_kappa < kappa_lo:
         own_toward = speed * speed * (own_kappa - kappa_lo)
     across = ego_across + _excursion(own_rate, own_toward, t)
+    if out is not None:
+        out["toward"] = own_toward
     return gap - max(offset, 0.0) - clear_bar - across
 
 
@@ -155,8 +174,13 @@ def keeps_own_lane(
     ego_speed: float, clear_bar: float, cal: AEBCalibration, miss_rate: float | None = None,
 ) -> bool:
     """A mover on its own map lane whose lane stays clear of ego's track, ego on its own."""
-    free = lane_keep_free(road_paths, v, yaw_rad, travel, kappa, ego_speed, clear_bar, cal)
-    if free is not None and free >= cal.lane_keep_min_free_m:
+    calm_bar = min(cal.lane_keep_min_free_m, cal.lane_keep_calm_free_m)
+    seen: dict = {}
+    free = lane_keep_free(road_paths, v, yaw_rad, travel, kappa, ego_speed, clear_bar, cal,
+                          calm_bar, out=seen)
+    # A mover turning toward ego beyond its lane's own turn keeps the full room (993fdee4).
+    if free is not None and free >= (calm_bar if seen.get("toward", 1.0) <= 0.0
+                                     else cal.lane_keep_min_free_m):
         return True
     # Lane return: the measured miss is opening and it turns away from ego's track.
     if (not cal.lane_return_enabled or miss_rate is None

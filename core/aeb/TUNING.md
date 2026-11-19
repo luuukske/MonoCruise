@@ -160,20 +160,29 @@ the standard corpus score replays without a map and cannot see them.
 | `lane_track_hold_s` | 0.25 s | Unbroken time on the track before lane track speaks |
 | `lane_track_min_along` | 0.9 | Cosine of a mover's travel against the lane; under it the mover is crossing, not on the track |
 | `lane_track_range_m` | 150 m | Lane track range along the lane |
-| `lane_follow_max_lat_ms2` | 6.0 m/s^2 | Lane clear and lane keep stand down where ego's lane up to the body bends harder than this at ego's speed. Under 10: an R 60 bend at 90 km/h must fail it |
-| `lane_clear_stationary` | False | Lane clear: `OutOfLaneParallelFilter` drops a parked body the map holds clear of ego's track. Off by default because the straight-through bend scenario warns 0.67 s later with it enabled (README) |
+| `lane_follow_max_lat_ms2` | 9.9 m/s^2 | Lane clear and lane keep stand down where ego's lane up to the body bends harder than this at ego's speed. Under 10: an R 60 bend at 90 km/h must fail it (6 until 2026-11-18) |
+| `lane_clear_stationary` | True | Lane clear: `OutOfLaneParallelFilter` drops a parked body the map holds clear of ego's track. On since 2026-11-18; the straight-through bend scenario warns 0.67 s later with it (README) |
 | `lane_clear_max_offset_m` | 0.8 m | Lane clear only with ego this close to its lane centre (1.5 with a toward-only drift test lost 3 true positives) |
 | `lane_clear_max_drift_ms` | 0.3 m/s | Lane clear only with ego moving across its lane no faster than this, either way |
 | `lane_clear_min_free_m` | 1.3 m | Room between the parked body and ego's swept width |
 | `lane_clear_arrival_free_m` | 0.5 m | Room that must remain after ego's drift toward it; cannot bind at the default drift bar |
 | `lane_clear_drift_horizon_s` | 1.5 s | Longest time that drift is run forward |
-| `lane_clear_hold_s` | 0.5 s | Unbroken time clear before lane clear speaks. Never 0: a missing sight then counts as held |
+| `lane_clear_hold_s` | 0.15 s | Unbroken time clear before lane clear speaks. Never 0: a missing sight then counts as held (0.5 until 2026-11-18) |
+| `lane_clear_over_follow` | True | Lane clear is read before the follow-threat pass for a stopped body |
+| `lane_change_clear` | True | Lane change clear: a parked body clear of both lanes of ego's lane change (README) |
+| `lane_change_min_drift_ms` | 0.2 m/s | Ego's speed across its lane from which the lane change rule speaks; overlaps lane clear's 0.3 |
+| `lane_change_max_heading_deg` | 10 deg | Ego heading off its lane beyond this: no lane change verdict |
+| `lane_change_settle_ms2` | 1.0 m/s^2 | Decel across that must stop ego by the lane it settles in; beyond it, the tipping point |
+| `lane_change_overshoot_m` | 0.5 m | How far past that lane centre the stop may land |
+| `lane_change_min_free_m` | 1.0 m | Room beyond ego's half width; 0.5 cut too close at 138 km/h (`870f17e3`) |
+| `lane_change_lane_min_m` / `lane_change_lane_max_m` | 2.5 / 7.0 m | Where the neighbour lane is searched beside ego's |
 | `lane_keep_enabled` | True | `LaneKeepFilter`, the last stage |
 | `lane_keep_max_ego_offset_m` | 0.8 m | Lane keep only with ego this close to the centre of the lane it keeps (1.6 lost `86aaab6d`, `8a5612e7`, `0a20598b`) |
 | `lane_keep_max_ego_heading_deg` | 20 deg | Same, on ego's heading |
 | `lane_keep_max_offset_m` | 1.2 m | Mover further than this from its own route gets no verdict |
 | `lane_keep_max_heading_deg` | 8 deg | Same, on the mover's heading against its route |
 | `lane_keep_min_free_m` | 1.3 m | Room that must remain between the mover's lane and ego's track (1.0 made `2c6eac90` late) |
+| `lane_keep_calm_free_m` | 1.0 m | The same room for a mover not turning toward ego beyond its lane; a flat 1.0 made `993fdee4` late |
 | `lane_keep_horizon_s` | 1.5 s | Longest time either vehicle's sideways motion is run forward; shorter when they pass sooner |
 | `lane_keep_route_s` | 3.0 s | How far along the mover's lane the room is measured, in seconds of its travel |
 | `lane_keep_route_min_m` | 20 m | Floor on that length |

@@ -1019,7 +1019,7 @@ paragraph.
 `lane_clear_max_offset_m` (0.8 m) of its lane centre and moving across the lane
 at no more than `lane_clear_max_drift_ms` (0.3 m/s, either way); ego's drift
 toward it over the time to reach it (1.5 s at most) leaving
-`lane_clear_arrival_free_m` (0.5 m); all held `lane_clear_hold_s` (0.5 s)
+`lane_clear_arrival_free_m` (0.5 m); all held `lane_clear_hold_s` (0.15 s)
 unbroken. Then `OutOfLaneParallelFilter` drops it through a sweep of ego's arc,
 and the avoidability gate does not hand it back at the braking deadline. Latched
 and crash-confirmed bodies are exempt. At the defaults the arrival term cannot
@@ -1044,18 +1044,66 @@ pin the default: never a later brake, the warning at most 0.7 s later.
 
 **Drivable bend.** Lane clear and lane keep both assume ego follows its lane, so
 neither speaks where that lane, between ego and the body, bends harder than
-`lane_follow_max_lat_ms2` (6 m/s^2) at ego's speed (`lane_drivable`): on an
+`lane_follow_max_lat_ms2` (9.9 m/s^2) at ego's speed (`lane_drivable`): on an
 R 60 bend at 90 km/h lane clear held back the brake for a car on the outside by
-1.8 s. Must stay under 10 for that scenario.
+1.8 s. Must stay under 10 for that scenario. It was 6 until 2026-11-18: drivers in
+the corpus take R 60 to 110 bends at 70 to 105 km/h (7 to 12 m/s^2 on the map's
+curvature), and 11 false brakes beside such bends stood on this guard alone.
 
 The first version (ego within 1.5 m, 2.0 m free, drift toward the body only,
 3 s) cleared 19 false brakes and 15 false warnings on its 288-clip subset and
 lost three true positives (`793a60fd`, `72456399`, `6c7d47b4`) with a fourth
 late (`1d7eb731`): ego changing lanes toward a parked rig. Centred and calm
-keeps all four. Do not go back to a toward-only drift test, and do not widen it
-to lane changes: at the onset of `e0f4b928` (still a false warning) ego is
-1.4 m off its lane centre moving across at 1.2 m/s, the same picture as the
-four.
+keeps all four. Do not go back to a toward-only drift test, and do not widen
+this calm test to lane changes: at the onset of `e0f4b928` ego is 1.4 m off its
+lane centre moving across at 1.2 m/s, the same picture as the four. Lane changes
+have their own rule below, which judges the body against the lane ego moves to.
+
+**Lane change clear: a parked body clear of both lanes of ego's lane change.**
+On since 2026-11-18 (`lane_change_clear`, Lukas). While ego moves across its lane
+at `lane_change_min_drift_ms` (0.2 m/s, overlapping lane clear's calm bar so the
+hold does not restart between the two) or more and heads no more than
+`lane_change_max_heading_deg` (10) off it, `RoadPaths.bind_lane_change` finds
+where ego will settle:
+
+- back at its own lane centre, when ego is on the far side of it and already slowing
+  its way across by at least half the decel that stopping there needs (`ac7bb3ab`
+  crossed its centre at 1 m/s toward cars parked on the shoulder, not slowing);
+- else the neighbour lane on that side, found in the map window 2.5 to 7 m over
+  (`lane_change_lane_min_m`, `lane_change_lane_max_m`). No such lane, no verdict.
+
+Either way ego must be able to stop its motion across by that lane centre plus
+`lane_change_overshoot_m` (0.5 m) at `lane_change_settle_ms2` (1 m/s^2): past that
+is the tipping point and the rule stands down. A stopped body is then clear
+(`lane_change_clear`) when every corner sits `lane_change_min_free_m` (1.0 m) beyond
+ego's half width from the lane ego settles in, or on the side ego leaves, past
+where ego is now, after ego's turn back toward it over the time to reach it (lane
+keep's excursion; `1d7eb731` swerved back at 5 m/s^2 toward the rig it was leaving).
+It feeds the same hold and the same `OutOfLaneParallelFilter` drop as lane clear.
+A body in the lane ego moves to is never clear, which is what the four true
+positives above need.
+
+The first trial used 0.5 m free (the corridor margin); a reviewer TP at 138 km/h
+(`870f17e3`) has its stopped pair 1.1 to 1.4 m beyond the target lane, so 1.0 is
+the floor. `2354647a`, the clip this rule began with, stays a brake: the angled
+TruckersMP truck noses 0.44 m into the target lane, 0.57 m from ego's settled path,
+and later creeps toward it.
+
+**The map outranks the follow flag for a stopped body.** A queue creeping to a
+stop qualifies as a slowing lead (follow-threat flag) once ego's lane change
+shrinks the gap across, and the flag let it skip `OutOfLaneParallelFilter` before
+lane clear spoke (`2354647a`). A stopped body cuts nothing in, so lane clear is
+read first (`lane_clear_over_follow`); a latched body still skips both.
+
+Corpus, map replay of 3820 labelled clips (2026-11-18, against the defaults before
+it; a false trigger is any brake onset outside the labelled window): lane change
+clear with the drivable bend at 9.9, the hold at 0.15 s and the follow override
+scored -51.0, with 31 fewer false triggers and 20 fewer false-positive clips
+braking. One true positive is lost (`28382b5f`, sev 1) and `32f67b3d` brakes 0.2 s
+later, both accepted by Lukas; early brakes before the window (`2183c4c3`,
+`2e15d24b`, `da9fbbba`) are gone, which he wants. Raising lane clear's calm drift
+bar to 0.5 m/s cleared about 11 more false-positive clips but lost `72456399`, one of
+the four above; it stays at 0.3.
 
 **Lane keep: a mover on its own lane, clear of ego's, is not braked for.**
 `LaneKeepFilter` is the last stage, so it only judges what every other stage let
@@ -1081,7 +1129,14 @@ is not a plan: always counting it lost 11 clears, never counting it lost
 lane does over the next second and the 15 m behind it, less 0.5 m/s^2 (following
 a bend is no swerve; without the term `68ca7d28` and `0af8aedb` were lost). The
 mover is dropped when `lane_keep_min_free_m` (1.3 m) or more remains (1.0 made
-`2c6eac90` late).
+`2c6eac90` late), or `lane_keep_calm_free_m` (1.0 m) when it does not turn toward ego
+beyond its lane's own turn (the turn term above is zero). On since 2026-11-19: over 3820
+map clips that cleared 14 false triggers and 10 false-positive clips; `e9d61021`, whose
+only brake came 0.14 s before its window, loses its geometry hit (accepted by Lukas as a
+temporary regression) and `4c880cb2` brakes 0.16 s later. A flat 1.0 also made
+`993fdee4` (sev 5) 0.09 s late: its trailer still read 1.03 m free while its tractor was
+already cutting in, and the trailer showed 0.5 m/s^2 of that turn, which the calm test
+catches. `2c6eac90` does not move with the calm bar.
 
 **Lane return.** A mover turning back to its lane (the second half of an aborted
 lane change, a slip lane swinging away) fails lane keep on its offset and

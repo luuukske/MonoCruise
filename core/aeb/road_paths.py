@@ -14,7 +14,8 @@ import math
 from core.aeb.calibration import AEBCalibration
 from core.radar.bent_path import BentPath, bend_arc
 from core.radar.traffic import ArcPath
-from core.road_layout.ego_route import route_behind
+from core.road_layout.ego_lane import ranked_lanes
+from core.road_layout.ego_route import build_route, route_behind
 from core.road_layout.road_bend import (
     BendParams, _arc_xy, _curve_heading, _curve_point, _frange, _held_offset, _smoothstep, _wrap,
     bend_profile, fast_offset, foot_kappa, foot_offset, lateral_offset, rank_routes, road_curve,
@@ -39,6 +40,13 @@ _LANE_REJOINED_M = 0.5
 # A vehicle's lane is read against ego's track this often along it, at no more points than this.
 _GAP_STEP_M = 3.0
 _GAP_POINTS = 240
+# The neighbour lane is searched this far ahead of ego, this far to the side, and must lie
+# within this distance of the probe.
+_CHANGE_AHEAD_M = 10.0
+_CHANGE_PROBES_M = (3.5, 4.5, 5.5)
+_CHANGE_SNAP_M = 1.5
+# Settling back in its own lane needs ego already braking its way across by this share.
+_SETTLE_SHARE = 0.5
 
 
 def bend_params(cal: AEBCalibration) -> BendParams:
@@ -71,6 +79,10 @@ class RoadPaths:
         self._keep = None
         self.lane_ego_right = 0.0
         self.lane_drift_right = 0.0
+        # (side, target curve or None to settle in ego's own lane) while ego changes lanes.
+        self._change = None
+        # (window, its lanes' points) for the neighbour-lane search.
+        self._lane_pts = None
 
     def frame(self, snap, cal: AEBCalibration, now: float = 0.0) -> None:
         """Bind this frame's map snapshot; None or a disabled calibration bends nothing."""
@@ -332,6 +344,7 @@ class RoadPaths:
         """Place ego on its map lane for ``lane_offset``, by position only (README lane track)."""
         self._lane = None
         self._keep = None
+        self._change = None
         self.lane_ego_right = 0.0
         self.lane_drift_right = 0.0
         route = getattr(self._snap, "route", None) if self._snap is not None else None
@@ -476,6 +489,98 @@ class RoadPaths:
                     return None
                 best = min(best, abs(right - ego_right))
         return best
+
+    def bind_lane_change(self, x: float, z: float, cal: AEBCalibration) -> bool:
+        """Ego moving across its lane toward one it can settle in (README lane change clear).
+
+        The first half heads for the neighbour lane on that side, the second half settles in
+        ego's own lane. False when ego is calm, heads off too steeply or could not settle.
+        """
+        self._change = None
+        keep = self._keep
+        if keep is None or self._snap is None:
+            return False
+        curve, ego_s, ego_right, _reach, drift, heading, accel = keep[:7]
+        if (abs(drift) < cal.lane_change_min_drift_ms
+                or abs(heading) > math.radians(cal.lane_change_max_heading_deg)):
+            return False
+        side = 1.0 if drift > 0.0 else -1.0
+
+        def settles(remaining: float) -> float | None:
+            """Lateral decel that stops ego by ``remaining`` plus the overshoot, or None."""
+            room = remaining + cal.lane_change_overshoot_m
+            if room <= 0.0 or drift * drift > 2.0 * cal.lane_change_settle_ms2 * room:
+                return None
+            return drift * drift / (2.0 * room)
+
+        # Back to its own lane centre only while ego already slows its way across (ac7bb3ab
+        # crossed its centre toward parked cars at 1 m/s); else on into the next lane.
+        need = settles(-side * ego_right) if side * ego_right < 0.0 else None
+        if need is not None and -side * accel >= _SETTLE_SHARE * need:
+            self._change = (side, None)
+            return True
+        target = self._neighbour_lane(curve, ego_s, side, cal)
+        if target is None or not settles(-side * fast_offset(target, x, z)[1]):
+            return False
+        self._change = (side, target)
+        return True
+
+    def _neighbour_lane(self, curve, ego_s: float, side: float, cal: AEBCalibration):
+        """The lane beside ego's on ``side``, as a road curve from just ahead of ego, or None."""
+        window = getattr(self._snap, "window", None)
+        lanes = getattr(window, "lanes", ())
+        near = getattr(window, "index", None)
+        if not lanes or near is None:
+            return None
+        s = min(ego_s + _CHANGE_AHEAD_M, curve.length - 1.0)
+        p, h = _curve_point(curve, s), _curve_heading(curve, s)
+        if p is None or h is None:
+            return None
+        tx, tz = math.cos(h), math.sin(h)
+        if self._lane_pts is None or self._lane_pts[0] is not window:
+            self._lane_pts = (window, tuple(lane.pts for lane in lanes))
+        pts = self._lane_pts[1]
+        for w in _CHANGE_PROBES_M:
+            px, pz = p[0] - side * w * tz, p[1] + side * w * tx
+            for index, dist, _cost in ranked_lanes(pts, px, pz, tx, tz, near, 0.0, limit=4):
+                if dist > _CHANGE_SNAP_M:
+                    continue
+                route = build_route(lanes, near, index, px, pz, tx, tz)
+                found = road_curve(route.pts) if route is not None else None
+                if found is None:
+                    continue
+                off = side * fast_offset(curve, *found.pts[0])[1]
+                if cal.lane_change_lane_min_m <= off <= cal.lane_change_lane_max_m:
+                    return found
+        return None
+
+    def lane_change_free(self, v, yaw_rad: float,
+                         ego_hw: float) -> tuple[float, float, float, float] | None:
+        """A body against ego's lane change: ``(free beyond where ego settles, free on the side it
+        leaves, metres ahead, side ego moves to)``. None with no lane change bound or a corner
+        behind ego or past the lane frame.
+        """
+        if self._change is None or self._keep is None:
+            return None
+        side, target = self._change
+        curve, ego_s, ego_right, reach = self._keep[:4]
+        fx, fz = -math.sin(yaw_rad), -math.cos(yaw_rad)
+        half_l, half_w = v.size.length * 0.5, v.size.width * 0.5
+        far = near = math.inf
+        ahead = math.inf
+        for a in (-half_l, half_l):
+            for b in (-half_w, half_w):
+                x = v.position.x + a * fx - b * fz
+                z = v.position.z + a * fz + b * fx
+                s, right = fast_offset(curve, x, z)
+                if not math.isfinite(right) or s <= ego_s or s >= reach:
+                    return None
+                ahead = min(ahead, s - ego_s)
+                beyond = side * (fast_offset(target, x, z)[1] if target is not None else right)
+                far = min(far, beyond)
+                near = min(near, -side * right)
+        # Beyond the lane ego settles in, or on the side it leaves, past where ego is now.
+        return far - ego_hw, near - ego_hw - max(0.0, -side * ego_right), ahead, side
 
     def in_ego_lane(self, x: float, z: float, half_width: float) -> bool:
         """``(x, z)`` ahead on the lane ego's road path follows, within ``half_width`` of its centre."""

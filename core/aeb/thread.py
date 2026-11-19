@@ -38,7 +38,8 @@ from core.aeb.warning_player import WarningPlayer
 from core.aeb.avoidability import measured_stationary
 from core.aeb.overlap_ghosts import OverlapGhostHold
 from core.aeb.lane_track import (
-    LaneTrackHold, clear_of_ego_track, keeps_own_lane, lane_drivable, lane_sight, on_ego_track,
+    LaneTrackHold, clear_of_ego_track, keeps_own_lane, lane_change_clear, lane_drivable, lane_sight,
+    on_ego_track,
 )
 from core.aeb.filters import (
     FilterContext, FilterResult,
@@ -1350,6 +1351,8 @@ class AEBThread(BaseThread):
         lane_bound = run_collision and self._road_paths.bind_ego_lane(
             ego_x, ego_z, cal, ego_speed * _ego_fwd_x, ego_speed * _ego_fwd_z, ego_curvature,
         )
+        lane_change = (lane_bound and cal.lane_change_clear
+                       and self._road_paths.bind_lane_change(ego_x, ego_z, cal))
 
         ego_fwd_x = ego_arc.fwd_x
         ego_fwd_z = ego_arc.fwd_z
@@ -1691,10 +1694,12 @@ class AEBThread(BaseThread):
             lane_clear_s = self._lane_clear.step(
                 v.id,
                 cal.lane_clear_stationary and abs_v_speed < cal.sweep_pass_max_target_speed
-                and clear_of_ego_track(
+                and ((clear_of_ego_track(
                     sight, ego_hw + v_hw, self._road_paths.lane_ego_right,
                     self._road_paths.lane_drift_right, abs(ego_speed), cal)
-                and lane_drivable(self._road_paths, sight.ahead, abs(ego_speed), cal),
+                    and lane_drivable(self._road_paths, sight.ahead, abs(ego_speed), cal))
+                    or (lane_change and lane_change_clear(
+                        self._road_paths, v, v_yaw_rad, ego_hw, abs(ego_speed), cal))),
                 now_mono,
             )
 

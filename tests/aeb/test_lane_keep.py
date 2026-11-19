@@ -141,6 +141,31 @@ def _free(s_truck: float, speed: float = 15.0, ego_x: float = 0.0, ego_vx: float
     return lane_keep_free(paths, truck, a, 1.0, own, 27.0, 2.5, CAL)
 
 
+def _keeps(offset: float, kappa: float = 0.0, cal=CAL) -> bool:
+    """Lane keep's verdict on the truck at 150 m on the slip road's straight, ``offset`` m toward ego."""
+    window = _window()
+    x, z, a = _slip(150.0)
+    x -= offset
+    fx, fz = -math.sin(a), -math.cos(a)
+    snap = SimpleNamespace(
+        route=build_route(window.lanes, window.index, 0, 0.0, 0.0, 0.0, -1.0), window=window,
+        target_routes={7: build_route(window.lanes, window.index, 1, x, z, fx, fz)})
+    paths = RoadPaths()
+    paths.frame(snap, cal, 0.0)
+    paths.bind_ego_lane(0.0, 0.0, cal, 0.0, -27.0, 0.0)
+    truck = make_vehicle(7, x, z, math.degrees(a), 15.0, width=2.5, length=7.0)
+    return keeps_own_lane(paths, truck, a, 1.0, kappa, 27.0, 2.5, cal)
+
+
+def test_a_calm_mover_needs_less_room_than_one_turning_toward_ego():
+    # 0.85 m toward ego leaves about 1.15 m: enough for a mover holding its lane, not the full 1.3.
+    assert _keeps(0.85)
+    assert not _keeps(0.85, cal=replace(CAL, lane_keep_calm_free_m=CAL.lane_keep_min_free_m))
+    # The same room with a turn toward ego just past its lane's own: the full bar (993fdee4).
+    assert not _keeps(0.85, kappa=(CAL.lane_keep_follow_tol_ms2 + 0.05) / 15.0 ** 2)
+    assert _keeps(0.0, kappa=(CAL.lane_keep_follow_tol_ms2 + 0.05) / 15.0 ** 2)
+
+
 def test_the_slip_road_never_comes_closer_than_a_lane():
     assert min(_slip(float(s))[0] for s in range(0, 400)) > _LANE_M - 0.05
 

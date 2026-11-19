@@ -910,11 +910,15 @@ class OutOfLaneParallelFilter:
         stationary = ctx.abs_v_speed < cal.sweep_pass_max_target_speed
         if not (ctx.co_directional or stationary):
             return _PASS
-        if ctx.v.id in ctx.follow_threat_ids or ctx.v.id in ctx.latched_threat_ids:
+        if ctx.v.id in ctx.latched_threat_ids:
             return _PASS
         # Parked clear of ego's track by the map: a sweep of ego's arc does not put it in the lane.
-        if stationary and lane_clear_held(ctx, cal):
+        # A stopped body cuts nothing in, so the map may outrank the follow flag (README lane clear).
+        if (stationary and lane_clear_held(ctx, cal)
+                and (cal.lane_clear_over_follow or ctx.v.id not in ctx.follow_threat_ids)):
             return _suppress("OutOfLaneParallelFilter")
+        if ctx.v.id in ctx.follow_threat_ids:
+            return _PASS
         miss, rate = getattr(ctx, "d_miss", None), getattr(ctx, "d_miss_rate", None)
         if (miss is not None and rate is not None and miss < cal.out_of_lane_los_keep_m
                 and rate <= cal.out_of_lane_los_keep_rate_mps

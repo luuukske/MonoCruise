@@ -397,8 +397,8 @@ class AEBCalibration:
     lane_track_min_along: float = 0.9
     lane_track_range_m: float = 150.0
     # Lane clear and lane keep trust ego to follow its lane only through bends that need no
-    # more lateral accel than this at ego's speed (README).
-    lane_follow_max_lat_ms2: float = 6.0
+    # more lateral accel than this at ego's speed (README). Must stay under 10 (R 60 at 90 km/h).
+    lane_follow_max_lat_ms2: float = 9.9
     # Lane clear (README): a parked body the map holds clear of ego's own track, with ego centred
     # and calm in its lane, stays out-of-lane through a sweep of ego's arc. On since 2026-11-18.
     lane_clear_stationary: bool = True
@@ -407,7 +407,19 @@ class AEBCalibration:
     lane_clear_min_free_m: float = 1.3
     lane_clear_arrival_free_m: float = 0.5
     lane_clear_drift_horizon_s: float = 1.5
-    lane_clear_hold_s: float = 0.5
+    lane_clear_hold_s: float = 0.15
+    # Lane change clear (README): ego moving across toward a neighbour lane, a parked body clear
+    # of both lanes stays out of lane until ego could no longer settle in the new one.
+    lane_change_clear: bool = True
+    lane_change_min_drift_ms: float = 0.2
+    lane_change_max_heading_deg: float = 10.0
+    lane_change_settle_ms2: float = 1.0
+    lane_change_overshoot_m: float = 0.5
+    lane_change_min_free_m: float = 1.0
+    lane_change_lane_min_m: float = 2.5
+    lane_change_lane_max_m: float = 7.0
+    # A stopped body cuts nothing in: the map's lane clear outranks the follow-threat flag.
+    lane_clear_over_follow: bool = True
     # Lane keep: a mover on its own map lane, clear of ego's track along it, is no threat (README).
     lane_keep_enabled: bool = True
     lane_keep_max_ego_offset_m: float = 0.8
@@ -415,6 +427,8 @@ class AEBCalibration:
     lane_keep_max_offset_m: float = 1.2
     lane_keep_max_heading_deg: float = 8.0
     lane_keep_min_free_m: float = 1.3
+    # A mover not turning toward ego beyond its lane's own turn needs only this much (README).
+    lane_keep_calm_free_m: float = 1.0
     lane_keep_horizon_s: float = 1.5
     lane_keep_route_s: float = 3.0
     lane_keep_route_min_m: float = 20.0
