@@ -89,6 +89,10 @@ _LANE_STYLES = {
 _LANE_GAP_PX = 5.0
 _LANE_TICK_MS = 16
 
+# Close-follow warning triangle: height as a share of the icon area, logical px of background kept clear around it.
+_CLOSE_TRI_SIZE = 0.32
+_CLOSE_TRI_HALO_PX = 4.0
+
 # Sentinel for update(lead_vehicle_speed=...): distinguishes "not provided" from None ("no lead").
 _LEAD_UNSET = object()
 
@@ -780,8 +784,8 @@ class _PanelWidget(QWidget):
         vehicle_draw_pm: QPixmap,
         vehicle_opacity: float,
         draw_all_lines: Callable[[QPainter, int], None],
-    ) -> None:
-        """Cached lines, per-frame DestinationOut cutout, vehicle draw (ui/cc_panel/README.md)."""
+    ) -> QRectF:
+        """Cached lines, per-frame DestinationOut cutout, vehicle draw; returns the vehicle rect."""
         if cutout_shape_pm.isNull() or vehicle_draw_pm.isNull():
             draw_all_lines(pa, car_up_lines)
             if not vehicle_draw_pm.isNull():
@@ -790,7 +794,7 @@ class _PanelWidget(QWidget):
                 pa.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
                 pa.drawPixmap(QPointF(vx, vy), vehicle_draw_pm)
                 pa.restore()
-            return
+            return QRectF(vx, vy, sh_visual, sh_visual)
 
         dpr = self.devicePixelRatio()
         gap = max(1, int(round(_LAST_LOCKED_LINE_GAP_PX * sc)))
@@ -933,6 +937,7 @@ class _PanelWidget(QWidget):
         dst_veh_rect = QRectF(ex_x, ex_y, ex_w, ex_h)
         pa.drawPixmap(dst_veh_rect, vehicle_draw_pm, src_veh_rect)
         pa.restore()
+        return dst_veh_rect
 
     # lead vehicle speed indicator
 
@@ -1433,9 +1438,8 @@ class _PanelWidget(QWidget):
                     draw_vehicle = False
                 # Shown only with the distance lines, so only while the ACC option is on.
                 close_veh = p._close_warn and draw_vehicle
-                veh_pm = self._tinted(icon, QColor(WARN_COLOR)) if close_veh else tinted
                 self._paint_icon_lines(
-                    pa, veh_pm, icon_x, icon_y, icon_sz, sc, ic,
+                    pa, tinted, icon_x, icon_y, icon_sz, sc, ic,
                     lines_distance, lines_truck, draw_vehicle,
                     p._last_locked_acc_truck, close_veh,
                 )
@@ -1469,7 +1473,8 @@ class _PanelWidget(QWidget):
         close_warn: bool = False,
     ):
         n = max(1, min(4, distance_to_lead))
-        # Close-follow warning: the vehicle takes the closest slot, the lines keep the wanted gap.
+        # Close-follow warning: the vehicle jumps to the closest slot in its own colour over the wanted-gap lines,
+        # and an orange triangle stands on the closest line. The gap setting moves only the lines meanwhile.
         n_veh = 1 if close_warn else n
         lw = int(4 * sc)
         ls = int(3 * sc)
@@ -1614,7 +1619,7 @@ class _PanelWidget(QWidget):
                 self._start_vehicle_anim(target_vy, target_sh)
             vy = p._vehicle_visual_y if p._vehicle_visual_y is not None else target_vy
             sh_visual = p._vehicle_visual_sh if p._vehicle_visual_sh is not None else target_sh
-            self._composite_acc_lines_with_vehicle_cutout(
+            veh_rect = self._composite_acc_lines_with_vehicle_cutout(
                 pa,
                 ax,
                 ay,
@@ -1639,7 +1644,35 @@ class _PanelWidget(QWidget):
                 1.0,
                 draw_all_lines,
             )
+            if close_warn:
+                th = _CLOSE_TRI_SIZE * area_sz
+                lines_bottom = float(ay + lines_start_rel + 1 - car_up_lines + lines_h_block)
+                self._paint_warn_triangle(pa, veh_rect.center().x(), lines_bottom + 0.06 * th, th, sc)
         self._paint_lane_lines(pa, ax, ay + lines_start_rel + 1 - car_up_lines, area_sz, sc, lines_h_block, lw + ls)
+
+    def _paint_warn_triangle(self, pa: QPainter, cx: float, bottom_y: float, th: float, sc: float) -> None:
+        """Rounded warning triangle of outer height th, set in a ring of panel background."""
+        r = 0.09 * th
+        ih = th - 2.0 * r
+        iw = ih * 1.15
+        tri = QPainterPath()
+        tri.moveTo(cx, bottom_y - r - ih)
+        tri.lineTo(cx - iw / 2.0, bottom_y - r)
+        tri.lineTo(cx + iw / 2.0, bottom_y - r)
+        tri.closeSubpath()
+        bg = QColor(0, 0, 0, int(255 * self._p._bg_opacity))
+        pa.save()
+        pa.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        # Source puts the background back over the vehicle and line: a clear ring, not a dark outline.
+        pa.setCompositionMode(QPainter.CompositionMode.CompositionMode_Source)
+        for color, width in ((bg, 2.0 * (r + _CLOSE_TRI_HALO_PX * sc)), (QColor(WARN_COLOR), 2.0 * r)):
+            pen = QPen(color, width)
+            pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+            pa.setPen(pen)
+            pa.setBrush(color)
+            pa.drawPath(tri)
+            pa.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
+        pa.restore()
 
     def _paint_lane_lines(
         self, pa: QPainter, ax: int, y_top: float, area_sz: int, sc: float, block_h: int, pitch: int,
@@ -2004,7 +2037,7 @@ if __name__ == "__main__":
         print("  v = lead_vehicle_speed (cycle: None/60/80/96/110)")
         print("  k = lane lines (cycle off/disabled/standby)   w = lane warning (cycle none/left/right)")
         print("  r = lane warning is an alert (unsafe lane, blinking red)")
-        print("  c = close-follow warning (orange vehicle in the closest slot)")
+        print("  c = close-follow warning (vehicle in the closest slot, orange triangle on the closest line)")
         print("  h = help   q = quit")
         print(f"\n  Now: mode={state['cc_mode']!r} enabled={state['cc_enabled']} "
               f"locked={state['acc_locked']} acc={state['acc_enabled']} truck={state['acc_truck']} "

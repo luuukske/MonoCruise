@@ -153,14 +153,26 @@ grey copy, an exact max) and byte slicing, pixel for pixel what the loops made (
 
 ## Close-follow warning
 
-`update(close_warn=True)` draws the tracked vehicle in the warning orange (`WARN_COLOR`, shared with the lane
-lines) in the closest slot, where gap 1 draws it. The distance lines keep showing the wanted gap, partly behind
-the vehicle. The flag comes from `ACCData.close_follow_warn` (`core/acc/README.md` section 11).
+`update(close_warn=True)` moves the tracked vehicle, in its own colour, to the closest slot, where gap 1 draws
+it, over the distance lines. The lines keep showing the full wanted gap behind it, exactly as without the warning,
+and a plain warning triangle in the warning orange (`WARN_COLOR`, shared with the lane lines and the bar corners)
+stands on the closest line in front of the vehicle's bumper, set in a clear ring of panel background
+(`_CLOSE_TRI_HALO_PX`) so it reads apart from the vehicle and the lines.
+
+Testers read the earlier orange vehicle on the wanted-gap lines as an ACC fault. Lukas chose this look
+(2026-11-19) over an orange vehicle with the triangle: that one shouted "big error", this one says "watch out,
+you're close". Keep the vehicle in its own colour and the wanted gap on screen unless Lukas asks otherwise. The
+flag comes from `ACCData.close_follow_warn` (`core/acc/README.md` section 11).
 
 - Only while the distance lines show and a vehicle is tracked. No lines (ACC option off, speed limiter mode) or
   an AEB flash: nothing changes.
-- The vehicle jumps to the slot, no glide: the warning is part of the vehicle animation's layout key.
-- Cost: one more tinted icon and one more cached line layer. The cutout masks are the tracked vehicle's own.
+- The vehicle jumps to the front and back, no glide: the warning is part of the vehicle animation's layout key.
+  While it shows, a gap change moves only the lines; the vehicle stays in front.
+- Warning orange (`WARN_COLOR`) is for small glyphs and details: this triangle, the lane lines, the bar corners.
+  Never fill a whole vehicle or another large shape with it. Lukas (2026-11-19): a fully orange vehicle felt off
+  in every variant tried.
+- Cost: the triangle, and at most one more cached line layer (the layer's box follows the vehicle's slot). The
+  vehicle and its cutout masks are the plain ones.
 
 ## Lane lines (LDW / LKA)
 

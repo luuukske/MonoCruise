@@ -11,7 +11,8 @@ STANDBY = "standby"
 WARN = "warn"
 ALERT = "alert"
 STYLES = (DISABLED, STANDBY, WARN, ALERT)
-WARN_COLOR = "#EB7A00"
+# About 3:1 against the white lane line and the dark panel alike; darker drifts toward the alert red.
+WARN_COLOR = "#E06A00"
 ALERT_COLOR = "#FF0000"
 
 LEFT = -1

@@ -1848,8 +1848,9 @@ Agent-facing copy of these rules also lives in the top-level `AGENTS.md` (keep t
 
 A display flag for drivers who sit very close behind the lead, with cruise
 control engaged or not. It is not a control input: the gap law, the overlays
-and AEB never read it. The cruise control panel draws the tracked vehicle
-orange in the closest slot while it is set (`ui/cc_panel/README.md`).
+and AEB never read it. The cruise control panel moves the tracked vehicle
+to the closest slot and stands an orange warning triangle on the closest line in front of it while it is set
+(`ui/cc_panel/README.md`).
 
 The rule (Lukas, 2026-11-11), kept simple on purpose:
 
