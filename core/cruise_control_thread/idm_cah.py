@@ -343,6 +343,8 @@ def lead_law(
         return a_acc * max(1.0, level_gain(cfg, v_ego, t_headway))
     a_soft = (a_acc * comfort_gain(cfg, eff_dist, v_ego, v_lead, t_headway)
               * closing_relief(cfg, v_ego, v_lead))
-    # Kinematic floor, softened downward only. Ungated and the inner max hard,
-    # both for continuity reasons set out in §8.7.
-    return _soft_min(a_soft, max(a_acc, a_cah_val), cfg.lead_law_floor_soft_ms2)
+    # Kinematic floor, softened downward only, the band shrinking to 0 over the last half
+    # band of braking: at full width it stepped 0.09 at the zero crossing. §8.7, §8.13.
+    eps = cfg.lead_law_floor_soft_ms2
+    eps *= _cos_ramp(-2.0 * a_soft / eps) if eps > 0.0 else 0.0
+    return _soft_min(a_soft, max(a_acc, a_cah_val), eps)

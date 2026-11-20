@@ -15,6 +15,7 @@ Two layers. Everything except `test_corpus_baseline.py` runs in CI.
 | `test_corpus_baseline.py` | **yes** | Replay of the local AEB clip store, bounded against recorded metrics |
 | `test_platoon.py` | no | Ten ACC clients in a TMP convoy at gap level 2: phantom braking, string stability, harsh brake, full stop, queue stop and relaunch, AEB lock-up, packet blackout, desync, a laggy client. Ratchet baselines, see `tools/acc_platoon/README.md` |
 | `test_platoon_calibration.py` | **yes** | The TMP display model against every stream in the local clip store |
+| `test_map_smoothness.py` | no | The gap law's steady map over cruising states (levels 1 to 4): jumps, corners and braking given back toward danger, sampled by `map_lint.py` (run it to print where). Ratchet baselines, see `core/acc/ACC_ARCHITECTURE.md` §8.13 |
 
 ## Harness
 

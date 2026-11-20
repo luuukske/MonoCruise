@@ -612,6 +612,9 @@ seeds: one noise realisation ranks the variants wrongly.
 
 Reproduce with `tools/acc_transition_probe.py`.
 
+The band shrinks to zero near a zero law since 2026-11-20: at full width the
+soft min stepped 0.09 m/s² wherever the law crossed zero (§8.13).
+
 ### 8.8 Why the accel side is flat near equilibrium
 
 At the wanted gap with speeds matched, a lead accelerating gently commands
@@ -879,6 +882,54 @@ off: a stopped lead reporting `+1.5` at 4 m stays at −0.447, and 6 m at
 97 km/h stays at −0.561. The design case keeps 96 % of its pull (+0.550
 against +0.575). Brake-onset is untouched, since the nudge is zero for any
 braking lead.
+
+### 8.13 Map smoothness lint (2026-11-20)
+
+Every stage after §8.3 corrects one measured complaint and switches in over its
+own narrow range, so the steady map (the settled command per lead state) is a
+patchwork of seams. Sensor noise times the map's slope is command noise: a
+jump rectifies jitter into pumping, and a lead braking harder that gets less
+brake reads as the brake letting go mid-slowdown.
+
+`tests/acc/map_lint.py` samples the stateless pipeline (`approach_profile.banded_law`
+then the monotone follow limit) every 0.01 along lead decel (-1 to 2 m/s²) and
+closing speed (-2 to 3 m/s), and every 0.05 m along a shrinking gap, at levels 1
+to 4, 50 and 80 km/h and 0.7 to 2.2 of the wanted gap, skipping commands below
+-3 m/s². Per axis it reports the worst jump over its neighbours' change, the
+worst slope change across one sample (corner) and the most braking given back
+toward more danger (loosen). `test_map_smoothness.py` ratchets those and checks
+the lint against the settled controller. Free-road lift, the overlays and
+everything temporal (jerk limiter, landing, shift debt) are not in it.
+
+**The soft floor's zero step.** The §8.7 soft min deviates by up to its band
+(0.09 m/s²) where its two arguments meet, and at the zero crossing both are 0:
+the law stepped from 0 to -0.09 wherever it crossed zero, which is where steady
+following sits. Through the radar chain (truck 0.1 s dead time, 0.35 s lag,
+cruise 10 km/h over) steady following, a lead pulling away and holding, catching
+a slower lead and a cut-in by a faster one turned the command 7 to 12 times by
+0.1 m/s² or more in 20 s. The band now shrinks to 0 over the last half band of
+braking (`_cos_ramp(-2 a_soft / eps)`): those runs turn once (0 to 1). On the
+§8.7 probe RMS jerk 0.270 -> 0.273; shrinking over the whole band cost 0.289,
+over 2 to 5 bands 0.341 to 0.363. In the convoy sim's laggy client one brake of
+truck 5 behind the laggy truck peaks at 1.00 instead of 0.99 m/s², which crosses
+the unprovoked count's 1.0 bar (9 -> 10 with §13.4's latch); the runs are
+otherwise the same to a hundredth. Baselines raised with Lukas's approval
+(2026-11-20): laggy client 8 -> 10, desync snap 2.03 -> 2.05 (the monotone follow limit).
+
+| | step decel / closing / gap | corner decel / closing / gap | loosen decel / closing / gap |
+|---|---|---|---|
+| before | 0.091 / 0.094 / 0.091 | 9.1 / 10.0 / 1.9 | 0.18 / 0.06 / 0 |
+| after | 0.011 / 0.006 / 0.009 | 2.2 / 1.6 / 0.4 | 0.18 / 0.06 / 0 |
+
+**Seams left**, largest first, by sharp bends (second difference over 0.15 m/s²
+on a 0.25 m/s by 0.2 m/s² grid, level 3, 80 km/h, 30 m, 122 cells): the §8.11
+closing-speed relief (61 with it off; the seam at 0.3 m/s inside the gap), the
+§8.6 feedforward's corners (48 with it off), the follow limit's plateaus (65)
+and the approach band's switches (mostly at 1.5 to 2 times the wanted gap). The
+decel loosening (0.18) is the band's `a_lead` gate on the accelerating side:
+a lead that stops pulling away brings the band in, and its upper edge relaxes
+the brake. Each was added for a measured reason; smoothing one needs its own
+measurements re-run (for §8.11, those of §8.6 to §8.10).
 
 ---
 
@@ -1934,6 +1985,27 @@ above: the base run had over-braked 18 km/h on a phantom earlier in the window.
 The three extra SP stomps are phantom-lead windows where the base run had
 already braked far enough to miss the second phantom.
 `landing_horizon_s = 0` disables it and is in `tools/acc_transition_probe.BASELINE`.
+
+**Latched entry and the lead's trend (2026-11-20).** The entry on ego's own
+deceleration was one switch point at -0.5 m/s², and landing's easing is what takes
+ego back above it: landing dropped out, the law braked again, ego crossed -0.5 and
+landing came back. Behind a lead easing into a light brake and out of it (radar
+chain, truck 0.1 s dead time and 0.35 s lag, cruise 10 km/h over) the command let
+go and braked again by 0.2 to 0.3 m/s², 3 to 5 turns of 0.1 m/s² or more where one
+brake and one release would do; a perfect, delayed lead showed the same pumping
+at about 0.3 m/s² every 0.5 s. Landing now enters at -0.5 and leaves only once ego
+brakes less than 0.15 (`LANDING_EGO_RELEASE_MS2`) and it no longer eases the law:
+leaving above -0.15 alone still let the law brake 0.12 again after a landing that
+had already let go. A lead still slowing is landed on at its speed plus the trend
+times 0.5 s (`LANDING_TREND_LEAD_S`, 0 is the old target): the plain target eased
+early and the law braked again as the lead's speed kept falling; 1.0 and 1.5 s let
+go too far and braked again too. On the same runs every case is now one brake and
+one release (`test_a_light_lead_brake_is_one_brake_and_one_release`), and
+`test_ego_lands_on_a_lead_that_braked_then_held` still holds. In the convoy sim's
+laggy client the latch moves one brake of truck 9 from 26.55 to 26.57 s, which
+slips it past the unprovoked count's 3 s calm window: 8 -> 9 on the same brake
+episodes (baseline raised to 10 with §8.13, Lukas, 2026-11-20). Not yet measured on
+the windowed clip replay.
 
 ### 13.5 Approach profile: meet a slower lead at a constant rate
 

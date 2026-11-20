@@ -182,8 +182,10 @@ heavy traffic from feeling eager is on the gas side: for `GAS_PACE_S` after a
 brake the cap climbs above zero at `J_GAS_PACE_MS3`, faded out through the
 launch band. `brake_landing.BrakeLanding` then stops the immediate-lead law
 braking past the lead once the lead's smoothed speed is flat, counting the
-speed the truck still sheds while the brake lets go. Rationale, guards and
-measurements: `core/acc/ACC_ARCHITECTURE.md` §13.1 and §13.4.
+speed the truck still sheds while the brake lets go. It comes in once the truck
+brakes past 0.5 m/s² and stays until the truck brakes less than 0.15 with nothing
+left to ease; a lead still slowing is landed on where its speed will be 0.5 s on.
+Rationale, guards and measurements: `core/acc/ACC_ARCHITECTURE.md` §13.1 and §13.4.
 
 Before landing, `approach_profile.approach_band` keeps the immediate-lead law near
 the constant decel that meets a slower or stopped lead: at least that need, and
@@ -201,6 +203,20 @@ lead braking harder than 0.3 m/s², fully from 0.6. It used to act on any accel
 below zero, and the smoothed accel trails off just below zero for seconds after a
 brake: the limit kept easing the law toward `s0` instead of the wanted gap, and
 after a short slowdown ego settled at 0.7 to 0.8 of its wanted gap.
+
+Those two fades turned an up-to-1 m/s² easing on over 0.3 m/s² of lead braking
+and 1 m/s of closing, so a lead braking at 0.5 got 0.74 m/s² less braking than one
+braking at 0.3 (30 m, closing 2 m/s, level 3), and closing faster on a braking
+lead got up to 0.5 less. With `monotone=True` (the controller's call) the limit
+never eases past the least it gives the same lead braking less or closing less,
+sampled at `FOLLOW_EDGE_SAMPLES` states from each gate's start (0.3 m/s², 0.5 m/s)
+up to the current one (`_edge_cap`; the gate's start alone left 0.13 m/s² inside
+the closing fade at 0.8 of the wanted gap). A harder-braking or faster-closing
+lead never gets less braking, to within 0.02 m/s² over the level 2 and 3 maps
+(`test_a_lead_braking_harder_never_gets_less_braking`,
+`test_closing_faster_never_gets_less_braking`). It costs the convoy's desync
+snap 0.02 m/s² of peak brake (2.03 to 2.05, baseline raised with Lukas's
+approval, 2026-11-20): the old notch eased that brake part-way up its ramp.
 
 ### Blinker arbitration
 

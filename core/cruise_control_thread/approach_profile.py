@@ -3,10 +3,11 @@ target gap, instead of IIDM's late-then-hard profile. See core/acc/ACC_ARCHITECT
 
 from __future__ import annotations
 
+import dataclasses
 import math
 from typing import TYPE_CHECKING
 
-from . import idm_cah
+from . import idm_cah, pull_away
 
 if TYPE_CHECKING:
     from .acc_controller import ACConfig, _LeadSnapshot
@@ -65,6 +66,9 @@ FOLLOW_LIFT_MAX_MS2: float = 1.0
 # smoothed accel trails off just below 0 for seconds after a brake and ego settled inside its gap.
 FOLLOW_BRAKING_ZERO_MS2: float = 0.3
 FOLLOW_BRAKING_FULL_MS2: float = 0.6
+# Lead states sampled from each gate's start toward the current one; the limit eases no further
+# than the least of them, so braking or closing harder never gets less brake. §13.5 follow limit.
+FOLLOW_EDGE_SAMPLES: int = 8
 
 
 def approach_band(
@@ -119,8 +123,10 @@ def brake_follow_limit(
     v_ego: float,
     t_headway: float,
     gap_excess_ms: float | None = None,
+    monotone: bool = False,
 ) -> float:
-    """Raise a braking law that has run past the lead's decel while closing on it."""
+    """Raise a braking law that has run past the lead's decel while closing on it.
+    `monotone`: never ease past what the same lead braking or closing less gets (`_edge_cap`)."""
     if (a_law >= 0.0 or cfg.follow_share <= 0.0 or lead.a_lead_ms2 >= -FOLLOW_BRAKING_ZERO_MS2
             or gap_excess_ms is None or gap_excess_ms > FOLLOW_GAP_EXCESS_MS):
         return a_law
@@ -142,7 +148,37 @@ def brake_follow_limit(
                              cfg.approach_upper_zero_ms2 + extra))
     if weight <= 0.0 or a_law >= upper:
         return a_law
-    return a_law + min(FOLLOW_LIFT_MAX_MS2, weight * (upper - a_law))
+    lifted = a_law + min(FOLLOW_LIFT_MAX_MS2, weight * (upper - a_law))
+    if not monotone:
+        return lifted
+    return max(a_law, min(lifted, _edge_cap(cfg, lead, v_ego, t_headway, gap_excess_ms)))
+
+
+def banded_law(cfg: ACConfig, lead: _LeadSnapshot, v_ego: float, t_headway: float) -> float:
+    """The immediate-lead law up to the approach band, without the band's slew."""
+    law = idm_cah.lead_law(cfg, lead.dist_m, v_ego, lead.v_lead_ms, lead.a_lead_ms2, t_headway,
+                           lead.a_lead_ff_ms2)
+    law = pull_away.lift_for(cfg, law, lead.dist_m, lead, v_ego, t_headway)
+    law = max(cfg.max_decel_ms2, min(cfg.max_accel_ms2, law))
+    return approach_band(cfg, law, lead, v_ego, t_headway)
+
+
+def _edge_cap(cfg: ACConfig, lead: _LeadSnapshot, v_ego: float, t_headway: float,
+              gap_excess_ms: float | None) -> float:
+    """The least the limited command is for this lead braking or closing less, from the gate's start up."""
+    states = []
+    if lead.a_lead_ms2 < -FOLLOW_BRAKING_ZERO_MS2:
+        ff = lead.a_lead_ms2 if lead.a_lead_ff_ms2 is None else lead.a_lead_ff_ms2
+        for k in range(FOLLOW_EDGE_SAMPLES):
+            a = -FOLLOW_BRAKING_ZERO_MS2 + (lead.a_lead_ms2 + FOLLOW_BRAKING_ZERO_MS2) * k / FOLLOW_EDGE_SAMPLES
+            states.append(dataclasses.replace(lead, a_lead_ms2=a, a_lead_ff_ms2=max(ff, a)))
+    dv = v_ego - lead.v_lead_ms
+    if dv > cfg.follow_dv_lo_ms:
+        for k in range(FOLLOW_EDGE_SAMPLES):
+            dv_k = cfg.follow_dv_lo_ms + (dv - cfg.follow_dv_lo_ms) * k / FOLLOW_EDGE_SAMPLES
+            states.append(dataclasses.replace(lead, v_lead_ms=v_ego - dv_k))
+    return min((brake_follow_limit(cfg, banded_law(cfg, s, v_ego, t_headway), s, v_ego, t_headway,
+                                   gap_excess_ms) for s in states), default=math.inf)
 
 
 def _room_weight(cfg: ACConfig, room: float) -> float:

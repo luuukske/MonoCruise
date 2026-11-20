@@ -602,7 +602,7 @@ class AdaptiveCruiseController:
         a_base += self._approach_delta
         a_base = self._landing.step(cfg, a_base, primary_raw, primary, v_ego, t_lane, now)
         a_base = approach_profile.brake_follow_limit(
-            cfg, a_base, primary, v_ego, t_lane, self._landing.gap_excess_ms)
+            cfg, a_base, primary, v_ego, t_lane, self._landing.gap_excess_ms, monotone=True)
 
         # What the chain would command without chain[0]: the fallback for a
         # marginal immediate lead, and the target when stage 2 releases it.

@@ -26,10 +26,14 @@ LANDING_REOPEN_S: float = 6.0
 LANDING_TREND_WINDOW_S: float = 0.5
 LANDING_TREND_OFF_MS2: float = -1.0
 LANDING_TREND_FULL_MS2: float = -0.3
+# A lead still slowing is landed on where its speed will be this far ahead, not where it is.
+LANDING_TREND_LEAD_S: float = 0.5
 # A slower lead is a stop, not a landing.
 LANDING_LEAD_MIN_MS: float = 4.0
-# Ego must already be braking this hard for there to be anything to land.
+# Ego must already be braking this hard for there to be anything to land. Once in, it stays until
+# ego brakes less than the release decel with nothing left to lift: one switch point pumped the brake.
 LANDING_EGO_DECEL_MS2: float = -0.5
+LANDING_EGO_RELEASE_MS2: float = -0.15
 # A gap closing this much faster than the seen speeds allow means the lead is slower
 # than it looks; landing stays off for the hold after.
 LANDING_GAP_TOL_MS: float = 1.5
@@ -61,6 +65,7 @@ class BrakeLanding:
         self._v_smooth: float | None = None
         self.ego_accel_ms2 = 0.0
         self._blocked_until = -math.inf
+        self._engaged = False
         self.gap_excess_ms: float | None = None
 
     def reset(self) -> None:
@@ -69,6 +74,7 @@ class BrakeLanding:
         self._v_smooth = None
         self.ego_accel_ms2 = 0.0
         self._blocked_until = -math.inf
+        self._engaged = False
         self.gap_excess_ms = None
 
     def track_ego(self, v_ego: float, dt: float) -> None:
@@ -93,6 +99,7 @@ class BrakeLanding:
         if raw.vid != self._vid:
             self._hist.clear()
             self._vid = raw.vid
+            self._engaged = False
             self.gap_excess_ms = None
         window = cfg.landing_trend_window_s
         if not self._hist or now > self._hist[-1][0]:
@@ -110,12 +117,18 @@ class BrakeLanding:
         if gap_rate < raw.v_lead_ms - v_ego - cfg.landing_gap_tol_ms:
             self._blocked_until = now + cfg.landing_block_s
         if (cfg.landing_horizon_s <= 0.0 or a_law >= 0.0 or now < self._blocked_until
-                or self.ego_accel_ms2 > cfg.landing_ego_decel_ms2
                 or smooth.v_lead_ms < cfg.landing_lead_min_ms):
+            self._engaged = False
             return a_law
         weight = 1.0 - idm_cah.fade(trend, cfg.landing_trend_off_ms2, cfg.landing_trend_full_ms2)
         s_want = cfg.s0_m + smooth.v_lead_ms * t_headway
-        v_target = smooth.v_lead_ms - max(0.0, s_want - smooth.dist_m) / cfg.landing_reopen_s
+        v_target = (smooth.v_lead_ms - max(0.0, s_want - smooth.dist_m) / cfg.landing_reopen_s
+                    + min(0.0, trend) * LANDING_TREND_LEAD_S)
         overspeed = v_ego - v_target + self.ego_accel_ms2 * cfg.landing_momentum_s
         floor = min(0.0, -overspeed / cfg.landing_horizon_s)
-        return a_law + weight * max(0.0, floor - a_law)
+        lift = weight * max(0.0, floor - a_law)
+        if self.ego_accel_ms2 <= cfg.landing_ego_decel_ms2:
+            self._engaged = True
+        elif self.ego_accel_ms2 > LANDING_EGO_RELEASE_MS2 and lift <= 0.0:
+            self._engaged = False
+        return a_law + lift if self._engaged else a_law

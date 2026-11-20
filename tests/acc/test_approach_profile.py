@@ -111,6 +111,7 @@ def _far_lead_short_slowdown(level, v0_kmh, monkeypatch, old_gate=False):
     if old_gate:
         monkeypatch.setattr(approach_profile, "FOLLOW_BRAKING_ZERO_MS2", 0.0)
         monkeypatch.setattr(approach_profile, "FOLLOW_BRAKING_FULL_MS2", 0.0)
+        monkeypatch.setattr(approach_profile, "_edge_cap", lambda *args: math.inf)
     previous = Settings.instance().acc_gap_level
     Settings.instance().acc_gap_level = level
     try:
@@ -165,6 +166,66 @@ def test_ego_keeps_its_gap_after_a_far_lead_slows_briefly(level, v0_kmh, monkeyp
     old = _far_lead_short_slowdown(level, v0_kmh, monkeypatch, old_gate=True)
     assert old < 0.85, "the fixture must reproduce ego settling inside its gap"
     assert new > 0.9
+
+
+def _steady_caps(states, monkeypatch, no_edge_cap=False):
+    """Settled command per (published gap, closing, lead decel) at 80 km/h, level 3, one constant lead."""
+    previous = Settings.instance().acc_gap_level
+    Settings.instance().acc_gap_level = 3
+    clock = [100.0]
+    v_ego = 80.0 / 3.6
+    caps = []
+    try:
+        for gap, closing, decel in states:
+            monkeypatch.setattr(acc_controller.time, "monotonic", lambda: clock[0])
+            monkeypatch.setattr(approach_profile, "_edge_cap", _EDGE_CAP)
+            if no_edge_cap:
+                monkeypatch.setattr(approach_profile, "_edge_cap", lambda *args: math.inf)
+            ctrl = AdaptiveCruiseController()
+            lead = _LeadSnapshot(vid=1, dist_m=gap - acc_controller.EGO_FRONT_OFFSET_M,
+                                 v_lead_ms=v_ego - closing, a_lead_ms2=-decel, score=6.0)
+            monkeypatch.setattr(ctrl, "_read_acc_snapshot",
+                                lambda lead=lead: ([lead], None, BlinkerState()))
+            cap = 0.0
+            for _ in range(240):
+                clock[0] += DT
+                cap = ctrl.accel_cap_ms2(v_ego)
+            caps.append(cap)
+        return caps
+    finally:
+        Settings.instance().acc_gap_level = previous
+
+
+_EDGE_CAP = approach_profile._edge_cap
+
+
+def _worst_loosening(caps):
+    """Largest rise of the command over the least it was for any less critical state."""
+    return max(c - min(caps[:i]) for i, c in enumerate(caps) if i)
+
+
+def test_a_lead_braking_harder_never_gets_less_braking(monkeypatch):
+    """The follow limit's gate used to ease up to 0.74 m/s^2 between 0.3 and 0.6 of lead braking."""
+    decels = [round(-0.2 + 0.1 * i, 1) for i in range(17)]
+    worst, worst_old = 0.0, 0.0
+    for gap, closing in ((30.0, 1.0), (30.0, 2.0), (41.0, 2.0), (41.0, 4.0)):
+        states = [(gap, closing, d) for d in decels]
+        worst = max(worst, _worst_loosening(_steady_caps(states, monkeypatch)))
+        worst_old = max(worst_old, _worst_loosening(_steady_caps(states, monkeypatch, no_edge_cap=True)))
+    assert worst_old > 0.4, "the fixture must reproduce the notch"
+    assert worst < 0.02
+
+
+def test_closing_faster_never_gets_less_braking(monkeypatch):
+    """The follow limit's closing fade eased 0.5 m/s^2 between 0.6 and 1.2 m/s."""
+    closings = [round(0.2 * i, 1) for i in range(13)]
+    worst, worst_old = 0.0, 0.0
+    for decel in (0.5, 1.0):
+        states = [(30.0, c, decel) for c in closings]
+        worst = max(worst, _worst_loosening(_steady_caps(states, monkeypatch)))
+        worst_old = max(worst_old, _worst_loosening(_steady_caps(states, monkeypatch, no_edge_cap=True)))
+    assert worst_old > 0.4, "the fixture must reproduce the notch"
+    assert worst < 0.02
 
 
 def test_a_matched_or_critical_brake_keeps_the_law():

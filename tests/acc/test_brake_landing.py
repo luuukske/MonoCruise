@@ -9,7 +9,7 @@ from collections import deque
 
 import pytest
 
-from core.cruise_control_thread import acc_controller
+from core.cruise_control_thread import acc_controller, brake_landing
 from core.cruise_control_thread.acc_controller import AdaptiveCruiseController, _LeadSnapshot
 from core.cruise_control_thread.blinker_arbitration import BlinkerState
 from core.cruise_control_thread.brake_landing import BrakeLanding
@@ -138,6 +138,123 @@ def _follow_through_the_radar(level: int, v0_kmh: float, decel: float, dv_kmh: f
         return (v_end - v_min) * 3.6, gap_min
     finally:
         Settings.instance().acc_gap_level = previous
+
+
+def _landing_run(phases):
+    """Step one BrakeLanding through (ego decel, law, seconds) phases behind a steady lead."""
+    cfg = _cfg()
+    landing = BrakeLanding()
+    t, v, outs = 0.0, 21.0, []
+    for ego_decel, law, span in phases:
+        for _ in range(int(span / DT)):
+            v += ego_decel * DT
+            landing.track_ego(v, DT)
+            raw = _LeadSnapshot(vid=1, dist_m=40.0, v_lead_ms=20.0, a_lead_ms2=0.0, score=6.0)
+            smooth = _LeadSnapshot(vid=1, dist_m=40.0, v_lead_ms=20.0, a_lead_ms2=0.0, score=6.0,
+                                   conf=1.0, a_lead_ff_ms2=0.0)
+            outs.append((law, landing.step(cfg, law, raw, smooth, v, 1.5, t)))
+            t += DT
+    return outs
+
+
+def test_landing_holds_through_its_own_release():
+    """It enters at -0.5 and stays while it still lifts the law: one switch point pumped the brake."""
+    outs = _landing_run([(-1.0, -3.0, 0.8), (-0.3, -3.0, 0.5), (-0.05, -3.0, 0.3)])
+    n1 = int(0.8 / DT)
+    assert outs[n1 - 1][1] > -3.0, "braking at -1.0 engages it"
+    assert all(out > law for law, out in outs[n1 + 10:]), "it lets go of nothing it still lifts"
+
+
+def test_landing_ends_once_ego_stopped_braking_and_nothing_is_left_to_lift():
+    outs = _landing_run([(-1.0, -3.0, 0.8), (-0.05, -0.01, 1.0), (-0.05, -3.0, 0.3)])
+    assert outs[-1] == (-3.0, -3.0), "a new brake starts on the plain law until ego brakes again"
+
+
+class _SingleSwitch(BrakeLanding):
+    """The landing before the latch: on only while ego brakes past -0.5."""
+
+    def step(self, *args, **kwargs):
+        self._engaged = False
+        return super().step(*args, **kwargs)
+
+
+def _light_brake_commands(monkeypatch, level, v0_kmh, peak, old=False):
+    """ACC settled behind a lead that eases into a light brake for 2 s and out over 1.5 s.
+
+    Radar chain for the lead, truck with 0.1 s dead time and 0.35 s lag, cruise 10 km/h over."""
+    previous = Settings.instance().acc_gap_level
+    Settings.instance().acc_gap_level = level
+    try:
+        ctrl = AdaptiveCruiseController()
+        if old:
+            ctrl._landing = _SingleSwitch()
+            monkeypatch.setattr(brake_landing, "LANDING_TREND_LEAD_S", 0.0)
+        clock = [100.0]
+        monkeypatch.setattr(acc_controller.time, "monotonic", lambda: clock[0])
+        v0 = v0_kmh / 3.6
+        x_l, x_e, v_e, v_l, a_truck = 70.0, 0.0, v0, v0, 0.0
+        delay = deque([0.0] * int(round(0.1 / DT)))
+        positions: deque[tuple[float, float]] = deque(maxlen=20)
+        chain = [None] * 7 + [False, 0.0]
+        seen, t, next_radar, cmds = (v0, 0.0), -40.0, -40.0, []
+        while t < 8.0:
+            a_l = 0.0 if t < 0.0 else -peak * min(1.0, t, max(0.0, (4.5 - t) / 1.5))
+            v_l += a_l * DT
+            x_l += v_l * DT
+            if t >= next_radar - 1e-9:
+                next_radar += 0.05
+                positions.append((t, x_l))
+                raw = v_l
+                if len(positions) >= 2:
+                    tm = sum(p[0] for p in positions) / len(positions)
+                    xm = sum(p[1] for p in positions) / len(positions)
+                    raw = (sum((p[0] - tm) * (p[1] - xm) for p in positions)
+                           / sum((p[0] - tm) ** 2 for p in positions))
+                (s_ema, acc, _corr, hist, a_ema, a_acc, a_hist, a_speed,
+                 still, rel) = _smooth_vehicle_kinematics(raw, raw, 100.0 + t, 0.05, *chain)
+                chain = [s_ema, acc, hist, a_ema, a_acc, a_hist, a_speed, still, rel]
+                seen = (a_speed, a_acc)
+            lead = _LeadSnapshot(vid=1, dist_m=x_l - x_e - acc_controller.EGO_FRONT_OFFSET_M,
+                                 v_lead_ms=seen[0], a_lead_ms2=seen[1], score=6.0)
+            monkeypatch.setattr(ctrl, "_read_acc_snapshot",
+                                lambda lead=lead: ([lead], None, BlinkerState()))
+            clock[0] += DT
+            cmd = min(ctrl.accel_cap_ms2(v_e), max(-1.0, min(1.5, 0.6 * (v0 + 10.0 / 3.6 - v_e))))
+            delay.append(cmd)
+            a_truck += (delay.popleft() - a_truck) * (1.0 - math.exp(-DT / 0.35))
+            v_e = max(0.0, v_e + a_truck * DT)
+            x_e += v_e * DT
+            if t >= 0.0:
+                cmds.append(cmd)
+            t += DT
+        return cmds
+    finally:
+        Settings.instance().acc_gap_level = previous
+
+
+def _reversals(cmds, size):
+    """Turns of the command by at least `size` against its previous run."""
+    count, ext, direction = 0, cmds[0], 0
+    for c in cmds[1:]:
+        if direction <= 0 and c > ext + size:
+            count += direction == -1
+            direction, ext = 1, c
+        elif direction >= 0 and c < ext - size:
+            count += direction == 1
+            direction, ext = -1, c
+        elif (direction == 1 and c > ext) or (direction == -1 and c < ext):
+            ext = c
+    return count
+
+
+@pytest.mark.parametrize("level, v0_kmh, peak", [(2, 80.0, 1.0), (2, 60.0, 0.6)])
+def test_a_light_lead_brake_is_one_brake_and_one_release(level, v0_kmh, peak, monkeypatch):
+    """Landing switched itself off on its own release: the brake let go, then came back 0.2-0.3."""
+    with monkeypatch.context() as m:
+        old = _light_brake_commands(m, level, v0_kmh, peak, old=True)
+    new = _light_brake_commands(monkeypatch, level, v0_kmh, peak)
+    assert _reversals(old, 0.1) >= 3, "the fixture must reproduce the second brake"
+    assert _reversals(new, 0.1) == 1
 
 
 @pytest.mark.parametrize("level, decel", [(2, 4.0), (3, 6.0)])

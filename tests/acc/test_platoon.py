@@ -67,9 +67,13 @@ BASELINE_FULL_STOP_CONTACTS = 5
 BASELINE_FULL_STOP_AEB_CONTACTS = 2
 BASELINE_QUEUE_STOP_GAP_M = 3.3
 BASELINE_QUEUE_RELAUNCH_HOP_S = 2.3
-BASELINE_SNAP_BRAKE_MS2 = 2.03
+# Raised 2.03 -> 2.05 with Lukas's approval (2026-11-20): the monotone follow limit
+# (ACC_ARCHITECTURE.md §13.5 follow limit) builds the snap's brake evenly instead of easing it part-way.
+BASELINE_SNAP_BRAKE_MS2 = 2.05
 # Raised 6 -> 8 with Lukas's approval (2026-10-08): five leads trade one deep brake for shallow ones.
-BASELINE_LAGGY_UNPROVOKED_BRAKES = 8
+# Raised 8 -> 10 with Lukas's approval (2026-11-20): same brake episodes, one starts 0.02 s later
+# (landing latch, §13.4) and one peaks 1.00 not 0.99 m/s^2 (soft floor, §8.13), both past the metric's bars.
+BASELINE_LAGGY_UNPROVOKED_BRAKES = 10
 # Before ACC_ARCHITECTURE.md §10.2 (2026-09-30) these were 1.37 s and 12 re-stops.
 BASELINE_PULL_AWAY_START_S = 0.97
 BASELINE_CREEP_RESTOPS = 8
