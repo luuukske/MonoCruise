@@ -1,6 +1,7 @@
-"""The settings panel's lane departure dropdown: None, Warn and Steer onto ldw_enabled and lka_enabled.
+"""The settings panel's lane departure dropdown: None and Warn onto ldw_enabled.
 
-A pick other than None installs the FFB plugin (core/sdk_installer/README.md, MonoCruise's own plugins).
+Warn installs the FFB plugin (core/sdk_installer/README.md, MonoCruise's own plugins). Steer is config only for
+now (lka_enabled, Lukas 2026-11-20): the dropdown neither offers it nor touches it.
 """
 from __future__ import annotations
 
@@ -28,7 +29,12 @@ def installs(monkeypatch):
 
 
 @pytest.fixture()
-def panel(qapp, installs, monkeypatch):
+def saves():
+    return []
+
+
+@pytest.fixture()
+def panel(qapp, installs, saves, monkeypatch):
     s = Settings.instance()
     saved = {name: getattr(s, name) for name in _TOUCHED}
     s.ldw_enabled, s.lka_enabled = False, False
@@ -36,7 +42,7 @@ def panel(qapp, installs, monkeypatch):
     host = QWidget()
     p = SettingsPanel(
         host, s,
-        on_save=lambda: None, on_reset=lambda: None,
+        on_save=lambda: saves.append(1), on_reset=lambda: None,
         show_confirm=lambda *a, **k: None, show_consent=lambda **kw: None,
     )
     p._bind_timer.stop()
@@ -52,24 +58,28 @@ def _load(p: SettingsPanel, ldw: bool, lka: bool) -> None:
     p.apply_settings(s)
 
 
+def test_steer_is_not_offered(panel):
+    offered = [panel.opt_ldw.itemText(i) for i in range(panel.opt_ldw.count())]
+    assert offered == ["None", "Warn"]
+
+
 @pytest.mark.parametrize(
     "ldw, lka, shown",
-    [(False, False, "None"), (True, False, "Warn"), (True, True, "Steer"), (False, True, "Steer")],
+    [(False, False, "None"), (True, False, "Warn"), (True, True, "Warn"), (False, True, "None")],
 )
-def test_it_shows_the_two_switches(panel, installs, ldw, lka, shown):
+def test_it_shows_the_rumble_switch_only(panel, installs, ldw, lka, shown):
     _load(panel, ldw, lka)
     assert panel.opt_ldw.currentText() == shown
     assert installs == [], "loading settings never installs anything"
 
 
-@pytest.mark.parametrize(
-    "mode, ldw, lka",
-    [("Warn", True, False), ("Steer", True, True), ("None", False, False)],
-)
-def test_a_pick_sets_both_switches_and_installs_the_plugin_unless_none(panel, installs, mode, ldw, lka):
+@pytest.mark.parametrize("lka", [False, True])
+@pytest.mark.parametrize("mode, ldw", [("Warn", True), ("None", False)])
+def test_a_pick_sets_the_rumble_keeps_the_config_lka_and_installs_unless_none(panel, installs, saves, mode, ldw, lka):
     was_on = mode == "None"
-    _load(panel, was_on, was_on)
+    _load(panel, was_on, lka)
     panel.opt_ldw.setCurrentText(mode)
     s = Settings.instance()
-    assert (s.ldw_enabled, s.lka_enabled) == (ldw, lka)
+    assert (s.ldw_enabled, s.lka_enabled) == (ldw, lka), "a config-set lka_enabled survives every pick"
+    assert saves, "the pick is saved to config.json"
     assert installs == ([] if mode == "None" else ["monocruise_ffb.dll"])

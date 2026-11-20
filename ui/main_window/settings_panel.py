@@ -89,14 +89,15 @@ _GAP_LEVEL_LABELS = ("1 (0.7s)", "2 (1.1s)", "3 (1.5s)", "4 (2.2s)")
 # Extra breathing room under the Unassign button, before the next setting.
 _UNASSIGN_GAP = 10
 
-# Lane departure: Warn rumbles the wheel at the line, Steer also steers back (core/lane_departure/README.md).
-_LDW_MODES = ("None", "Warn", "Steer")
+# Lane departure: Warn rumbles the wheel at the line (core/lane_departure/README.md). Steer (lka_enabled) is
+# config only for now, so the dropdown never reads or writes it.
+_LDW_MODES = ("None", "Warn")
 _FFB_PLUGIN = "monocruise_ffb.dll"
 
 
 def _ldw_mode(s: Any) -> str:
-    """The dropdown's view of ``ldw_enabled`` and ``lka_enabled``; LKA alone (config only) reads as Steer."""
-    return "Steer" if s.lka_enabled else "Warn" if s.ldw_enabled else "None"
+    """The dropdown's view of ``ldw_enabled``."""
+    return "Warn" if s.ldw_enabled else "None"
 
 
 # Resolve project‑root path for assets (gear.png, patreon.png, youtube.png
@@ -853,7 +854,7 @@ class SettingsPanel(QWidget):
         self.opt_ldw, _, _ = self._field_with_subtext(
             "Lane departure:",
             self._build_ldw_field,
-            "Needs a force feedback wheel. Steer also steers you back.",
+            "Needs a force feedback wheel.",
         )
 
         # Clip sharing (opt-in)
@@ -1300,7 +1301,7 @@ class SettingsPanel(QWidget):
         self._aeb_test.trigger()
 
     def _build_ldw_field(self, container: QWidget, row: int, col: int) -> Any:
-        """BETA pill and the None / Warn / Steer dropdown in one cell."""
+        """BETA pill and the None / Warn dropdown in one cell."""
         combo = new_optionmenu(
             container, row, col,
             values=_LDW_MODES,
@@ -1322,8 +1323,7 @@ class SettingsPanel(QWidget):
         return combo
 
     def _on_ldw_mode_changed(self, mode: str) -> None:
-        self._settings.ldw_enabled = mode != "None"
-        self._set("lka_enabled", mode == "Steer")
+        self._set("ldw_enabled", mode != "None")
         if mode != "None":
             self._install_ffb_plugin()
 
