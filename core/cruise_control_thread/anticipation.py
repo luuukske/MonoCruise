@@ -12,23 +12,56 @@ if TYPE_CHECKING:
     from .acc_controller import ACConfig, _LeadSnapshot
 
 
+# Unconfirmed, anticipation may take the command no lower than this: a lift-off (ETS2 coasts at
+# about -0.2). Confirmation fades in its full floor. False restores the old floor. §9.13.
+ANT_CONFIRM_ENABLED: bool = True
+ANT_LIFT_FLOOR_MS2: float = -0.3
+# The immediate lead slowing confirms (smoothed decel, m/s^2: none at the first, full at the second).
+ANT_CONFIRM_LEAD_ZERO_MS2: float = 0.3
+ANT_CONFIRM_LEAD_FULL_MS2: float = 0.8
+# An upstream vehicle braking firmly confirms, by its coupling weight.
+ANT_CONFIRM_UP_ZERO_MS2: float = 0.8
+ANT_CONFIRM_UP_FULL_MS2: float = 1.8
+# So does one whose own law at its direct gap brakes firmly: a slow or stopped car the lead may pass.
+ANT_CONFIRM_DIRECT_ZERO_MS2: float = 1.0
+ANT_CONFIRM_DIRECT_FULL_MS2: float = 2.0
+# A member coupled at least this much confirms in full: its coupling already scales what it adds,
+# and scaling the proof too held a convoy's braking wave at half its floor.
+ANT_CONFIRM_WEIGHT_FULL: float = 0.3
+
+
 def _clamp(v: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, v))
 
 
-def anticipation_delta(
-    cfg: ACConfig,
-    chain_raw: list[_LeadSnapshot],
-    chain_smooth: list[_LeadSnapshot],
-    v_ego: float,
-    a_base: float,
-    t_headway: float,
-    ttc_min_vclose_ms: float,
-) -> float:
-    """Unfiltered anticipation adjustment (m/s^2) from leads beyond the first."""
-    if len(chain_smooth) < 2:
-        return 0.0
+def _ramp(x: float, zero: float, full: float) -> float:
+    return 1.0 - idm_cah.fade(x, zero, full)
 
+
+def confirmation(primary: _LeadSnapshot, members: list[tuple[float, float, float]]) -> float:
+    """0..1 evidence that the traffic ahead really slows. `members`: (weight, decel, direct-gap law)."""
+    best = _ramp(-primary.a_lead_ms2, ANT_CONFIRM_LEAD_ZERO_MS2, ANT_CONFIRM_LEAD_FULL_MS2)
+    for w_member, a_n, law_n in members:
+        w = min(1.0, w_member / ANT_CONFIRM_WEIGHT_FULL)
+        best = max(best, w * _ramp(-a_n, ANT_CONFIRM_UP_ZERO_MS2, ANT_CONFIRM_UP_FULL_MS2),
+                   w * _ramp(-law_n, ANT_CONFIRM_DIRECT_ZERO_MS2, ANT_CONFIRM_DIRECT_FULL_MS2))
+    return best
+
+
+def confirmed_floor(cfg: ACConfig, a_base: float, confirm: float) -> float:
+    """The lowest command anticipation may set: a lift-off unconfirmed, its brake floor confirmed."""
+    floor = cfg.ant_brake_floor_ms2
+    lift = min(a_base, ANT_LIFT_FLOOR_MS2)
+    if not ANT_CONFIRM_ENABLED or lift <= floor:
+        return floor
+    return lift + confirm * (floor - lift)
+
+
+def weighted_members(cfg: ACConfig, chain_raw: list[_LeadSnapshot],
+                     chain_smooth: list[_LeadSnapshot]) -> list[tuple[_LeadSnapshot, _LeadSnapshot, float]]:
+    """(predecessor, member, coupling weight) for every lead beyond the first. §9.2."""
+    if len(chain_smooth) < 2:
+        return []
     # Stationary-lead failsafe on the RAW immediate lead speed: traffic
     # beyond a stopped vehicle predicts nothing about when it will move.
     moving_gate = _clamp(
@@ -38,9 +71,7 @@ def anticipation_delta(
         1.0,
     )
     if moving_gate <= 0.0:
-        return 0.0
-
-    # Coupling weights: pairwise time-gap ramp x tracker-score
+        return []
     members: list[tuple[_LeadSnapshot, _LeadSnapshot, float]] = []
     prev = chain_smooth[0]
     w_run = moving_gate * prev.conf
@@ -53,12 +84,26 @@ def anticipation_delta(
             w_run = 0.0
         members.append((prev, cur, w_run))
         prev = cur
+    return members
 
+
+def anticipation_delta(
+    cfg: ACConfig,
+    chain_raw: list[_LeadSnapshot],
+    chain_smooth: list[_LeadSnapshot],
+    v_ego: float,
+    a_base: float,
+    t_headway: float,
+    ttc_min_vclose_ms: float,
+) -> float:
+    """Unfiltered anticipation adjustment (m/s^2) from leads beyond the first."""
+    members = weighted_members(cfg, chain_raw, chain_smooth)
     if not any(w for _, _, w in members):
         return 0.0
 
     # Decel side: each anticipated lead is evaluated at its direct gap
     a_dec_delta = 0.0
+    evidence: list[tuple[float, float, float]] = []
     for _, lead, w in members:
         if w <= 0.0:
             continue
@@ -66,6 +111,7 @@ def anticipation_delta(
             idm_cah.lead_law(cfg, lead.dist_m, v_ego, lead.v_lead_ms, lead.a_lead_ms2,
                              t_headway, lead.a_lead_ff_ms2),
             cfg.max_decel_ms2, cfg.max_accel_ms2)
+        evidence.append((w, lead.a_lead_ms2, a_n))
         contrib = w * min(0.0, a_n - a_base)
         if contrib < a_dec_delta:
             a_dec_delta = contrib
@@ -98,6 +144,9 @@ def anticipation_delta(
     virt_delta = a_virt_cmd - a_real_cmd
     if virt_delta < a_dec_delta:
         a_dec_delta = virt_delta
+    # Unconfirmed it only lifts off: alone it braked for traffic the lead then absorbed. §9.13.
+    floor = confirmed_floor(cfg, a_base, confirmation(primary, evidence))
+    a_dec_seen, a_dec_delta = a_dec_delta, max(a_dec_delta, min(0.0, floor - a_base))
     lift = _clamp(virt_delta, 0.0, cfg.ant_lift_max_ms2)
 
     if lift > 0.0:
@@ -111,7 +160,7 @@ def anticipation_delta(
         # Fade lift out when decel anticipation is binding so the two
         # sides never fight.
         lift *= _clamp(
-            1.0 + a_dec_delta / max(cfg.ant_lift_fade_ms2, 1e-6), 0.0, 1.0,
+            1.0 + a_dec_seen / max(cfg.ant_lift_fade_ms2, 1e-6), 0.0, 1.0,
         )
 
     return a_dec_delta + lift

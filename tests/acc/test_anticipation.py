@@ -121,3 +121,49 @@ def test_the_controller_chain_fits_what_the_tracker_publishes():
 
     assert acc_controller.MA_MAX_LEADS <= tracker.PUBLISHED_LEADS
     assert stack.TRACKER_LEADS == tracker.PUBLISHED_LEADS
+
+
+def _delta(raw, smooth, a_base, confirm_enabled=True, v_ego=25.0, t_h=1.1):
+    cfg = AdaptiveCruiseController().config
+    previous = anticipation.ANT_CONFIRM_ENABLED
+    anticipation.ANT_CONFIRM_ENABLED = confirm_enabled
+    try:
+        return anticipation.anticipation_delta(cfg, raw, smooth, v_ego, a_base, t_h, TTC_MIN_VCLOSE_MS)
+    finally:
+        anticipation.ANT_CONFIRM_ENABLED = previous
+
+
+def _steady_lead_law():
+    return AdaptiveCruiseController()._lead_law(35.0, 25.0, 25.0, 0.0, 1.1, 0.0)
+
+
+def test_a_slower_car_beyond_a_steady_lead_only_lifts():
+    """§9.13, drive of 2026-11-20: a car 11 km/h slower beyond a steady lead braked ego to -1.3."""
+    raw, smooth = _chain((1, 35.0, 25.0, 0.0, 6.0), (2, 60.0, 22.0, 0.0, 6.0))
+    a_base = _steady_lead_law()
+    assert a_base > 0.0
+    assert a_base + _delta(raw, smooth, a_base, confirm_enabled=False) < -1.0, "fixture: the old brake"
+    cmd = a_base + _delta(raw, smooth, a_base)
+    assert anticipation.ANT_LIFT_FLOOR_MS2 - 1e-9 <= cmd <= anticipation.ANT_LIFT_FLOOR_MS2 + 0.01
+
+
+def test_confirmed_anticipation_is_unchanged():
+    """A braking car beyond, the lead itself slowing, or a slow car near enough to need firm braking."""
+    a_base = _steady_lead_law()
+    for leads in (((1, 35.0, 25.0, 0.0, 6.0), (2, 60.0, 22.0, -2.5, 6.0)),
+                  ((1, 35.0, 25.0, -1.0, 6.0), (2, 60.0, 22.0, 0.0, 6.0)),
+                  ((1, 35.0, 25.0, 0.0, 6.0), (2, 47.0, 10.0, 0.0, 6.0))):
+        raw, smooth = _chain(*leads)
+        assert _delta(raw, smooth, a_base) == _delta(raw, smooth, a_base, confirm_enabled=False), leads
+
+
+def test_confirmation_fades_in_without_a_step():
+    """More braking beyond the lead never gives less brake, and no 0.01 m/s^2 of it steps the command."""
+    a_base = _steady_lead_law()
+    cmds = []
+    for i in range(251):
+        raw, smooth = _chain((1, 35.0, 25.0, 0.0, 6.0), (2, 60.0, 22.0, -0.01 * i, 6.0))
+        cmds.append(a_base + _delta(raw, smooth, a_base))
+    steps = [b - a for a, b in zip(cmds, cmds[1:])]
+    assert max(steps) <= 1e-9, "braking harder beyond the lead loosened the command"
+    assert min(steps) > -0.05, f"step {min(steps):.3f} m/s^2"

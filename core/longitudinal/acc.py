@@ -2,12 +2,18 @@
 
 from __future__ import annotations
 
+import logging
 import math
+import time
+from pathlib import Path
 
 from core.cruise_control_thread.acc_controller import AdaptiveCruiseController as _ACCFollowingDistance
+from core.cruise_control_thread.acc_debug import AccDebugLog
 from core.settings import Settings
 
 from .base import LongCtx, LongitudinalController, LongOutput
+
+logger = logging.getLogger(__name__)
 
 
 def free_road_target_ms2(cruise_bid_ms2: float | None, inner: _ACCFollowingDistance) -> float:
@@ -30,6 +36,7 @@ class AdaptiveCruiseController(LongitudinalController):
 
     def __init__(self) -> None:
         self._inner = _ACCFollowingDistance()
+        self._debug_log: AccDebugLog | None = None
 
     @property
     def active(self) -> bool:
@@ -41,8 +48,20 @@ class AdaptiveCruiseController(LongitudinalController):
         if not self.active:
             self._inner.reset()
             return LongOutput(None, False)
-        cap_ms2 = self._inner.accel_cap_ms2(ctx.speed_ms, free_road_target_ms2(cruise_bid_ms2, self._inner))
+        free_road = free_road_target_ms2(cruise_bid_ms2, self._inner)
+        cap_ms2 = self._inner.accel_cap_ms2(ctx.speed_ms, free_road)
+        if Settings.debug:
+            self._debug_tick(cap_ms2, free_road, ctx.speed_ms)
         return LongOutput(cap_ms2, True)
+
+    def _debug_tick(self, cap_ms2: float, free_road: float, speed_ms: float) -> None:
+        # Queued to the debug CSV writer thread; a logging fault must never reach the cap.
+        try:
+            if self._debug_log is None:
+                self._debug_log = AccDebugLog(Path(__file__).resolve().parents[2])
+            self._debug_log.tick(time.monotonic(), self._inner, cap_ms2, free_road, max(0.0, speed_ms))
+        except Exception:
+            logger.debug("acc_debug tick failed", exc_info=True)
 
     @property
     def crawl_follow(self) -> bool:

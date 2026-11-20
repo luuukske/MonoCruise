@@ -356,6 +356,7 @@ class AdaptiveCruiseController:
             committed=blinker.committed,
             lane_offset_m=blinker.lane_offset_m,
         )
+        self.debug_raw = (a_raw, is_emergency)
         a_raw = free_road_lift.lift(self.config, a_raw, free_road_ms2, v_ego, is_emergency)
         return self._output_filter(self._jerk_limit(a_raw, dt, is_emergency, v_ego), dt, is_emergency)
 

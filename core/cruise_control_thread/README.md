@@ -159,6 +159,8 @@ lead is differenced against the law on the unmodified immediate lead, never `a_b
 anticipated command never sets `is_emergency`, and anticipation alone brakes no harder than
 `ANT_BRAKE_FLOOR_MS2` (-3.0). The first two were phantom full-brake paths; see
 `core/acc/ACC_ARCHITECTURE.md` §9.3, §9.7, and §9.8 for what was measured and rejected.
+Unconfirmed it only lifts off (§9.13): to `ANT_LIFT_FLOOR_MS2` (-0.3) until the immediate
+lead slows, a member beyond brakes firmly, or one needs firm braking at its own gap.
 Score confidence ramps (`ANT_SCORE_MIN` to `ANT_SCORE_FULL`); per-vehicle confidence EMA
 is fast up / slow down. Primary-lead ghost hold (`PRIMARY_GHOST_HOLD_S`) fades braking
 when the immediate lead vanishes. Accel-side lift (`ANT_KV`, `ANT_KA`, TTC ramp) fades when
@@ -413,3 +415,30 @@ free-road target by a weight that is a smoothstep on `law / a_free`: 0 at or bel
   command moves by under 0.1 m/s² for it.
 - Do not lower the 0.88 edge to make ACC livelier in traffic: at 10 km/h it is what keeps a
   lead 30 m ahead (3x the wanted gap) on the plain law.
+
+### ACC debug log (`acc_debug.py`)
+
+With `debug` on in `config.json`, `acc_debug.csv` at the project root gets a row at 20 Hz
+while ACC has a lead, plus a 2 s tail. It answers "which term braked here" from a drive:
+
+- what the law saw: the raw lead (gap, speed, accel, score) and the smoothed one (plus the
+  slower feedforward accel and confidence), the second chain member, ego speed and accel;
+- the law's terms on the smoothed lead: IIDM, CAH, their blend, the lead-brake feedforward,
+  the accel nudge, the whole `lead_law`, then the pull-away lift and approach band
+  (`banded_law`, unslewed) and the monotone follow limit;
+- the stateful stages: the band's slewed pull, landing engaged and its gap excess,
+  anticipation's delta, standstill hold, blinker leaving the lane;
+- the outputs: the command before free-road lift (`law_out_ms2`, from
+  `AdaptiveCruiseController.debug_raw`), after it, after the jerk limiter, and the cap;
+- `need_ms2`, the constant decel that meets the lead's current speed at the wanted gap,
+  and `gap_ratio`, `ttc_s`, `closing_ms`;
+- anticipation: the third chain member, the member asking the most braking (index,
+  weight, gap, speed, accel, its own law), the virtual lead's offsets, and §9.13's
+  confirmation and floor. The second member is usually the lead's own tractor.
+
+The law terms are recomputed statelessly from the smoothed lead, so they leave out shift
+debt's change to the lead the law reads (the stateful columns and `law_out_ms2` carry it).
+No vehicle or player id is written: a new immediate lead is the `lead_changed` flag. Rows go
+through `DebugCsvSink` (`core/sending_thread/README.md`, no disk I/O on a control loop) and
+the row is only built when one is due, so the cruise loop pays nothing between rows.
+`tests/acc/test_acc_debug.py`.

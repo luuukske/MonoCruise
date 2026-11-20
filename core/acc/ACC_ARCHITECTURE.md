@@ -1385,6 +1385,45 @@ Stops, contacts, minimum gap and peak decel are unchanged at both sizes. Ten tru
 carries the command, measured accel, gas and gear at 10 Hz. `own_shift_hold_s = 0` switches it
 off (in the probe `BASELINE`). Enforced by `tests/acc/test_shift_debt.py`.
 
+### 9.13 Lift only until confirmed (2026-11-20)
+
+The first ACC debug log (36 min, gap levels 1 to 4, `acc_debug.csv`) had 46 brake
+episodes past -0.3 m/s². In 14 the immediate lead's own law asked for no brake at all
+(+0.1 to +1.35) and anticipation alone pulled the command down. 7 were needed: the
+lead braked to -1.5 to -8 m/s² within seconds, or a slower car became the lead, and
+anticipation started 0.3 to 6.9 s (median 0.9 s) before the lead's own law asked for
+any brake. 7 were not: the lead only lifted or braked lightly (-0.2 to -1.2) and ego
+braked -0.5 to -1.3, up to twice the lead. The pattern that makes the second kind is
+the virtual lead: a car 3 to 5 m/s slower 25 m beyond a steady lead (law +0.2) took
+ego's command to -0.8 to -1.9.
+
+**Rule** (`anticipation.confirmation`, `confirmed_floor`): anticipation alone may take
+the command no lower than `ANT_LIFT_FLOOR_MS2` (-0.3, a lift-off: ETS2 coasts at about
+-0.2 on level road), or the immediate lead's own law if that already brakes harder. Its
+full floor (`ant_brake_floor_ms2`, -3.0) fades in with the strongest confirmation, each
+a cosine ramp: the immediate lead's smoothed decel (0.3 to 0.8 m/s²), an anticipated
+member's decel (0.8 to 1.8), or a member's own law at its direct gap braking (1.0 to
+2.0): a slow or stopped car the lead may swerve round still brakes ego as before. A
+member's proof counts in full from a coupling weight of 0.3 (`ANT_CONFIRM_WEIGHT_FULL`),
+in proportion below: scaled by the weight itself, a braking wave three trucks up the
+convoy confirmed at about 0.55 and held its followers at half the floor (10-truck full
+stop: contacts 5 -> 7, AEB disarms 2 -> 4). Confirmed, the delta is the old one exactly
+(`test_confirmed_anticipation_is_unchanged`); the floor is continuous and never loosens
+as the braking beyond the lead grows (`test_confirmation_fades_in_without_a_step`). The
+lift side and its fade read the unclamped decel, so they are unchanged.
+`ANT_CONFIRM_ENABLED = False` restores the old floor.
+
+Convoy sim against the old floor: full-stop contacts 5 and 5, AEB disarms 2 and 2,
+laggy-client unprovoked brakes 10 -> 9, steady 2 and 2, pull-through 3 and 3. A pair
+time-to-contact proof (lead closing on the member in under 2 to 4 s) changed none of
+them and was dropped. Closed loop (a car 20 km/h slower closing in ahead of a steady
+lead, levels 2 and 3):
+where the lead never reaches it the brake is gone (-0.37 -> -0.21), where the lead
+changes lane it starts 4 s later at the same peak, and where the lead slows to it
+nothing changes. Cars beyond the lead that brake at -1.5 and -2.5 are unchanged. The
+debug log now records the member anticipation acts on, its weight and law, the virtual
+lead's offsets, the confirmation and the floor, so the next drive can check the 7.
+
 ## 10. Safety overlays
 
 Sit on top of the IIDM/CAH/ACC blend. Each can short-circuit the rest of

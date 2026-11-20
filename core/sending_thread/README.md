@@ -848,7 +848,8 @@ too slowly in between to earn back its restart quota, and the fourth freeze left
 driver with no MonoCruise pedals until quit. So nothing on this loop waits for the disk:
 
 - Every debug CSV (`brake_debug`, `gas_learn_debug`, `coast_debug`, the mapper log, and
-  the LA / LKA `*_debug.csv` and `*_ffb_debug.csv`) is a `DebugCsvSink`: the caller only
+  the LA / LKA `*_debug.csv` and `*_ffb_debug.csv`, and ACC's `acc_debug.csv` on the cruise
+  loop) is a `DebugCsvSink`: the caller only
   queues a row; one `debug_csv_writer` daemon thread opens (header line only, rotation
   as above), writes and flushes. A full queue (5000 batches, about a minute of rows)
   drops rows and counts them (`debug_csv_dropped()`); it never waits. `drain_debug_csv()`
