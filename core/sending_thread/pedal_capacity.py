@@ -246,7 +246,7 @@ class PedalCapacityTracker:
                 )
             scale = 1.0
             try:
-                Settings.save(values={
+                Settings.save_async(values={
                     "pedal_capacity_brake_scale": 1.0,
                     "pedal_capacity_brake_model": _BRAKE_MODEL_VERSION,
                 })
@@ -729,7 +729,7 @@ class PedalCapacityTracker:
 
     def _write(self, now: float) -> None:
         try:
-            Settings.save(values={
+            Settings.save_async(values={
                 "pedal_capacity_brake_scale": round(self._brake_scale, 4),
                 "pedal_capacity_accel_anchor_gain_ms2": round(self._accel_anchor_gain_ms2, 3),
                 "pedal_capacity_accel_ratio_step": round(self._accel_ratio_step, 4),

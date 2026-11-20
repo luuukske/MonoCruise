@@ -44,7 +44,7 @@ from .aeb_capacity import (
 )
 from core.traction.reader import TractionReader, is_wet, wet_grip_factor
 
-from .debug_csv import BrakeDebugLog, GasLearnDebugLog, open_debug_csv
+from .debug_csv import BrakeDebugLog, DebugCsvSink, GasLearnDebugLog
 from .recent_brake import RecentBrakeOutputs
 from .hold_controller import (
     HoldController,
@@ -422,7 +422,7 @@ class SendingThread(BaseThread):
         self._full_pedal = FullPedalStore()
         self._full_run = FullPedalRun()
         self._traction = TractionReader()
-        self._brake_intensity = BrakeIntensityCache()
+        self._brake_intensity = BrakeIntensityCache(background=True)
         self._low_i_aeb_warn = LowBrakeIntensityAebWarning()
         self._aeb_controller = AEBDecelController()
         self._key_listener = None
@@ -459,8 +459,7 @@ class SendingThread(BaseThread):
         self._autoneutral_drive_presses: int = 0
 
         # Coast-down logger state
-        self._coast_log_file = None
-        self._coast_log_writer = None
+        self._coast_log: DebugCsvSink | None = None
         self._last_coast_log_mono: float = 0.0
         self._coast_log_start_mono: float | None = None
         # Last live pedal outputs held across game pause so the viz bar (and
@@ -478,11 +477,9 @@ class SendingThread(BaseThread):
     # Coast-down CSV logger
 
     def _ensure_coast_log(self) -> None:
-        if self._coast_log_file is not None:
+        if self._coast_log is not None:
             return
-        self._coast_log_file, self._coast_log_writer = open_debug_csv(
-            self._project_root / _COAST_LOG_NAME, _COAST_LOG_HEADER_ROW,
-        )
+        self._coast_log = DebugCsvSink(self._project_root / _COAST_LOG_NAME, _COAST_LOG_HEADER_ROW)
 
     def _log_coast_step(
         self,
@@ -531,47 +528,37 @@ class SendingThread(BaseThread):
         t_s = now - self._coast_log_start_mono
 
         self._ensure_coast_log()
-        if self._coast_log_writer is None:
-            return
 
         slope_accel = 9.81 * math.sin(slope_rad)
         drag_accel = raw_accel_ms2 - slope_accel
-        try:
-            self._coast_log_writer.writerow([
-                f"{t_s:.3f}",
-                datetime.now(timezone.utc).isoformat(),
-                sample_kind,
-                f"{speed_ms:.3f}",
-                f"{raw_accel_ms2:+.4f}",
-                f"{slope_rad:+.5f}",
-                f"{slope_accel:+.4f}",
-                f"{drag_accel:+.4f}",
-                f"{road_load_ms2:+.4f}",
-                gear,
-                f"{game_clutch:.3f}",
-                f"{game_throttle:.3f}",
-                f"{game_brake:.3f}",
-                f"{mass_kg:.1f}",
-                int(bool(has_trailer)),
-                int(wheels_on_ground),
-                int(trailer_count),
-                f"{est_brake_ms2:.3f}",
-                int(bool(aeb_active)),
-                f"{aforward:.4f}",
-                f"{abackward:.4f}",
-            ])
-            self._coast_log_file.flush()
-        except OSError:
-            logger.debug("coast_debug log write failed", exc_info=True)
+        self._coast_log.writerow([
+            f"{t_s:.3f}",
+            datetime.now(timezone.utc).isoformat(),
+            sample_kind,
+            f"{speed_ms:.3f}",
+            f"{raw_accel_ms2:+.4f}",
+            f"{slope_rad:+.5f}",
+            f"{slope_accel:+.4f}",
+            f"{drag_accel:+.4f}",
+            f"{road_load_ms2:+.4f}",
+            gear,
+            f"{game_clutch:.3f}",
+            f"{game_throttle:.3f}",
+            f"{game_brake:.3f}",
+            f"{mass_kg:.1f}",
+            int(bool(has_trailer)),
+            int(wheels_on_ground),
+            int(trailer_count),
+            f"{est_brake_ms2:.3f}",
+            int(bool(aeb_active)),
+            f"{aforward:.4f}",
+            f"{abackward:.4f}",
+        ])
 
     def _close_coast_log(self) -> None:
-        if self._coast_log_file is not None:
-            try:
-                self._coast_log_file.close()
-            except OSError:
-                pass
-            self._coast_log_file = None
-            self._coast_log_writer = None
+        if self._coast_log is not None:
+            self._coast_log.close()
+            self._coast_log = None
 
     def toggle_bool(self, name: str, duration: float = BOOL_PRESS_DURATION) -> None:
         """One-shot timed press: set *name* True for *duration* seconds, then False."""

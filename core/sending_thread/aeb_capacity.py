@@ -191,7 +191,7 @@ class AebCapacityStore:
             return
         snapshot = {key: round(value, 4) for key, value in self._scales.items()}
         try:
-            Settings.save(values={"aeb_brake_scales": snapshot})
+            Settings.save_async(values={"aeb_brake_scales": snapshot})
         except Exception:
             logger.debug("aeb_brake_scales save failed", exc_info=True)
             return
@@ -338,6 +338,6 @@ class FullPedalStore:
             for k, v in self._entries.items()
         }
         try:
-            Settings.save(values={"aeb_full_pedal": snapshot})
+            Settings.save_async(values={"aeb_full_pedal": snapshot})
         except Exception:
             logger.debug("aeb_full_pedal save failed", exc_info=True)

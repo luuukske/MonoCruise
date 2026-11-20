@@ -44,6 +44,12 @@ def prompt_is_due(usage_seconds: float, prompts_dismissed: int) -> bool:
     return hours >= prompt_threshold_hours(prompts_dismissed)
 
 
+def _persist(settings) -> None:
+    """save_async where the object has it: the GUI thread waited 2.5 s on an fsync here (2026-11-20)."""
+    save = getattr(settings, "save_async", None) or settings.save
+    save()
+
+
 def record_prompt_dismissed(settings) -> int:
     """Count one dismissal so the next prompt moves out to the next threshold."""
     with settings._state_lock:
@@ -53,7 +59,7 @@ def record_prompt_dismissed(settings) -> int:
             count = 1
         settings.support_prompts_dismissed = count
     try:
-        settings.save()
+        _persist(settings)
     except Exception:
         logger.exception("could not persist the support prompt schedule")
     return count
@@ -115,6 +121,6 @@ class UsageTracker:
 
     def _flush(self) -> None:
         try:
-            self._settings.save()
+            _persist(self._settings)
         except Exception:
             logger.exception("could not persist accumulated usage hours")

@@ -93,7 +93,7 @@ def test_what_was_learned_is_saved_at_most_once_a_minute(monkeypatch, settings, 
     monkeypatch.setattr(runner_mod.time, "monotonic", lambda: next(clock))
     runner = AssistRunner(debug_root=tmp_path)
     saved = []
-    monkeypatch.setattr(runner_mod.Settings, "save", classmethod(lambda cls, values=None: saved.append(values)))
+    monkeypatch.setattr(runner_mod.Settings, "save_async", classmethod(lambda cls, values=None: saved.append(values)))
     for k in range(12):
         runner._keep_learned(WheelModel(reading_hz=60.0, calm_s=float(k)))
     assert 1 <= len(saved) <= 2 and saved[0]["la_wheel_learned"]["reading_hz"] == 60.0

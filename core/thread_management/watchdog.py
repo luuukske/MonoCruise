@@ -134,6 +134,9 @@ class Watchdog(BaseThread):
                     thread.healthy = False
                     continue
 
+            # Outputs first: logging the stack waited 2 to 4 s on a stalled disk with the gas held (2026-11-20).
+            self._launch_safe_state(thread)
+
             # Where it is stuck, before the restart moves it: the only evidence a freeze leaves.
             if frozen and not crashed:
                 stack = frozen_stack(getattr(thread, "ident", None))
@@ -187,6 +190,20 @@ class Watchdog(BaseThread):
 
     # restart
 
+    @staticmethod
+    def _launch_safe_state(thread: BaseThread) -> None:
+        """safe_state on a throwaway thread (it may block on I/O)."""
+        try:
+            threading.Thread(
+                target=thread.safe_state,
+                name=f"{thread.name}-safe-state",
+                daemon=True,
+            ).start()
+        except Exception:
+            logger.exception(
+                "could not launch safe_state for '%s' (suppressed)", thread.name
+            )
+
     def _restart(self, dead: BaseThread) -> None:
         factory = self._factories.get(dead.name)
         if factory is None:
@@ -200,18 +217,6 @@ class Watchdog(BaseThread):
             )
             dead.healthy = False
             return
-
-        # safe_state on a throwaway thread before swap (may block on I/O).
-        try:
-            threading.Thread(
-                target=dead.safe_state,
-                name=f"{dead.name}-safe-state",
-                daemon=True,
-            ).start()
-        except Exception:
-            logger.exception(
-                "could not launch safe_state for '%s' (suppressed)", dead.name
-            )
 
         # Brief stop grace only; do not join a syscall-frozen thread indefinitely.
         if dead.is_alive():

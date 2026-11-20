@@ -21,7 +21,7 @@ def fake_settings(monkeypatch):
         saved: list[dict] = []
 
         @classmethod
-        def save(cls, values=None):
+        def save_async(cls, values=None):
             cls.saved.append(dict(values or {}))
 
     _S.saved = []
@@ -168,7 +168,7 @@ def test_the_tracker_hands_over_a_settled_sample_before_its_cap_gate(monkeypatch
         mapper_brake_scale_ms2 = 6.5
 
         @staticmethod
-        def save(values=None):
+        def save_async(values=None):
             pass
 
     monkeypatch.setattr(pc, "Settings", _S)
@@ -197,7 +197,7 @@ def test_a_short_firm_tap_hands_aeb_no_sample(monkeypatch):
         mapper_brake_scale_ms2 = 6.5
 
         @staticmethod
-        def save(values=None):
+        def save_async(values=None):
             pass
 
     monkeypatch.setattr(pc, "Settings", _S)

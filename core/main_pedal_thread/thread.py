@@ -690,7 +690,7 @@ class MainPedalThread(BaseThread):
             shared = False
         js = self._pconf_devices.get(guid)
 
-        Settings.save(values={
+        Settings.save_async(values={
             "device": guid,
             "gasaxis": gas_axis,
             "brakeaxis": brake_axis,

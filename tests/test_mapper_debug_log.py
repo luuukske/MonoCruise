@@ -8,6 +8,7 @@ import pytest
 
 import core.sending_thread.accel_to_pedals as atp
 from core.sending_thread.accel_to_pedals import AccelToPedals
+from core.sending_thread.debug_csv import drain_debug_csv
 from core.settings import Settings
 
 HEADER = atp._DEBUG_LOG_HEADER_ROW
@@ -51,6 +52,7 @@ def test_debug_on_logs_rows_under_the_header(tmp_path, debug_on):
     _log(mapper, 10.0)
     _log(mapper, 10.2)
     mapper.close()
+    assert drain_debug_csv()
     rows = _rows(tmp_path / atp._DEBUG_LOG_NAME)
     assert rows[0] == HEADER
     assert len(rows) == 3
@@ -67,6 +69,7 @@ def test_open_reads_only_the_header_line(tmp_path, debug_on):
     mapper = _mapper(tmp_path)
     _log(mapper, 10.0)
     mapper.close()
+    assert drain_debug_csv()
 
     after = path.read_bytes()
     assert after.startswith(original)           # appended, never rewritten
@@ -83,6 +86,7 @@ def test_oversized_log_is_rotated_aside_at_open(tmp_path, debug_on, monkeypatch)
     mapper = _mapper(tmp_path)
     _log(mapper, 10.0)
     mapper.close()
+    assert drain_debug_csv()
 
     rotated = [p for p in tmp_path.iterdir() if p.name != atp._DEBUG_LOG_NAME]
     assert len(rotated) == 1 and rotated[0].read_text(encoding="utf-8") == old
@@ -98,6 +102,7 @@ def test_log_under_the_cap_keeps_growing_in_place(tmp_path, debug_on, monkeypatc
     mapper = _mapper(tmp_path)
     _log(mapper, 10.0)
     mapper.close()
+    assert drain_debug_csv()
 
     assert [p.name for p in tmp_path.iterdir()] == [atp._DEBUG_LOG_NAME]
     assert len(_rows(path)) == 12
@@ -110,6 +115,7 @@ def test_headerless_log_is_rotated_not_rewritten(tmp_path, debug_on):
     mapper = _mapper(tmp_path)
     _log(mapper, 10.0)
     mapper.close()
+    assert drain_debug_csv()
 
     rotated = [p for p in tmp_path.iterdir() if p.name != atp._DEBUG_LOG_NAME]
     assert len(rotated) == 1 and _rows(rotated[0]) == [["1.000", "2.000"], ["3.000", "4.000"]]
@@ -125,6 +131,7 @@ def test_turning_debug_off_closes_the_log(tmp_path, monkeypatch):
     monkeypatch.setattr(inst, "debug", False)
     _log(mapper, 10.2)
     assert mapper._debug_log_file is None
+    assert drain_debug_csv()
     assert len(_rows(tmp_path / atp._DEBUG_LOG_NAME)) == 2
 
 
@@ -132,4 +139,6 @@ def test_unwritable_root_never_raises(tmp_path, debug_on):
     mapper = _mapper(tmp_path / "missing" / "dir")
     _log(mapper, 10.0)
     _log(mapper, 10.2)
-    assert mapper._debug_log_file is None
+    assert drain_debug_csv()
+    assert mapper._debug_log_file.failed
+    assert not (tmp_path / "missing").exists()

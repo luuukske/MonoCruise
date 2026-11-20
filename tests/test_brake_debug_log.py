@@ -10,6 +10,7 @@ from core.sending_thread.debug_csv import (
     GAS_LEARN_LOG_NAME,
     BrakeDebugLog,
     GasLearnDebugLog,
+    drain_debug_csv,
     open_debug_csv,
 )
 
@@ -30,6 +31,7 @@ def test_logs_while_braking_and_for_the_tail_only(tmp_path):
         t += 0.01
         log.tick(t, False, {"sent_brake": 0.0})
     log.close()
+    assert drain_debug_csv()
 
     rows = _rows(tmp_path / BRAKE_LOG_NAME)
     assert rows[0] == BRAKE_LOG_HEADER
@@ -62,6 +64,7 @@ def test_gas_learning_log_writes_at_10_hz_while_the_pedal_is_down_only(tmp_path)
         t += 0.01
         log.tick(t, False, {"gas_cmd": 0.0})
     log.close()
+    assert drain_debug_csv()
 
     rows = _rows(tmp_path / GAS_LEARN_LOG_NAME)
     assert rows[0] == GAS_LEARN_LOG_HEADER
@@ -75,3 +78,5 @@ def test_an_unwritable_root_never_raises(tmp_path):
     log.tick(1.0, True, {"sent_brake": 0.5})
     log.tick(2.0, True, {"sent_brake": 0.5})
     log.close()
+    assert drain_debug_csv()
+    assert log._sink.failed

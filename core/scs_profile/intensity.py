@@ -11,6 +11,7 @@ fully recovered; warn while AEB is enabled. See README.md.
 from __future__ import annotations
 
 import logging
+import threading
 import time
 
 from .reader import read_selected_profile
@@ -67,27 +68,67 @@ def effective_brake_pedal(sent: float, intensity: float | None) -> float:
     return min(p * clamp_brake_intensity(intensity) / TUNE_BRAKE_INTENSITY, 1.0)
 
 
-class BrakeIntensityCache:
-    """Refresh ``g_brake_intensity`` a few times a second, not every control tick."""
+# Last value read per game, so a restarted sending thread starts from it, not from 1.0.
+_last_read: dict[str | None, float] = {}
+_latest: list[float | None] = [None]
 
-    def __init__(self) -> None:
+
+def last_brake_intensity() -> float | None:
+    """The most recent ``g_brake_intensity`` read for any game, None before the first read. No I/O."""
+    return _latest[0]
+
+
+class BrakeIntensityCache:
+    """Refresh ``g_brake_intensity`` every 2 s, not every control tick.
+
+    ``background`` reads the profile on a helper thread and returns the last value at once:
+    the sending thread must never wait on the disk (README, profile reads off the control loop).
+    """
+
+    def __init__(self, *, background: bool = False) -> None:
+        self._background = background
         self._value = DEFAULT_BRAKE_INTENSITY
         self._last_mono = 0.0
         self._have = False
+        self._reading = False
+        self._lock = threading.Lock()
 
     def get(self, game: str | None = None) -> float:
         now = time.monotonic()
         if self._have and now - self._last_mono < _REFRESH_S:
             return self._value
         self._last_mono = now
+        if not self._background:
+            self._have = True
+            self._refresh(game)
+            return self._value
+        if not self._have and game in _last_read:
+            self._value = _last_read[game]
         self._have = True
+        with self._lock:
+            if self._reading:
+                return self._value
+            self._reading = True
+        try:
+            threading.Thread(target=self._refresh, args=(game,), name="brake_intensity_read", daemon=True).start()
+        except RuntimeError:
+            with self._lock:
+                self._reading = False
+        return self._value
+
+    def _refresh(self, game: str | None) -> None:
         try:
             settings = read_selected_profile(game, live_shifter_type=None)
             if settings.g_brake_intensity is not None:
-                self._value = clamp_brake_intensity(settings.g_brake_intensity)
+                value = clamp_brake_intensity(settings.g_brake_intensity)
+                self._value = value
+                _last_read[game] = value
+                _latest[0] = value
         except Exception:
             log.debug("brake intensity refresh failed", exc_info=True)
-        return self._value
+        finally:
+            with self._lock:
+                self._reading = False
 
 
 class LowBrakeIntensityAebWarning:

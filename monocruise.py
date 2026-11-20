@@ -59,6 +59,7 @@ def _shutdown_requested(handle) -> bool:
     kernel32.WaitForSingleObject.argtypes = (ctypes.c_void_p, ctypes.c_uint)
     return kernel32.WaitForSingleObject(handle, 0) == 0  # WAIT_OBJECT_0
 
+import atexit
 import logging
 import os
 import re
@@ -75,6 +76,7 @@ from core.thread_management.watchdog import Watchdog
 from core.thread_management.monitor  import Monitor
 from core.thread_management.gui_stall_probe import GuiStallProbe
 from core.thread_management.popup_log_handler import PopupLogHandler
+from core.thread_management.log_queue import QueuedLogging
 
 from core.telemetry_thread.thread import TelemetryThread
 from core.main_pedal_thread.thread import MainPedalThread
@@ -82,6 +84,7 @@ from core.keyboard_thread.thread import KeyboardThread
 from core.button_device_thread.thread import ButtonDeviceThread
 from core.cruise_control_thread.thread import CruiseControlThread
 from core.sending_thread.thread import SendingThread, create_visualization_bar
+from core.sending_thread.deadman import PedalDeadmanThread
 from core.radar.thread import RadarThread
 from core.map_thread.thread import MapThread
 from core.lane_departure.thread import LaneDepartureThread
@@ -160,8 +163,11 @@ def _configure_logging() -> None:
     file_handler.setLevel(logging.DEBUG)
     file_handler.setFormatter(file_formatter)
 
-    root.addHandler(stream_handler)
-    root.addHandler(file_handler)
+    # Written on the log writer thread: a stalled disk froze every thread that logged (README).
+    queued = QueuedLogging([stream_handler, file_handler])
+    root.addHandler(queued.handler)
+    queued.start()
+    atexit.register(queued.stop)
 
 
 def _attach_popup_handler(popup: PopupWindow) -> None:
@@ -273,8 +279,13 @@ def main() -> None:
         def _refresh_settings() -> None:
             nonlocal _settings_last_mtime_ns
             try:
+                # A write in flight would hold this timer on the disk, and reloading our own
+                # write would undo values applied since: only a hand edit is reloaded.
+                if Settings.disk_write_pending():
+                    return
                 mtime_ns = CONFIG_PATH.stat().st_mtime_ns if CONFIG_PATH.exists() else None
-                if mtime_ns is not None and mtime_ns == _settings_last_mtime_ns:
+                if mtime_ns is not None and mtime_ns in (_settings_last_mtime_ns, Settings.written_mtime_ns()):
+                    _settings_last_mtime_ns = mtime_ns
                     return
                 _settings_last_mtime_ns = mtime_ns
                 Settings.load()
@@ -468,6 +479,7 @@ def main() -> None:
         ButtonDeviceThread(),
         CruiseControlThread(),
         SendingThread(),
+        PedalDeadmanThread(),
         RadarThread(),
         MapThread(),
         AEBThread(),

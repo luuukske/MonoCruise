@@ -20,7 +20,7 @@ def fake_settings(monkeypatch):
         saved: list[dict] = []
 
         @classmethod
-        def save(cls, values=None):
+        def save_async(cls, values=None):
             cls.saved.append(dict(values or {}))
 
     _S.saved = []

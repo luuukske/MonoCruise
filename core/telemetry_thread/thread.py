@@ -361,7 +361,7 @@ class TelemetryThread(BaseThread):
             with self.data._lock:
                 self.data.is_connected = True
             _apply_telemetry(self.data, raw)
-            Settings.save(values={"last_game": self.data.game})
+            Settings.save_async(values={"last_game": self.data.game})
             now_mono = time.monotonic()
             if now_mono - self._last_mass_log_mono >= _MASS_LOG_INTERVAL_S:
                 self._last_mass_log_mono = now_mono

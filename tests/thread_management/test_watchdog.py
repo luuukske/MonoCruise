@@ -5,6 +5,7 @@ The watchdog is the crash-resilience layer itself, so it is driven here through
 """
 from __future__ import annotations
 
+import logging
 import threading
 import types
 
@@ -310,3 +311,37 @@ def test_paths_outside_the_repo_keep_only_their_tail():
     assert wd_mod._short_path(str(inside)) == "core/sending_thread/thread.py"
     # Frozen builds carry relative code paths; they pass through as-is.
     assert wd_mod._short_path("core/sending_thread/thread.py") == "core/sending_thread/thread.py"
+
+
+class _InlineThread:
+    """Runs safe_state at start(), so the order against the log lines is exact."""
+
+    def __init__(self, target, name=None, daemon=None):
+        self._target = target
+
+    def start(self) -> None:
+        self._target()
+
+
+@pytest.mark.parametrize("at_ceiling", [False, True])
+def test_outputs_are_released_before_the_watchdog_logs_anything(rig, monkeypatch, at_ceiling):
+    """Its log lines waited 2 to 4 s on a stalled disk with the driver's gas held (2026-11-20)."""
+    dog, worker, made, clock = rig
+    events: list[str] = []
+    worker.safe_state = lambda: events.append("safe_state")
+    if at_ceiling:
+        worker.restart_count = worker.max_restarts
+    monkeypatch.setattr(wd_mod, "threading", types.SimpleNamespace(Thread=_InlineThread))
+
+    class _Order(logging.Handler):
+        def emit(self, record):
+            events.append("log")
+
+    handler = _Order(logging.DEBUG)
+    wd_mod.logger.addHandler(handler)
+    try:
+        _freeze(dog, clock)
+    finally:
+        wd_mod.logger.removeHandler(handler)
+    assert events and events[0] == "safe_state"
+    assert events.count("safe_state") == 1

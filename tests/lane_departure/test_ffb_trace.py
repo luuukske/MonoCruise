@@ -9,6 +9,7 @@ import struct
 from pathlib import Path
 
 from core.lane_departure import ffb_trace as tr
+from core.sending_thread.debug_csv import drain_debug_csv
 
 HEADER = Path(__file__).resolve().parents[2] / "plugins" / "ffb" / "ffb_trace.h"
 
@@ -103,6 +104,7 @@ def test_the_log_writes_driving_samples_with_the_tick_context(tmp_path, caplog):
     with caplog.at_level(logging.INFO):
         log.tick(5.0, {"speed_kmh": 80.0, "reason": "steer", "kp": 1234.5, "only": 0, "force_per_ms2": None})
     log.close()
+    assert drain_debug_csv()
     with (tmp_path / "la_ffb_debug.csv").open(encoding="utf-8", newline="") as fh:
         rows = list(csv.DictReader(fh))
     assert [r["t_s"] for r in rows] == ["1.00000", "1.02000"], "a sample from a paused game is skipped"

@@ -45,7 +45,7 @@ class _FakeSettings:
     saves: list = []
 
     @classmethod
-    def save(cls, values=None):
+    def save_async(cls, values=None):
         cls.saves.append(dict(values or {}))
 
 

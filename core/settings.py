@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import atexit
+import copy
 import json
 import logging
 import os
@@ -32,6 +34,10 @@ _LEGACY_CC_ACCEL_MAX_MS2 = 1.0
 _PREVIOUS_RAIL_CC_ACCEL_MAX_MS2 = 2.5
 
 _log = logging.getLogger("settings")
+
+# Serializes config.json reads and writes. Taken before _state_lock, never after it.
+_IO_LOCK = threading.RLock()
+_FLUSH_TIMEOUT_S = 3.0
 
 
 class _SingletonMeta(type):
@@ -387,43 +393,57 @@ class Settings(metaclass=_SingletonMeta):
     @classmethod
     def load(cls) -> None:
         self = cls.instance()
+        with _IO_LOCK:
+            # Disk before the state lock: every Settings.x read in every thread waits on that lock.
+            data, source, file_was_recoverable = cls._read_config_files()
+            if cls._apply_loaded(self, data, source, file_was_recoverable):
+                cls.save(force=True)
+
+    @classmethod
+    def _read_config_files(cls) -> tuple[dict, str, bool]:
+        """config.json, else its backup, else nothing. Returns (data, source, recovered)."""
+        data: dict | None = None
+        source: str = "defaults"
+        file_was_recoverable = False
+
+        if CONFIG_PATH.exists():
+            data, err = cls._try_read_config(CONFIG_PATH)
+            if data is not None:
+                source = "config.json"
+            else:
+                # Primary corrupt: try the backup before quarantining.
+                _log.error("config.json unreadable: %s", err)
+                if BACKUP_PATH.exists():
+                    backup_data, backup_err = cls._try_read_config(BACKUP_PATH)
+                    if backup_data is not None:
+                        data = backup_data
+                        source = "config.json.bak"
+                        file_was_recoverable = True
+                        _log.warning("recovered settings from %s", BACKUP_PATH.name)
+                    else:
+                        _log.error("config.json.bak also unreadable: %s", backup_err)
+                cls._quarantine_corrupt_file(CONFIG_PATH, err or "unreadable")
+        elif BACKUP_PATH.exists():
+            # No primary file at all: last-resort recover from backup.
+            backup_data, backup_err = cls._try_read_config(BACKUP_PATH)
+            if backup_data is not None:
+                data = backup_data
+                source = "config.json.bak (primary missing)"
+                file_was_recoverable = True
+                _log.warning("config.json missing; recovered from %s", BACKUP_PATH.name)
+            else:
+                _log.error("config.json missing and backup unreadable: %s", backup_err)
+
+        if data is None:
+            data = {}
+        return data, source, file_was_recoverable
+
+    @classmethod
+    def _apply_loaded(cls, self: "Settings", data: dict, source: str, file_was_recoverable: bool) -> bool:
+        """Apply parsed config under the state lock. True when the merged result must be written back."""
         with self._state_lock:
             public_keys = [k for k in self.__dataclass_fields__ if not k.startswith("_")]
 
-            data: dict | None = None
-            source: str = "defaults"
-            file_was_recoverable = False
-
-            if CONFIG_PATH.exists():
-                data, err = cls._try_read_config(CONFIG_PATH)
-                if data is not None:
-                    source = "config.json"
-                else:
-                    # Primary corrupt: try the backup before quarantining.
-                    _log.error("config.json unreadable: %s", err)
-                    if BACKUP_PATH.exists():
-                        backup_data, backup_err = cls._try_read_config(BACKUP_PATH)
-                        if backup_data is not None:
-                            data = backup_data
-                            source = "config.json.bak"
-                            file_was_recoverable = True
-                            _log.warning("recovered settings from %s", BACKUP_PATH.name)
-                        else:
-                            _log.error("config.json.bak also unreadable: %s", backup_err)
-                    cls._quarantine_corrupt_file(CONFIG_PATH, err or "unreadable")
-            elif BACKUP_PATH.exists():
-                # No primary file at all: last-resort recover from backup.
-                backup_data, backup_err = cls._try_read_config(BACKUP_PATH)
-                if backup_data is not None:
-                    data = backup_data
-                    source = "config.json.bak (primary missing)"
-                    file_was_recoverable = True
-                    _log.warning("config.json missing; recovered from %s", BACKUP_PATH.name)
-                else:
-                    _log.error("config.json missing and backup unreadable: %s", backup_err)
-
-            if data is None:
-                data = {}
 
             missing_from_file = any(k not in data for k in public_keys)
             remapped_legacy_rolling = False
@@ -499,9 +519,8 @@ class Settings(metaclass=_SingletonMeta):
                     self.cc_accel_max_ms2,
                 )
 
-            if not had_complete_file or remapped_legacy_rolling or remapped_legacy_accel_max:
-                # Persist merged defaults when the file was incomplete or recovered.
-                cls.save(force=True)
+            # Persist merged defaults when the file was incomplete or recovered.
+            return not had_complete_file or remapped_legacy_rolling or remapped_legacy_accel_max
 
     @classmethod
     def _atomic_write(cls, payload: dict) -> None:
@@ -550,30 +569,123 @@ class Settings(metaclass=_SingletonMeta):
             raise
 
     @classmethod
+    def _apply_values(cls, self: "Settings", values: dict | None) -> None:
+        """Set public fields from *values*. Caller holds the state lock."""
+        if not values:
+            return
+        for k, v in values.items():
+            if k in self.__dataclass_fields__ and not k.startswith("_"):
+                setattr(self, k, v)
+
+            if k == "polling_rate":
+                for thread in registry.all_threads():
+                    if hasattr(thread, "update_polling_rate"):
+                        thread.update_polling_rate()
+
+    @classmethod
     def save(cls, values: dict | None = None, *, force: bool = False):
-        """Persist public fields when dirty; optional partial values; force after load merge."""
+        """Persist public fields when dirty; optional partial values; force after load merge.
+
+        Waits for the disk: control loops and the GUI use save_async instead (README)."""
         self = cls.instance()
-        with self._state_lock:
-            if values:
-                for k, v in values.items():
-                    if k in self.__dataclass_fields__ and not k.startswith("_"):
-                        setattr(self, k, v)
+        with _IO_LOCK:
+            with self._state_lock:
+                cls._apply_values(self, values)
+                current = copy.deepcopy(self._public_fields())
+                if not force and current == self._saved_state:
+                    return
 
-                    if k == "polling_rate":
-                        for thread in registry.all_threads():
-                            if hasattr(thread, "update_polling_rate"):
-                                thread.update_polling_rate()
-
-            current = self._public_fields()
-            if not force and current == self._saved_state:
-                return
-
+            # Outside the state lock: a 2.5 s fsync there held every Settings.x read (2026-11-20).
             try:
                 cls._atomic_write(current)
             except Exception:
                 _log.exception("failed to persist settings; on-disk config left untouched")
                 return
 
-            self._saved_state = dict(current)
-            return
+            with self._state_lock:
+                self._saved_state = current
+            cls._note_written()
 
+    @classmethod
+    def save_async(cls, values: dict | None = None) -> None:
+        """Apply *values* now and write config.json on the settings writer thread. Never waits for the disk."""
+        self = cls.instance()
+        with self._state_lock:
+            cls._apply_values(self, values)
+        _SETTINGS_WRITER.request()
+
+    @classmethod
+    def flush_pending(cls, timeout: float = _FLUSH_TIMEOUT_S) -> bool:
+        """Wait for queued save_async writes. Tests and shutdown only. False on timeout."""
+        return _SETTINGS_WRITER.flush(timeout)
+
+    @classmethod
+    def disk_write_pending(cls) -> bool:
+        return _SETTINGS_WRITER.pending()
+
+    @classmethod
+    def written_mtime_ns(cls) -> int | None:
+        """mtime of config.json as this process last wrote it, so a reload can skip its own writes."""
+        return _written_mtime_ns[0]
+
+    @staticmethod
+    def _note_written() -> None:
+        try:
+            _written_mtime_ns[0] = CONFIG_PATH.stat().st_mtime_ns
+        except OSError:
+            _written_mtime_ns[0] = None
+
+
+_written_mtime_ns: list[int | None] = [None]
+
+
+class _SettingsWriter:
+    """Writes config.json for Settings.save_async on a daemon thread, many requests to one write."""
+
+    def __init__(self) -> None:
+        self._cond = threading.Condition()
+        self._requested = False
+        self._busy = False
+        self._thread: threading.Thread | None = None
+
+    def request(self) -> None:
+        with self._cond:
+            self._requested = True
+            if self._thread is None or not self._thread.is_alive():
+                self._thread = threading.Thread(target=self._run, name="settings_writer", daemon=True)
+                self._thread.start()
+            self._cond.notify_all()
+
+    def pending(self) -> bool:
+        with self._cond:
+            return self._requested or self._busy
+
+    def flush(self, timeout: float) -> bool:
+        deadline = time.monotonic() + timeout
+        with self._cond:
+            while self._requested or self._busy:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0.0:
+                    return False
+                self._cond.wait(remaining)
+        return True
+
+    def _run(self) -> None:
+        while True:
+            with self._cond:
+                while not self._requested:
+                    self._cond.wait()
+                self._requested = False
+                self._busy = True
+            try:
+                Settings.save()
+            except Exception:
+                _log.exception("settings writer: save failed")
+            finally:
+                with self._cond:
+                    self._busy = False
+                    self._cond.notify_all()
+
+
+_SETTINGS_WRITER = _SettingsWriter()
+atexit.register(_SETTINGS_WRITER.flush, _FLUSH_TIMEOUT_S)

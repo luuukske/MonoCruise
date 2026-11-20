@@ -37,7 +37,10 @@ Polls every registered, watched, healthy thread:
 - At `restart_count >= max_restarts` the thread is marked unhealthy instead of restarted.
 - `telemetry_thread` with `data.request_quit` is never restarted: shutdown is the entry
   point's business.
-- Restart order: `safe_state()` on a throwaway thread (it may block on I/O), brief
+- `safe_state()` runs on a throwaway thread (it may block on I/O) the moment a freeze or
+  crash is confirmed, before any log line and also at the restart ceiling: on 2026-11-20
+  the watchdog's own log lines waited 2-4 s on a stalled disk with the gas held.
+- Restart order: brief
   `stop(force=True)` plus `join(STOP_GRACE)`, then build the replacement from the
   registered factory, carry `restart_count + 1` over, and `registry.replace()` it.
 - Separately, threads delivering under `LOW_FPS_THRESHOLD` of their target for
@@ -45,6 +48,15 @@ Polls every registered, watched, healthy thread:
   once, batched, so a system-wide stall produces one message and not one per thread.
 
 Behaviour is pinned by `tests/thread_management/`.
+
+## Logging (`log_queue.py`)
+
+The file and console handlers run on one `log_writer` daemon thread. Every logger call
+only formats the message and puts the record on a bounded queue (50 000); a full queue
+drops the record, it never waits. A `FileHandler` flushes under its lock on every record,
+so before this a stalled disk held every thread that logged, the GUI for 3.5 s on
+2026-11-20. The popup handler stays on the calling thread (it only emits a Qt signal).
+`QueuedLogging.stop` drains at exit with a timeout.
 
 ## Monitor (`monitor.py`)
 
@@ -90,6 +102,15 @@ path stays importable without Qt.
    internals.
 
 ## Settings (`core/settings.py`)
+
+`Settings.save` holds the state lock only to apply values and copy them; the file is
+written outside it, serialised by `_IO_LOCK` (taken before the state lock, never after).
+Every `Settings.x` read takes the state lock, so a write under it held every thread for the
+length of an fsync. Worker threads and the GUI call `Settings.save_async`: the values apply
+at once and the settings writer thread writes the file, coalescing requests.
+`Settings.flush_pending()` waits for it (tests, exit). With `debug` on, the config refresh
+reloads only hand edits: it skips while a write is pending and skips the mtime of our own
+last write, which would otherwise undo values applied since.
 
 One instance for the process. Read with `Settings.field`, write with
 `Settings.save(values={"field": value})`. Valid keys are the dataclass fields, mirrored

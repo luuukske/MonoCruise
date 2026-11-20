@@ -39,7 +39,7 @@ def _no_settings_io(monkeypatch):
         mapper_brake_scale_ms2 = 6.5
 
         @staticmethod
-        def save(values=None):
+        def save_async(values=None):
             pass
 
     monkeypatch.setattr(pc, "Settings", _S)
@@ -437,7 +437,7 @@ def test_a_scale_from_the_old_model_is_dropped_once(monkeypatch):
         mapper_brake_scale_ms2 = 6.5
 
         @staticmethod
-        def save(values=None):
+        def save_async(values=None):
             saved.update(values or {})
 
     monkeypatch.setattr(pc, "Settings", _FakeSettings)

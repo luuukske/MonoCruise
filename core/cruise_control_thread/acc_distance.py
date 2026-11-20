@@ -111,7 +111,7 @@ def step_gap_level(delta: int, *, wrap: bool) -> None:
     if new_level == current:
         return
     try:
-        Settings.save(values={"acc_gap_level": new_level})
+        Settings.save_async(values={"acc_gap_level": new_level})
     except Exception:
         logger.exception("failed to persist acc_gap_level")
         return

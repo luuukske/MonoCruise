@@ -16,7 +16,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from core.sending_thread.debug_csv import open_debug_csv
+from core.sending_thread.debug_csv import DebugCsvSink
 
 logger = logging.getLogger(__name__)
 
@@ -175,14 +175,12 @@ class TraceLog:
         self._path = root / name
         self._label = label
         self._reader = TraceReader()
-        self._file = None
-        self._writer = None
-        self._retry_at = -math.inf
+        self._sink = DebugCsvSink(self._path, TRACE_HEADER, _TRACE_MAX_BYTES)
         self._logged: tuple | None = None
         self._logged_at = -math.inf
 
     def tick(self, now: float, context: dict[str, object]) -> None:
-        """Copies what the plugin added since the last tick. Never raises OSError."""
+        """Queues what the plugin added since the last tick for the writer thread. Never raises OSError."""
         read = self._reader.read(now)
         if not read.present:
             return
@@ -190,28 +188,17 @@ class TraceLog:
         rows = [s for s in read.samples if s.flags & FLAG_DRIVING]
         if not rows:
             return
-        if self._writer is None:
-            if now < self._retry_at:
-                return
-            self._file, self._writer = open_debug_csv(self._path, TRACE_HEADER, _TRACE_MAX_BYTES)
-            if self._writer is None:
-                self._retry_at = now + 30.0
-                return
         spring = read.conditions.get("spring", Condition())
         damper = read.conditions.get("damper", Condition())
         tail = [_fmt(context.get(k)) for k in TRACE_HEADER[11:25]] + [
             str(read.const_gain), str(spring.pos_coeff), str(spring.pos_sat), str(spring.gain),
             str(damper.pos_coeff), str(damper.gain)]
         read_s = f"{time.perf_counter():.5f}"
-        try:
-            for i, s in enumerate(rows):
-                self._writer.writerow([
-                    f"{s.t:.5f}", f"{s.steer:.5f}", s.game, s.out, s.servo, s.steer_seq,
-                    int(bool(s.flags & FLAG_SERVO)), int(bool(s.flags & FLAG_RUMBLE)), int(bool(s.flags & FLAG_LIVE)),
-                    read.lost if i == 0 else 0, read_s, *tail])
-            self._file.flush()
-        except OSError:
-            logger.debug("%s write failed", self._path.name, exc_info=True)
+        self._sink.writerows([
+            [f"{s.t:.5f}", f"{s.steer:.5f}", s.game, s.out, s.servo, s.steer_seq,
+             int(bool(s.flags & FLAG_SERVO)), int(bool(s.flags & FLAG_RUMBLE)), int(bool(s.flags & FLAG_LIVE)),
+             read.lost if i == 0 else 0, read_s, *tail]
+            for i, s in enumerate(rows)])
 
     def _note_effects(self, now: float, read: TraceRead) -> None:
         """One log line when the game's effects or its centring conditions change, at most every 10 s."""
@@ -227,10 +214,4 @@ class TraceLog:
 
     def close(self) -> None:
         self._reader.close()
-        if self._file is not None:
-            try:
-                self._file.close()
-            except OSError:
-                pass
-        self._file = None
-        self._writer = None
+        self._sink.close()

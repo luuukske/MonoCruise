@@ -11,7 +11,7 @@ from pathlib import Path
 
 from core.settings import Settings
 
-from .debug_csv import open_debug_csv
+from .debug_csv import DebugCsvSink
 from .launch_governor import LaunchGovernor, launch_gas_cap
 from .strength_scale import (
     StrengthScale,
@@ -411,8 +411,7 @@ class AccelToPedals:
 
         # Debug logging
         self._project_root = Path(__file__).resolve().parents[2]
-        self._debug_log_file = None
-        self._debug_log_writer = None
+        self._debug_log_file: DebugCsvSink | None = None
         self._last_debug_log_mono: float = 0.0
         self._debug_log_start_mono: float | None = None
 
@@ -420,12 +419,8 @@ class AccelToPedals:
 
     def close(self) -> None:
         if self._debug_log_file is not None:
-            try:
-                self._debug_log_file.close()
-            except OSError:
-                pass
+            self._debug_log_file.close()
             self._debug_log_file = None
-            self._debug_log_writer = None
 
     def set_shared_state(self, shared: MapperSharedState) -> None:
         """Swap in an externally-owned shared state (for multi-mapper handover)."""
@@ -683,10 +678,10 @@ class AccelToPedals:
     # Debug logging
 
     def _ensure_debug_log(self) -> None:
-        # Header line only: reading the whole file here froze the sending thread (README).
+        # Opened and written on the debug CSV writer thread: file I/O here froze the sending thread (README).
         if self._debug_log_file is not None:
             return
-        self._debug_log_file, self._debug_log_writer = open_debug_csv(
+        self._debug_log_file = DebugCsvSink(
             self._project_root / _DEBUG_LOG_NAME,
             _DEBUG_LOG_HEADER_ROW,
             max_bytes=_DEBUG_LOG_MAX_BYTES,
@@ -735,44 +730,38 @@ class AccelToPedals:
         t_s = now - self._debug_log_start_mono
 
         self._ensure_debug_log()
-        if self._debug_log_writer is None:
-            return
-        try:
-            self._debug_log_writer.writerow([
-                f"{t_s:.3f}",
-                datetime.now(timezone.utc).isoformat(),
-                f"{speed_ms:.2f}",
-                gear,
-                f"{gearshift_factor:.3f}",
-                _STATE_NAMES.get(pedal_state, "?"),
-                f"{wanted_ms2:.3f}",
-                f"{wanted_smooth:.3f}",
-                f"{raw_ms2:.3f}",
-                f"{raw_smooth:.3f}",
-                f"{error_ms2:.3f}",
-                f"{road_load_ms2:.3f}",
-                f"{slow_integral_ms2:.3f}",
-                f"{effective_road_load_ms2:.3f}",
-                f"{ff:+.4f}",
-                f"{fast_p:+.4f}",
-                f"{fast_i:+.4f}",
-                f"{fast_d:+.4f}",
-                f"{fast_out:+.4f}",
-                f"{effort:+.4f}",
-                f"{gas_cmd:.3f}",
-                f"{brake_cmd:.3f}",
-                f"{gain_scale:.3f}",
-                f"{game_throttle:.3f}",
-                f"{game_clutch:.3f}",
-                f"{est_accel_ms2:.3f}",
-                f"{est_brake_ms2:.3f}",
-                f"{slope_rad:.4f}",
-                f"{capacity_used_ms2:.3f}",
-                f"{(error_ms2 / max(capacity_used_ms2, 0.1)):+.4f}",
-            ])
-            self._debug_log_file.flush()
-        except OSError:
-            logger.debug("accel_to_pedals debug log write failed", exc_info=True)
+        self._debug_log_file.writerow([
+            f"{t_s:.3f}",
+            datetime.now(timezone.utc).isoformat(),
+            f"{speed_ms:.2f}",
+            gear,
+            f"{gearshift_factor:.3f}",
+            _STATE_NAMES.get(pedal_state, "?"),
+            f"{wanted_ms2:.3f}",
+            f"{wanted_smooth:.3f}",
+            f"{raw_ms2:.3f}",
+            f"{raw_smooth:.3f}",
+            f"{error_ms2:.3f}",
+            f"{road_load_ms2:.3f}",
+            f"{slow_integral_ms2:.3f}",
+            f"{effective_road_load_ms2:.3f}",
+            f"{ff:+.4f}",
+            f"{fast_p:+.4f}",
+            f"{fast_i:+.4f}",
+            f"{fast_d:+.4f}",
+            f"{fast_out:+.4f}",
+            f"{effort:+.4f}",
+            f"{gas_cmd:.3f}",
+            f"{brake_cmd:.3f}",
+            f"{gain_scale:.3f}",
+            f"{game_throttle:.3f}",
+            f"{game_clutch:.3f}",
+            f"{est_accel_ms2:.3f}",
+            f"{est_brake_ms2:.3f}",
+            f"{slope_rad:.4f}",
+            f"{capacity_used_ms2:.3f}",
+            f"{(error_ms2 / max(capacity_used_ms2, 0.1)):+.4f}",
+        ])
 
     # Main step: called once per frame by sending_thread
 

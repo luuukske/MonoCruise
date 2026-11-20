@@ -837,6 +837,53 @@ braking in the same minutes held 0.82-0.98x. AEB engages at 85% of the truck, so
 in those conditions can run out of brake. Slip near 1 on a weak stop means locked wheels
 (grip); normal slip with low air pressure or a hot brake points at the brake itself.
 
+## No disk I/O on the control loop
+
+The sending thread writes the pedals the game keeps. Whatever holds its loop holds the
+driver's pedals too. On 2026-11-20 the disk stalled for seconds (game included) and the
+loop froze four times inside `brake_debug.csv` / `gas_learn_debug.csv` flushes, each time
+with the driver's gas at 95 % committed and the driver's brake never sent; speed went from
+51 to 62 km/h while the driver braked. Restarts froze on the same file, the loop crawled
+too slowly in between to earn back its restart quota, and the fourth freeze left the
+driver with no MonoCruise pedals until quit. So nothing on this loop waits for the disk:
+
+- Every debug CSV (`brake_debug`, `gas_learn_debug`, `coast_debug`, the mapper log, and
+  the LA / LKA `*_debug.csv` and `*_ffb_debug.csv`) is a `DebugCsvSink`: the caller only
+  queues a row; one `debug_csv_writer` daemon thread opens (header line only, rotation
+  as above), writes and flushes. A full queue (5000 batches, about a minute of rows)
+  drops rows and counts them (`debug_csv_dropped()`); it never waits. `drain_debug_csv()`
+  is for tests and exit only.
+- Settings writes from this thread (`pedal_capacity`, `aeb_brake_scales`, `aeb_full_pedal`)
+  use `Settings.save_async`: the values apply at once, `config.json` is written on the
+  settings writer thread. `Settings.save` itself now writes outside the state lock, since
+  every `Settings.x` read in every thread takes that lock (the GUI's 2.5 s fsync held it).
+- `BrakeIntensityCache(background=True)` reads the profile on a helper thread and returns
+  the last value; a replacement thread starts from the last value read, not from 1.0.
+- Logging goes through `core/thread_management/log_queue.py` (README there).
+
+Do not add a file open, read, write, flush, stat or fsync to this loop, the mapper, or
+anything they call. Put it behind a queue or a helper thread, as above.
+
+## Pedal dead man (`deadman.py`)
+
+Backstop for a freeze nobody foresaw. `PedalDeadmanThread` (50 Hz, no file I/O) watches
+the sending heartbeat. Once it is older than `STALE_S` (0.3 s, or three of the sending
+thread's own loops while it idles at 1 Hz) after the sending thread has written at least
+once, with the game connected, it writes to the controls block every tick:
+
+- gas 0;
+- brake = the larger of the brake the game had when the sending thread last wrote (a hold
+  or an AEB brake it may resume) and the driver's own pedal, mapped like the sending
+  thread maps it (`brake_output` or `brakeval ** exponent`, the slider remap, `em_stop`
+  at full authority). Once the sending thread is gone (watchdog gave up, or between its
+  force stop and the replacement), only the driver's pedal: a dead thread never resumes
+  its hold.
+
+It stops writing as soon as the sending heartbeat is fresh again, and logs one warning per
+takeover (no popup: the watchdog's freeze popup already speaks). It never adds AEB's own
+brake for an engagement that starts during the freeze: AEB's pedal authority stays the
+sending thread's (`core/aeb/README.md`). Pinned by `tests/test_pedal_deadman.py`.
+
 ## Main pedal thread
 
 See `core/main_pedal_thread/README.md` for joystick, OPD, em_stop, and button capture.

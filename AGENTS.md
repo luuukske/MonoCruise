@@ -14,7 +14,7 @@ Long domain / tuning / coordinate docs live in module `README.md` files, not her
 - `core/radar/README.md`: coordinates, traffic buffer, Vehicle smoothing, ArcPath, ego body and path origin from the SDK wheels (§17)
 - `core/aeb/README.md`: AEB pipeline, filters, engagement; `core/aeb/TUNING.md`: calibration reference
 - `core/acc/README.md`: in-lane tracker, scoring, blinker bias
-- `core/sending_thread/README.md`: mapper, launch governor, pedal capacity, hold, brake efficiency. Brake intensity remap is a linear invert of the cvar, not a pedal power.
+- `core/sending_thread/README.md`: mapper, launch governor, pedal capacity, hold, brake efficiency, no disk I/O on the loop, pedal dead man. Brake intensity remap is a linear invert of the cvar, not a pedal power.
 - `core/longitudinal/README.md`: CC/limiter/ACC children
 - `core/cruise_control_thread/README.md`: orchestrator and ACC anticipation
 - `core/main_pedal_thread/README.md`: joystick, OPD, capture APIs
@@ -67,6 +67,7 @@ live in `core/thread_management/README.md`. Start from `core/example_thread/thre
 - **Loop timing and blocking calls**
   - Never block a thread’s `loop` method or any inner loop for longer than **0.5 seconds** at a time.
   - **Do not call `time.sleep` inside `loop` or any method it calls.** Use the pacing and sleep facilities provided by `BaseThread` instead so the watchdog and health checks stay accurate. Enforced by `tests/invariants/test_source_invariants.py`.
+  - **No disk I/O on a control loop** (sending, main pedal, cruise control, AEB, lane departure, or anything they call): no file open, write, flush, fsync, stat or profile read. A stalled disk froze the sending thread with the driver's gas held and no brake (2026-11-20). Debug CSVs go through `DebugCsvSink`, settings through `Settings.save_async`, logging is queued already; see `core/sending_thread/README.md` (No disk I/O on the control loop). `core/sending_thread/deadman.py` releases the gas and passes the driver's brake if the sending thread stalls anyway: do not remove it or give it file I/O.
 
 - **Testing and validation**
   - Never weaken, disable, or delete an existing safety check (watchdog, health check, restart limit) or an existing test assertion to make a test or build pass. Adding new tests for thread behaviour is encouraged; changing an existing safety assertion needs explicit approval.

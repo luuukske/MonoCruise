@@ -216,7 +216,7 @@ class AssistRunner:
             return
         self._learned_at, self._learned_kept = now, model
         try:
-            Settings.save(values={"la_wheel_learned": model.to_dict()})
+            Settings.save_async(values={"la_wheel_learned": model.to_dict()})
         except Exception:
             logger.debug("la_wheel_learned save failed", exc_info=True)
 
@@ -353,7 +353,7 @@ class AssistRunner:
         if old and abs(force / old[0] - 1.0) <= _CAL_SAVE_CHANGE and abs(gain / old[1] - 1.0) <= _CAL_SAVE_CHANGE:
             return
         try:
-            Settings.save(values={"la_saved_calibration": {"force_per_ms2": round(force, 1),
+            Settings.save_async(values={"la_saved_calibration": {"force_per_ms2": round(force, 1),
                                                            "kappa_per_steer": round(gain, 4)}})
         except Exception:
             logger.debug("la_saved_calibration save failed", exc_info=True)

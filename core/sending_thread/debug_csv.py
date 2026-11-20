@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import atexit
 import csv
 import logging
 import math
+import queue
+import threading
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -14,6 +18,8 @@ BRAKE_LOG_NAME: str = "brake_debug.csv"
 _BRAKE_LOG_INTERVAL_S: float = 0.05    # 20 Hz, the game's physics rate
 _BRAKE_LOG_TAIL_S: float = 2.0         # keep logging this long after braking ends
 _LOG_RETRY_S: float = 30.0             # back off after a failed open
+_QUEUE_MAX_ITEMS: int = 5000           # row batches waiting for the disk; more are dropped
+_DRAIN_TIMEOUT_S: float = 2.0
 BRAKE_LOG_HEADER: list[str] = [
     "t_s",
     "utc",
@@ -142,8 +148,145 @@ def _fmt(value: object) -> str:
     return str(value)
 
 
+class _CsvWriter:
+    """One daemon thread owns every debug CSV file; callers only enqueue rows (README, debug logs)."""
+
+    def __init__(self) -> None:
+        self._queue: queue.Queue = queue.Queue(maxsize=_QUEUE_MAX_ITEMS)
+        self._start_lock = threading.Lock()
+        self._thread: threading.Thread | None = None
+        self._retry_at: dict[Path, float] = {}
+        self.failed_paths: set[Path] = set()
+        self.dropped = 0
+
+    def submit(self, item: tuple) -> None:
+        """Queue *item* without waiting. A full queue drops it and counts the drop."""
+        self._ensure_started()
+        try:
+            self._queue.put_nowait(item)
+        except queue.Full:
+            self.dropped += 1
+
+    def drain(self, timeout: float = _DRAIN_TIMEOUT_S) -> bool:
+        """Wait until everything queued before this call is written. False on timeout."""
+        thread = self._thread
+        if thread is None or not thread.is_alive():
+            return True
+        done = threading.Event()
+        try:
+            self._queue.put(("barrier", done), timeout=timeout)
+        except queue.Full:
+            return False
+        return done.wait(timeout)
+
+    def _ensure_started(self) -> None:
+        if self._thread is not None and self._thread.is_alive():
+            return
+        with self._start_lock:
+            if self._thread is not None and self._thread.is_alive():
+                return
+            self._thread = threading.Thread(target=self._run, name="debug_csv_writer", daemon=True)
+            self._thread.start()
+
+    def _run(self) -> None:
+        files: dict[Path, tuple] = {}
+        while True:
+            item = self._queue.get()
+            try:
+                self._handle(files, item)
+                if self._queue.empty():
+                    self._flush_all(files)
+            except Exception:
+                logger.debug("debug CSV writer: %s failed", item[0], exc_info=True)
+
+    def _handle(self, files: dict[Path, tuple], item: tuple) -> None:
+        kind = item[0]
+        if kind == "rows":
+            _, path, header, max_bytes, rows = item
+            entry = files.get(path)
+            if entry is None:
+                entry = self._open(path, header, max_bytes)
+                if entry is None:
+                    return
+                files[path] = entry
+            try:
+                entry[1].writerows(rows)
+            except OSError:
+                logger.debug("%s write failed", path.name, exc_info=True)
+        elif kind == "close":
+            entry = files.pop(item[1], None)
+            if entry is not None:
+                try:
+                    entry[0].close()
+                except OSError:
+                    pass
+        elif kind == "barrier":
+            self._flush_all(files)
+            item[1].set()
+
+    def _open(self, path: Path, header: list[str], max_bytes: int | None) -> tuple | None:
+        now = time.monotonic()
+        if now < self._retry_at.get(path, -math.inf):
+            return None
+        fh, writer = open_debug_csv(path, header, max_bytes)
+        if writer is None:
+            self._retry_at[path] = now + _LOG_RETRY_S
+            self.failed_paths.add(path)
+            return None
+        self.failed_paths.discard(path)
+        return fh, writer
+
+    @staticmethod
+    def _flush_all(files: dict[Path, tuple]) -> None:
+        for path, (fh, _) in list(files.items()):
+            try:
+                fh.flush()
+            except OSError:
+                logger.debug("%s flush failed", path.name, exc_info=True)
+
+
+_WRITER = _CsvWriter()
+
+
+def drain_debug_csv(timeout: float = _DRAIN_TIMEOUT_S) -> bool:
+    """Block until every queued debug row is on disk. Tests and shutdown only, never a control loop."""
+    return _WRITER.drain(timeout)
+
+
+def debug_csv_dropped() -> int:
+    """Rows dropped because the writer fell behind (a stalled disk)."""
+    return _WRITER.dropped
+
+
+atexit.register(drain_debug_csv)
+
+
+class DebugCsvSink:
+    """Rows for one debug CSV, written by the shared writer thread. Never blocks, never raises OSError."""
+
+    def __init__(self, path: Path, header: list[str], max_bytes: int | None = None) -> None:
+        self.path = path
+        self._header = header
+        self._max_bytes = max_bytes
+
+    def writerow(self, row: list) -> None:
+        _WRITER.submit(("rows", self.path, self._header, self._max_bytes, [row]))
+
+    def writerows(self, rows: list[list]) -> None:
+        if rows:
+            _WRITER.submit(("rows", self.path, self._header, self._max_bytes, list(rows)))
+
+    def close(self) -> None:
+        _WRITER.submit(("close", self.path))
+
+    @property
+    def failed(self) -> bool:
+        """True once the writer could not open the file (it retries every 30 s)."""
+        return self.path in _WRITER.failed_paths
+
+
 class TickDebugLog:
-    """Rate-limited rows while *active* plus a tail, opened lazily, never raising OSError."""
+    """Rate-limited rows while *active* plus a tail, written off the calling thread."""
 
     def __init__(
         self, root: Path, name: str, header: list[str],
@@ -153,47 +296,27 @@ class TickDebugLog:
         self._header = header
         self._interval_s = interval_s
         self._tail_s = tail_s
-        self._max_bytes = max_bytes
-        self._file = None
-        self._writer = None
+        self._sink = DebugCsvSink(self._path, header, max_bytes)
         self._start_mono: float | None = None
         self._last_write_mono: float = -math.inf
         self._active_until: float = -math.inf
-        self._retry_at: float = -math.inf
 
     def tick(self, now: float, active: bool, row: dict[str, object]) -> None:
-        """Write *row* when active or inside the tail. Never raises OSError."""
+        """Queue *row* when active or inside the tail. Never blocks on the disk, never raises OSError."""
         if active:
             self._active_until = now + self._tail_s
         if now > self._active_until or now - self._last_write_mono < self._interval_s:
             return
-        if self._writer is None:
-            if now < self._retry_at:
-                return
-            self._file, self._writer = open_debug_csv(self._path, self._header, self._max_bytes)
-            if self._writer is None:
-                self._retry_at = now + _LOG_RETRY_S
-                return
         self._last_write_mono = now
         if self._start_mono is None:
             self._start_mono = now
         values = dict(row)
         values["t_s"] = now - self._start_mono
         values["utc"] = datetime.now(timezone.utc).isoformat()
-        try:
-            self._writer.writerow([_fmt(values.get(k, "")) for k in self._header])
-            self._file.flush()
-        except OSError:
-            logger.debug("%s write failed", self._path.name, exc_info=True)
+        self._sink.writerow([_fmt(values.get(k, "")) for k in self._header])
 
     def close(self) -> None:
-        if self._file is not None:
-            try:
-                self._file.close()
-            except OSError:
-                pass
-        self._file = None
-        self._writer = None
+        self._sink.close()
 
 
 class BrakeDebugLog(TickDebugLog):
