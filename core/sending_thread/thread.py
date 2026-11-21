@@ -1083,6 +1083,8 @@ class SendingThread(BaseThread):
         road_pitch = 0.0
         tel_gear_dashboard = 0
         tel_gear = 0
+        gear_ratios: tuple[float, ...] = ()
+        gear_differential = 0.0
         engine_rpm = 0.0
         wheels_on_ground = 0
         ego_trailer_count = 0
@@ -1106,6 +1108,10 @@ class SendingThread(BaseThread):
                     road_pitch = float(tel_thread.data.rotationY)
                     tel_gear_dashboard = int(tel_thread.data.gear_dashboard)
                     tel_gear = int(tel_thread.data.gear)
+                    gear_ratios = tuple(getattr(tel_thread.data, "gear_ratios_forward", ()) or ())
+                    gear_differential = float(
+                        getattr(tel_thread.data, "gear_differential", 0.0) or 0.0
+                    )
                     engine_rpm = float(getattr(tel_thread.data, "engine_rpm", 0.0))
                     game_throttle = float(tel_thread.data.gameThrottle)
                     game_clutch = float(tel_thread.data.gameClutch)
@@ -1181,6 +1187,8 @@ class SendingThread(BaseThread):
                     STATE_STOPPING, STATE_HOLDING, STATE_LAUNCHING
                 )
 
+                # The gas map's shape across gears comes from this truck's own ratios.
+                self._capacity_tracker.set_gear_ratios(gear_ratios, gear_differential)
                 targets = self._accel_mapper.step(
                     wanted_a,
                     raw_a,
@@ -1720,6 +1728,7 @@ class SendingThread(BaseThread):
             self._capacity_tracker.update_accel(
                 a, max(0.0, raw_a), speed_ms, brake_grade_rad, game_clutch, tel_gear,
                 mass_kg, has_t, road_load_ms2=mapper_road_load_ms2 - mapper_creep_ms2,
+                wet_road=wet_road,
             )
 
         # Debug only, after every output is committed: loop() zeroes the pedals on
@@ -1796,6 +1805,8 @@ class SendingThread(BaseThread):
                         "learn_count": tracker.accel_samples_accepted,
                         "accel_anchor": tracker.accel_anchor_ms2,
                         "accel_ratio": tracker.accel_ratio_step,
+                        "gear_ratio": tracker.gear_total_ratio(tel_gear) or math.nan,
+                        "accel_ratio_exp": tracker.accel_ratio_exponent,
                         "accel_offset_ms2": tracker.accel_zero_offset_ms2,
                         "est_accel_ms2": tracker.accel_gain_for_gear(tel_gear, mass_kg, has_t)
                         / max(weight_factor(mass_kg, has_t), 1e-6),

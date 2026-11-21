@@ -359,6 +359,53 @@ already right at the new mass, and a load-keyed anchor would split the samples t
 gets few of (bobtail pulls are under 1 % of the log). What is still shared across rigs that should
 not be is the truck: a second tractor with another engine teaches the same anchor.
 
+### Gear ratios from the SDK (`gear_shape.py`)
+
+The SDK publishes every forward gear's ratio and the axle ratio (`gearRatiosForward`,
+`gearDifferential`; the telemetry thread passes them on as `gear_ratios_forward` and
+`gear_differential`). The gas shape uses them: the pedal slope in a gear is
+`anchor x (R / 4.0)^k`, R its gear x axle ratio, the anchor quoted at a total ratio of 4.0, and
+`k` starts at 1.0, a wheel force that goes through the ratio. Only the anchor, `k` and the
+zero-gas offset are learned; the old per-gear step is not used while ratios are known.
+
+**Why.** On 2026-11-20 Lukas swapped the FH's 14-speed for a 6-speed (4.70 / 2.21 / 1.53 / 1.00 /
+0.76 / 0.67, axle 3.91). One learned step per gear (1.18 by the next day, clamped to 1.05 to
+1.45) cannot fit steps of 2.13 / 1.44 / 1.53 / 1.32 / 1.13, and its slow lever-normalized rate
+gives gears 1 to 3 about a twentieth of the anchor's learning rate. On the next, dry drive, gears
+1 to 3 read 1.4 to 2x the believed pull and ACC launches in gear 1 overshot to 4.5-6 m/s2. Pull
+per unit of ratio (settled pulls, gas 0.35 and up, 1000 to 1900 rpm) held 1.2 to 1.9 from gear 1
+to 6 on that dry road; believed against measured, gear 1 to 6:
+
+| | 1 | 2 | 3 | 4 | 5 | 6 |
+|---|---|---|---|---|---|---|
+| measured (m/s2 per gas, real units, 17 t) | 3.97 | 3.27 | 3.22 | 1.46 | 1.04 | 0.98 |
+| learned gear-number shape | 2.77 | 2.32 | 1.57 | 1.34 | 1.12 | 0.97 |
+| ratio shape, k = 1, migrated anchor | 6.9 | 3.25 | 2.25 | 1.47 | 1.12 | 0.98 |
+
+Gear 3 still reads high (the low-speed strength scale covers part of it at 12 m/s) and gear 1
+reads low against the ratio: the median mixes the build-up after the clutch closes, while the
+overshooting launches did 5 to 6 m/s2. Over-reading only makes gas lazy and the fast trim covers it;
+under-reading is what overshoots and pumps. Whether `k` is 1 on a 12- or 14-speed is not
+measured (no ratios were logged before 2026-11-21); the old fit on the 14-speed sat at its 1.05
+floor, which hints below 1, so `k` stays learned within 0.4 to 1.3. `gas_learn_debug.csv`
+carries `gear_ratio` and `accel_ratio_exp` from now on.
+
+**Why learning stays.** The ratios fix the shape across gears, not the truck's strength: the SDK
+has no engine torque (a 1.5 to 2x spread between engines), no zero-gas drive (the 0.5 to 0.9
+offset) and nothing on the mass law's error. A fixed map wrong by 2x is what pumped CC and the
+limiter at 1 Hz in October.
+
+**Snow.** The same snowy drive read full-pedal pulls in gears 1 and 2 at a quarter to a half of the
+dry road's per unit of ratio (the wheels spun), so `update_accel` skips a wet road like the brake
+learners (gate `wet`, the traction plugin's wetness; unknown without it).
+
+**Migration and fallback.** An anchor persisted before (`pedal_capacity_accel_gear_model` 0) was
+quoted at gear 6. The first time ratios arrive it is re-quoted so that the current truck's gear 6
+(its top gear if it has fewer) keeps exactly the slope it had, `k` starts at 1.0, and the model
+version is written at once, so it happens once. Ratios that are missing, zero or not finite are
+ignored and the last good set is kept; with none ever seen the gear-number shape runs exactly as
+before (`tools/capacity_learner_replay.py` still replays that way: the old logs have no ratios).
+
 ### Gear-shift poisoning (the post-shift pedal step)
 
 For a long time CC/ACC stepped the gas pedal up about 5-10% for a few seconds after every
@@ -515,9 +562,10 @@ and collapsed on a loaded rig: against the probe it read **45% low on the 54 t d
 truck looks like it is over-performing and real fade can never reach the ratio. It returns
 decel *at brake=1.0*, so it scales the fitted asymptote by `brake_curve_fraction(1.0)`.
 
-**Gas**: shape model `G(gear) = anchor * ratio^(_ANCHOR_GEAR - gear)` learned in log-space;
-monotonic ratio clamp. Skipped after clutch, gear dwell, or moving pedal. Persisted to
-`settings.json` on drift.
+**Gas**: shape model `G(gear) = anchor * (R / 4.0)^k`, R the gear's gear x axle ratio from the
+SDK (see **Gear ratios from the SDK**), learned in log-space; without ratios the older
+`anchor * ratio^(_ANCHOR_GEAR - gear)`. Skipped after clutch, gear dwell, moving pedal, or on a
+wet road. Persisted to `settings.json` on drift.
 
 ## AEB decel controller (`AEBDecelController` in `thread.py`)
 

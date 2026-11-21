@@ -297,6 +297,10 @@ class Settings(metaclass=_SingletonMeta):
     pedal_capacity_accel_zero_offset_ms2: float = 0.0
     # Mass law the anchor above is normalized under; an older one is migrated once.
     pedal_capacity_accel_mass_model: int = 0
+    # Learned exponent on the SDK gear ratio (0 = in-code default on startup).
+    pedal_capacity_accel_ratio_exponent: float = 0.0
+    # 1: the anchor is quoted at a reference gear ratio; 0 (older): at gear 6, migrated once.
+    pedal_capacity_accel_gear_model: int = 0
     # AEB brake scale per "game|truck|trailers", learned from firm braking only.
     aeb_brake_scales: dict = field(default_factory=dict)
     # Measured full-pedal stops per "game|truck|trailers|slider": [[mass_kg, [ratios]], ...].

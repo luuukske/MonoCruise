@@ -101,6 +101,16 @@ _GRIP_DEBUG_COLUMNS: tuple[tuple[str, str], ...] = (
 )
 
 
+def forward_gear_ratios(raw: dict) -> tuple[float, ...]:
+    """The gearbox's forward ratios, gear 1 first; empty when the SDK has none."""
+    ratios = raw.get("gearRatiosForward") or ()
+    try:
+        count = max(0, min(int(raw.get("gears", 0) or 0), len(ratios)))
+        return tuple(float(r) for r in ratios[:count])
+    except (TypeError, ValueError):
+        return ()
+
+
 def grip_debug_fields(data: object) -> dict[str, object]:
     """Grip-related columns for brake_debug.csv; read under the data lock."""
     return {column: getattr(data, attr, "") for column, attr in _GRIP_DEBUG_COLUMNS}
@@ -160,6 +170,9 @@ class TelemetryThreadData(ThreadData):
     # Gear
     gear: int = 0               # current gear (negative = reverse, 0 = neutral)
     gear_dashboard: int = 0     # displayed gear on dashboard
+    # Gearbox ratio per forward gear (gear 1 first) and the axle ratio, from the SDK; empty / 0 unknown.
+    gear_ratios_forward: tuple[float, ...] = ()
+    gear_differential: float = 0.0
 
     # Raw inputs
     userThrottle: float = 0.0
@@ -248,6 +261,8 @@ def _apply_telemetry(data: TelemetryThreadData, raw: dict) -> None:
         data.engine_rpm_max      = raw.get("engineRpmMax", 2000.0)
         data.gear                = raw.get("gear", 0)
         data.gear_dashboard      = raw.get("gearDashboard", 0)
+        data.gear_ratios_forward = forward_gear_ratios(raw)
+        data.gear_differential   = raw.get("gearDifferential", 0.0) or 0.0
         data.retarderBrake       = raw.get("retarderBrake", 0)
         data.motorBrake          = raw.get("motorBrake", False)
         data.userThrottle        = raw.get("userThrottle", 0.0)

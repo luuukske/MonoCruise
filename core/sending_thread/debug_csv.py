@@ -96,7 +96,9 @@ GAS_LEARN_LOG_HEADER: list[str] = [
     "learn_gate",          # gate that ended the learner's last tick, "ok" when it learned
     "learn_count",
     "accel_anchor",
-    "accel_ratio",
+    "accel_ratio",         # per-gear step, used only without the SDK's gear ratios
+    "gear_ratio",          # this gear's gear x axle ratio from the SDK, empty when unknown
+    "accel_ratio_exp",     # learned exponent on that ratio
     "accel_offset_ms2",
     "est_accel_ms2",       # full-pedal capability for this gear and mass, real units
 ]
