@@ -371,6 +371,41 @@ def test_a_high_slider_is_not_learned_as_weak_brakes(clock):
         assert t.brake_scale == pytest.approx(1.0, rel=0.02)
 
 
+def test_a_wet_road_teaches_the_pedal_model_nothing(clock):
+    """The snowy AEB stop of 2026-11-20 (wetness 0.76, wheels locking) read 0.24 of
+    the model at full pedal and took the scale 0.87 -> 0.35 in one stop. Grip capped
+    that stop, not the brakes, and ACC then braked 1.6x what it asked on a dry road."""
+    decel = 0.244 * BASE * brake_curve_fraction(1.0)
+    dry = _fresh(scale=0.87)
+    _feed(dry, clock, pedal=1.0, decel=decel, ticks=90, aeb=True)
+    assert dry.brake_scale < 0.5, "the stop must teach on a dry road, or this proves nothing"
+
+    wet = _fresh(scale=0.87)
+    for _ in range(90):
+        clock.t += DT
+        wet.update_brake(1.0, decel, SPEED, 0.0, BASE, road_load_ms2=0.0,
+                         aeb_active=True, wet_road=True)
+    assert wet.brake_scale == pytest.approx(0.87)
+    assert wet.brake_samples_accepted == 0
+    assert wet.last_brake_gate == "wet"
+    assert wet.last_settled_brake_sample is None
+
+
+def test_brake_learning_speed_does_not_depend_on_the_loop_rate(clock):
+    """The alphas were tuned and tested at 30 Hz; per call, the live 100 Hz loop learned
+    over 3x faster per second of braking. Two seconds of the same stop must teach the
+    same at either rate."""
+    decel = 0.70 * BASE * brake_curve_fraction(1.0)
+    moved = {}
+    for hz in (30.0, 100.0):
+        t = _fresh(scale=1.0)
+        _feed(t, clock, pedal=1.0, decel=decel, ticks=int(2.0 * hz), dt=1.0 / hz)
+        assert t.brake_samples_accepted > 0
+        moved[hz] = 1.0 - t.brake_scale
+    assert 0.05 < moved[30.0] < 0.25, "partly converged, so the rates can be compared"
+    assert moved[100.0] == pytest.approx(moved[30.0], rel=0.15)
+
+
 def test_under_delivery_is_believed_all_the_way_down(clock):
     """The floor must stay low enough to represent a genuinely weak rig.
 

@@ -163,6 +163,33 @@ length (see **Full-pedal credit**). Cost: the mapper's scale now only moves on h
 so a driver who never brakes hard keeps the model (or what was persisted); the fast PI
 absorbs the light-pedal residual. Do not shorten the hold to buy samples.
 
+### Dry roads only, and per second
+
+On 2026-11-20 Lukas drove in heavy snow (traction plugin wetness 0.76, the SDK surface still
+`road`). Full-pedal stops there delivered 4 to 6 m/s2 against about 11 dry, every one grip
+limited, and the AEB stops among them read 0.24 to 0.4 of the model. `brake_scale` went 0.87 ->
+0.35 within that drive. On the dry road the next day the mapper believed 4.7 m/s2 against a real
+11 to 12 (AEB's dry slams measured that), sent about 3x the pedal and let the fast trim pull it
+back: ACC brake onsets peaked at 1.24x the asked decel (median, p90 1.62x) against 0.96x (p90 1.20x)
+before. No firm hold that day, so nothing could teach it back.
+
+- `update_brake` takes the sending thread's `wet_road` (`is_wet` on the plugin's wetness, the
+  gate AEB's learners already had) and learns nothing then (gate `wet`). Grip caps a wet stop, not
+  the brakes, and below the grip limit the same pedal brakes the same, so the dry scale is the
+  right one for the mapper. Replaying the brake log of 2026-11-20/21 from 0.87: 0.37 without the
+  gate, 0.87 with it. Without the plugin the wetness is unknown and nothing changes, so a snowy
+  drive still teaches the scale down there.
+- Wheel slip does not separate a grip-limited stop from a brake-limited one: the worst wheel's
+  slip on firm dry braking is a median 0.6 to 0.75 (one wheel locking or chattering), about what
+  the snowy stops showed, and dry accepted samples with slip above 0.3 read 1.12 of the model.
+  Do not gate on it without a better measure (the share of locked wheels over a window, as the
+  traction plugin's README suggests).
+- The alphas now count per `_BRAKE_ALPHA_DT_S` (0.033 s, the cadence the tests run at) of
+  accepted samples, not per call. Per call, the 100 Hz loop learned over 3x faster per second of
+  braking than the tests and the 20 Hz log replays ever showed. At 30 Hz every step is the same as
+  before; live it is about 3x slower. It does not stop a run of wet stops on its own (the replay
+  above is at the new rate); the wet gate does.
+
 ### The pedal model is affine, not a line through the origin
 
 `candidate = accel / pedal` is only a capability estimate if zero pedal means zero accel. It
@@ -793,8 +820,9 @@ on 2026-10-04 even with the onset guard. The extra cannot be predicted (same tra
   over-read the wet truck by that much. Only the plan drops. `aeb_cap`, which the pedal axis
   and `AEBDecelController` use, stays dry: below the grip limit the same pedal brakes the
   same, and a lower model there would push a harder pedal for every target. The scale
-  learner and `FullPedalRun` skip a wet road (above 0.05; a run in progress is dropped,
-  not measured), so the dry values are not dragged down by grip. No plugin, a stale one, or
+  learners (`aeb_scale` and, since 2026-11-21, the mapper's `brake_scale`) and `FullPedalRun`
+  skip a wet road (above 0.05; a run in progress is dropped, not measured), so the dry values
+  are not dragged down by grip. No plugin, a stale one, or
   weather it cannot read means wetness unknown: factor 1.0, bit-identical to before.
   The factor is conservative where the truck is brake limited on dry (100 % slider):
   there wet grip may still exceed the brakes and AEB starts somewhat early in rain.

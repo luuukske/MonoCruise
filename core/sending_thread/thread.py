@@ -1678,16 +1678,17 @@ class SendingThread(BaseThread):
 
         # Capacity from the pedal the game received, read back through the remap.
         _base_brake = baseline_brake_ms2(mass_kg, has_t, wheels_on_ground)
+        # A wet road caps the stop by grip, so every brake capacity learner only learns dry.
+        wetness = self._traction.wetness(now_ctrl)
+        wet_road = is_wet(wetness)
         self._capacity_tracker.update_brake(
             max(float(sent_b), 0.0), measured_decel_ms2, speed_ms, brake_grade_rad,
             _base_brake,
             road_load_ms2=mapper_road_load_ms2,
             aeb_active=_aeb_active,
             brake_intensity=intensity,
+            wet_road=wet_road,
         )
-        # A wet road caps the stop by grip, so AEB's capacity learners only learn dry.
-        wetness = self._traction.wetness(now_ctrl)
-        wet_road = is_wet(wetness)
         settled = self._capacity_tracker.last_settled_brake_sample
         if settled is not None and not wet_road:
             self._aeb_capacity.observe(aeb_key, settled[0], settled[1], intensity)

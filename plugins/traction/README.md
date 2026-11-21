@@ -104,7 +104,7 @@ nothing past the limit; count locked or reversed frames over a window instead.
 `core/traction/reader.py` maps the whole block (a smaller block created first would leave the plugin unable to
 map its own), reads the wetness while status bit 2 is set and `seq` keeps moving (stale after 2 s), and gives
 `wet_grip_factor` = 1 - 0.42 x wetness. The sending thread uses it for AEB's planning capacity and to keep
-AEB's capacity learners dry (`core/sending_thread/README.md`, Full-pedal credit). Without the plugin every
+every brake capacity learner dry (AEB's and the mapper's `brake_scale`) (`core/sending_thread/README.md`, Full-pedal credit). Without the plugin every
 factor is 1.0. The SDK installer does not ship the plugin yet.
 
 ## Open

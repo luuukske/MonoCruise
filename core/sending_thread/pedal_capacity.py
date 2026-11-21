@@ -49,6 +49,10 @@ _BRAKE_CANDIDATE_MAX_FRACTION: float = 1.35
 # Two-speed brake learning. Routine presses are shallow (pedal³ weight) and
 _BRAKE_ALPHA_NORMAL: float = 0.02   # EMA alpha at full pedal, normal driving
 _BRAKE_ALPHA_AEB: float = 0.15      # EMA alpha at full pedal during AEB braking
+# The alphas are per this much time of accepted samples, not per call: the 100 Hz loop
+# learned 3x faster than the cadence they were tuned and tested at. See README.
+_BRAKE_ALPHA_DT_S: float = 0.033
+_BRAKE_LEARN_DT_MAX_S: float = 0.05
 # Only a hard press held past tap length teaches, here and in AEB's learners: shorter
 # firm holds were 3% of accepted samples and 56% of the scale's movement. See README.
 _FIRM_TUNE_PEDAL: float = 0.5
@@ -350,9 +354,10 @@ class PedalCapacityTracker:
         road_load_ms2: float = 0.0,
         aeb_active: bool = False,
         brake_intensity: float | None = None,
+        wet_road: bool = False,
     ) -> None:
         """Feed one braking tick. ``brake_output`` is the sent pedal, read back through
-        ``brake_intensity`` into tune units. See README."""
+        ``brake_intensity`` into tune units. ``wet_road`` stops learning. See README."""
         # Re-resolve against this tick's rig: hooking a trailer must move the
         # estimate in the same tick, so only the correction is carried over.
         if baseline_ms2 > 0.0:
@@ -367,6 +372,7 @@ class PedalCapacityTracker:
         # Smoothed pedal for gating and the ratio (see the settle-gate note
         last = self._last_brake_call_mono
         self._last_brake_call_mono = now
+        dt = 0.0 if last is None else _clamp(now - last, 0.0, _BRAKE_LEARN_DT_MAX_S)
         smooth = self._brake_pedal_smooth
         if smooth is None or last is None or now - last > _BRAKE_SETTLE_WINDOW_S:
             smooth = pedal
@@ -404,6 +410,10 @@ class PedalCapacityTracker:
 
         if speed_ms < _MIN_BRAKE_SPEED_MS or baseline_ms2 <= 0.0:
             self.last_brake_gate = "speed"
+            return
+        # Grip caps a wet stop, not the brakes: one snowy AEB stop took the scale 0.87 -> 0.35.
+        if wet_road:
+            self.last_brake_gate = "wet"
             return
         if smooth < _BRAKE_PEDAL_FLOOR:
             self.last_brake_gate = "pedal"
@@ -464,7 +474,7 @@ class PedalCapacityTracker:
         self.last_brake_candidate_scale = candidate_scale
         weight = mean_pedal ** _WEIGHT_POWER
         base = _BRAKE_ALPHA_AEB if aeb_active else _BRAKE_ALPHA_NORMAL
-        alpha = base * weight
+        alpha = base * weight * dt / _BRAKE_ALPHA_DT_S
         # Same rate up and down. A harder stop used to rise at half this, so the
         # estimate sat under the brakes it had measured and the pedal over-braked.
         alpha *= _UNDERPERFORM_MULT
