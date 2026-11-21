@@ -5,14 +5,14 @@ from __future__ import annotations
 from .blinker import EGO_FRONT_OFFSET_M
 
 # Time gap (bumper gap over ego speed) and how long it must be held before the warning shows.
-GAP_NEAR_S: float = 0.4
-GAP_FAR_S: float = 0.5
-DELAY_NEAR_S: float = 1.0
-DELAY_FAR_S: float = 5.0
+GAP_NEAR_S: float = 0.5
+GAP_FAR_S: float = 0.7
+DELAY_NEAR_S: float = 0.5
+DELAY_FAR_S: float = 3.0
 # Only steady following counts: catching up or being pulled away from is not tailgating.
 REL_SPEED_MAX_MS: float = 10.0 / 3.6
 # A time gap means nothing at rest; below this ego is treated as not following.
-MIN_SPEED_MS: float = 1.0
+MIN_SPEED_MS: float = 5.0
 # A dropped lead or a speed blip shorter than this neither clears the warning nor restarts the timer.
 RELEASE_S: float = 0.5
 _DT_MAX_S: float = 0.2
