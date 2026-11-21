@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import itertools
 
 import pytest
 
@@ -10,6 +11,7 @@ from core.la import runner as runner_mod
 from core.la.calibration import Calibration, Estimate
 from core.la.runner import AssistRunner
 from core.lane_departure.command import PluginStatus
+from core.sending_thread.debug_csv import drain_debug_csv
 from core.settings import Settings
 from tests.lane_departure.test_detector import DT, frame_at, make_route
 
@@ -30,12 +32,13 @@ def drive(runner, seconds=4.0):
         status = PluginStatus(present=True, hooked=True, version=4, steer_ok=True, steer_frames=i + 1)
         runner.step(frame_at(i * DT, route, None, 0.4, 0.0), False, status, False)
     runner.close()
+    assert drain_debug_csv(), "the CSV writer thread finishes the queued rows"
 
 
 def test_it_records_while_assisting_with_debug_on(monkeypatch, settings, tmp_path):
     monkeypatch.setattr(settings, "debug", True, raising=False)
-    clock = iter(i * DT for i in range(10_000))
-    monkeypatch.setattr(runner_mod.time, "monotonic", lambda: next(clock))
+    ticks = itertools.count()  # the CSV writer thread reads the clock too: a generator is not thread safe
+    monkeypatch.setattr(runner_mod.time, "monotonic", lambda: next(ticks) * DT)
     drive(AssistRunner(debug_root=tmp_path))
     with (tmp_path / "la_debug.csv").open(newline="", encoding="utf-8") as fh:
         rows = list(csv.DictReader(fh))
