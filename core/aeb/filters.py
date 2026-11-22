@@ -1160,6 +1160,7 @@ def build_pipeline(cal: AEBCalibration) -> list:
     # Local import: the gate module builds on this one (README avoidability gate).
     from core.aeb.avoidability import AvoidabilityGate
     from core.aeb.bend_chain import BendChainFilter
+    from core.aeb.bend_pose import BendPoseFilter
     from core.aeb.lane_keep import LaneKeepFilter
     from core.aeb.target_follow import TargetFollowFilter
     from core.aeb.turn_completion import TightTurnFilter, TurnCompletionFilter
@@ -1180,6 +1181,7 @@ def build_pipeline(cal: AEBCalibration) -> list:
         AvoidabilityGate(CornerEntryStationaryFilter(cal), cal),
         AvoidabilityGate(CornerEntryStationaryFilterMirrored(cal), cal),
         AvoidabilityGate(BendChainFilter(cal), cal),
+        BendPoseFilter(cal),
         TightTurnFilter(cal),
         EgoEvasionFilter(cal),
         LaneKeepFilter(cal),

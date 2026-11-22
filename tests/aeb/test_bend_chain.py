@@ -169,8 +169,9 @@ def test_the_gated_stage_follows_the_mirrored_corner_entry():
     assert isinstance(pipe[at], AvoidabilityGate)
     assert isinstance(pipe[at + 1], AvoidabilityGate)
     assert isinstance(pipe[at + 1]._inner, BendChainFilter)
-    assert names[at + 2] == "TightTurnFilter"
-    assert names[at + 3] == "EgoEvasionFilter"
+    assert names[at + 2] == "BendPoseFilter"
+    assert names[at + 3] == "TightTurnFilter"
+    assert names[at + 4] == "EgoEvasionFilter"
 
 
 def test_the_context_carries_the_frame_vehicles():

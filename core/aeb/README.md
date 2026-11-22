@@ -300,6 +300,7 @@ pass, the vehicle enters collision evaluation.
 | `SweepPassFilter` | Stationary cross-traffic ego turns through |
 | `CornerEntryStationaryFilter` | Stationary at corner entry: out-of-lane oncoming/co-dir, or in-lane with arc consistency |
 | `BendChainFilter` | Stopped or crawling car facing ego whose neighbours bend their lane beside ego, not through it |
+| `BendPoseFilter` | Parked body turned with the bend that traffic (or its parked row) reads, standing a lane or more outside ego's lane on it; no map |
 | `TightTurnFilter` | Walking-pace turn (radius 10 m or less) whose arc wraps onto a body the measured line is not closing on |
 | `EgoEvasionFilter` | Ego can steer around target within 0.08 g (runs for `Lane.EGO` too) |
 | `LaneKeepFilter` | Map only: a mover following its own map lane, whose lane stays clear of ego's track (Map lane rules) |
@@ -1007,7 +1008,8 @@ mover also travels along the lane (cosine 0.9 or more), and that has held for
   not keeping to its lane;
 - `TmpCrossTrafficFilter` passes a near-head-on one: it is no junction sweep;
 - `EgoEvasionFilter` passes a stopped one, by position alone;
-- `AvoidabilityGate` overrides a guess stage's drop of a parked one;
+- `AvoidabilityGate` overrides a guess stage's drop of a parked one, and `BendPoseFilter`
+  keeps a parked one by the same rule (it runs outside the gate);
 - with `lane_track_certain` it counts as in ego's lane for the engage grade
   (`certain_geom_ids`) and its lane is trusted beyond `lane_confidence_range_m`.
 
@@ -1392,6 +1394,84 @@ same deadline and body test to it itself. Corpus 2026-10-25 (2625 clips):
 condition, the same fit dropped 2 true positives (same-direction queues). Parked
 cars only: -0.75. Without the crawler's deadline hold: -14.5, the extra two
 (`2ea43aa9`, `e85c4635`) braking at the deadline.
+
+### `BendPoseFilter`
+
+A truck or car parked on the shoulder of a bend sits on ego's straight or barely
+curved arc while ego has not yet steered into the bend (`c5db3acb`, `8e530f10`):
+dead ahead or a metre off it at 60 to 70 m, turned 8 to 13 degrees the way the road
+goes, and ego later passes it 4 to 5 m to its side. `core/aeb/bend_pose.py` reads the
+bend without a map.
+
+**Why the earlier stages miss it.** Every parked-body stage is a guess inside the
+avoidability gate, and at road speed the guess is overruled the moment it matters: the
+arc first reaches a body 65 m out, where at 105 km/h the clearance demand is already
+9.2 m/s^2 against a deadline of 10.9 (`c5db3acb`), and in `8e530f10` it passes the
+deadline 0.1 s after the first hit. Under that, `OutOfLaneParallelFilter` keeps any
+body with a centreline sample in the lane band of ego's arc, and the corner-entry
+stages need an implied curvature `bend / range` of 0.005 where these read 0.0021 and
+0.0034 (lowering it to 0.0025 already lost `c7546a38`). With the map, lane clear
+drops `c5db3acb` for a second and then ego's drift toward the body (0.30 to 0.43 m/s,
+the driver late into the bend) breaks its 0.3 m/s calm bar; that bar is what keeps
+`72456399`.
+
+**The pose alone does not separate them.** Over the corpus, of the stationary bodies at
+brake onsets turned 4 to 30 degrees and standing 2 m or more outside a lane bent by their
+own heading, 55 were at true onsets against 195 at false ones: TruckersMP crash scenes
+leave cars askew in the lane, and a bend that starts ahead of ego puts in-lane cars
+outside a lane bent from ego. What separates them is the rest of the road:
+
+- Target: stationary by the speed field and the raw track (`measured_stationary`), not
+  latched, follow-flagged or crash-confirmed, 20 to 100 m ahead, turned (folded, so a
+  body facing ego counts) 4 to 30 degrees.
+- The bend comes from other vehicles 10 m or more ahead and within 40 m of the body
+  along ego's axis, turned the same way by 2 degrees or more, each scaled to the body's
+  range (`turn * ahead / their ahead`). Moving traffic (4 m/s and up, TruckersMP
+  trailer records excluded) keeps to its lane, so its median is read first. Without
+  agreement there, the parked row is read: the nearest parked body, trailer records
+  included, because a row bends with the road only near the body (`8e530f10` turns 13
+  to 46 degrees over 30 m, and a median of the row read 28.6 against 12.6).
+- The body must be turned with that bend: at least half of it and at most 30 % (3
+  degrees minimum) beyond it. A body turned well past the road is a car askew, which
+  says nothing of where the road goes. A body turned less is parked along it askew,
+  and the bend used is halfway between the two (`bend_pose_bend_blend`): the lesser
+  alone put `c5db3acb`'s trailer 2.43 m out, traffic's alone over-reads a bend that
+  tightens past the body.
+- Ego's lane on that bend: curvature linear from ego's own to the one that turns the
+  road by the bend at the body, so left offset `k_ego x^2 / 6 + bend x / 3`. The body
+  is dropped when it stands 3.0 m or more outside that, on the side away from the bend.
+  The chord model (`x tan(bend / 2)`, the bend starting at ego) touched more true
+  onsets at every threshold in the offline onset sweep.
+- Ego turning toward the body's side harder than 1.5 m/s^2 is a lane change or swerve
+  toward it, not the road (`1d7eb731` swerved at 2.6 m/s^2), and a bend ego could not
+  take at 6 m/s^2 at its speed is no road ego is on.
+
+**Outside the avoidability gate, by decision.** Inside it the stage would change nothing
+on the clips it exists for (above). The corroboration is what stands in for the gate, and
+the map outranks the pose: a body lane track holds on ego's own track is kept (Map lane
+rules), so with map data a crashed car in ego's lane is never dropped once the map has seen
+it there for `lane_track_hold_s`. Closed loop on the synthetic bends of
+`tests/aeb/test_road_bent_scenarios.py`, a two-car pile-up in ego's lane round the bend (the
+second car turned with it, reading the bend) brakes exactly as with the stage off, on R 40 to
+250 bends (`test_a_crashed_pile_up_round_a_bend_brakes_the_same_with_the_bend_pose_stage`);
+without the override the stage dropped those cars on up to 69 ticks.
+
+**The cost without a map.** Every crashed-car case on that track brakes as before at speeds
+the bend can be taken at. A pile-up 8 to 18 m into a tight bend, ego still on the straight
+toward it faster than the bend allows, brakes later: R 40 at 20 m/s (10 m/s^2 to take it)
+0.3 to 0.6 s, R 60 at 20 m/s 0.13 s, and at 16 to 20 m/s some warnings come 0.1 to 0.7 s
+later. The pose reads a bend that starts at ego, so a sharp bend that starts ahead looks
+like the body stands outside it; the bend read from the bodies cannot tell the two apart.
+
+**Corpus** (2026-11-22, 4456 labelled clips, after Lukas relabelled `72456399`, `1d7eb731` and
+`6784d69d` as false positives): no map -8144.50 to -8250.75, 39 FP to TN (`c5db3acb` among
+them), 5 FP to a warning only, 29 false warnings cleared; with the map -8839.75 to -8919.25, 33
+FP to TN, 4 to a warning only, 14 false warnings cleared. One true positive to a miss either way,
+accepted by Lukas: `2305570d` (sev 1, ego passed 4.3 m beside the parked rig). Measured and not kept: moving traffic
+alone with a 0.7 tolerance (+120.5, seven positives lost, among them `2615ce44` and
+`ee3089f1` whose traffic read twice the body's turn), any vehicle with 0.7 (+85.0).
+`8e530f10` (unlabelled) no longer brakes at 4.17 s; its later brake at 8.82 s is
+unchanged. Tests: `tests/aeb/test_bend_pose.py`.
 
 ### `EgoEvasionFilter`
 

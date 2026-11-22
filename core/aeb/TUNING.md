@@ -87,6 +87,13 @@ instance to `build_pipeline(cal)` or `evaluate_frame(frame, cal)`.
 | `bend_chain_max_gap_m` | 40 m | Max extrapolation from the member nearest ego |
 | `bend_chain_clear_m` | 2.6 m | Ego offset from the fitted lane needed to drop (2.2: same offline) |
 | `bend_chain_max_angle_deg` | 15° | Ego heading against the lane tangent |
+| `bend_pose_enabled` | True | `BendPoseFilter`: a parked body turned with the bend traffic reads, a lane or more outside ego's lane on it (README). Runs outside the avoidability gate |
+| `bend_pose_min_outside_m` | 3.0 m | Body outside ego's lane on the bend needed to drop. On the 130-clip risk set (final config -57.5): 2.5 is +72.5 with eight positives lost (`2615ce44` sev 5 among them), 3.5 is -50.5, keeps `2305570d` and clears fewer false brakes |
+| `bend_pose_body_tol_frac` / `_parked_tol_frac` | 0.3 / 0.3 | Body may be turned this share (3° minimum) beyond the bend that moving traffic / the parked row reads. 0.5: -12.0 on the risk set, `0ef90588` (sev 4) lost |
+| `bend_pose_body_min_frac` | 0.5 | Body turned at least this share of the bend. 0.4: +14.5 on the risk set, `2615ce44` (sev 5) lost |
+| `bend_pose_bend_blend` | 0.5 | Bend used for a body turned less than traffic: 0 the body's own, 1 traffic's. 0 scores -64.25 on the risk set and keeps `2305570d`, but neither `c5db3acb` (2.43 m out) nor `8e530f10` is dropped |
+| `bend_pose_max_toward_ms2` | 1.5 m/s² | Ego turning toward the body's side harder than this keeps it (`1d7eb731` 2.6). 2.5 scores the same on the risk set |
+| `bend_pose_mover_min_speed_ms` / `_window_m` / `_min_ahead_m` | 4 m/s / 40 m / 10 m | Moving traffic; within this of the body along ego's axis; this far ahead of ego |
 | `tmp_cross_center_hit_dist` | 2.5 m | `TmpCrossTrafficFilter` straight-snapshot genuine-crosser threshold: centre closest-approach at/below this is a real T-bone (pass), above is a body-graze clear (suppress) |
 | `tmp_cross_los_keep_m` / `_straight_m` | 1.5 / 2.5 m | TmpCross LOS keep: measured miss under this (turning / straight snapshot), closing at `oncoming_closing_dmiss_rate_mps`, keeps the crosser (0 disables) |
 | `tmp_cross_los_keep_range_m` | 28 m | LOS keep range (no range: 25 worse, 28 m: 15) |

@@ -156,6 +156,25 @@ class AEBCalibration:
     bend_chain_max_speed_ms: float = 3.0
     bend_chain_trailer_targets: bool = True
 
+    # BendPoseFilter: parked body turned with the bend, standing outside ego's lane on it (README).
+    bend_pose_enabled: bool = True
+    bend_pose_min_deg: float = 4.0
+    bend_pose_max_deg: float = 30.0
+    bend_pose_min_ahead_m: float = 20.0
+    bend_pose_max_ahead_m: float = 100.0
+    bend_pose_min_outside_m: float = 3.0
+    bend_pose_max_lat_ms2: float = 6.0
+    bend_pose_max_toward_ms2: float = 1.5
+    bend_pose_body_tol_deg: float = 3.0
+    bend_pose_body_tol_frac: float = 0.3
+    bend_pose_body_min_frac: float = 0.5
+    bend_pose_bend_blend: float = 0.5
+    bend_pose_parked_tol_frac: float = 0.3
+    bend_pose_mover_min_speed_ms: float = 4.0
+    bend_pose_mover_min_ahead_m: float = 10.0
+    bend_pose_mover_window_m: float = 40.0
+    bend_pose_mover_min_deg: float = 2.0
+
     # TmpCrossTrafficFilter straight-snapshot center hit threshold (README TmpCrossTrafficFilter).
     tmp_cross_center_hit_dist: float = 2.5
 

@@ -80,7 +80,8 @@ def _run(lane: _Lane, vehicle, speed: float, end_s: float, with_map: bool, cal=C
         yaw = math.atan2(-tx, -tz)
         steer = 0.0 if straight_on else lane.kappa(s) / ego_path_params(cal).gain_prior
         now = 100.0 + k * _DT
-        snap = ([vehicle], x, 0.0, z, yaw, speed, 0.0, steer, False, None, False, False,
+        frame = list(vehicle) if isinstance(vehicle, (list, tuple)) else [vehicle]
+        snap = (frame, x, 0.0, z, yaw, speed, 0.0, steer, False, None, False, False,
                 now, frozenset(), now, frozenset())
         t._read_radar_snapshot = lambda snap=snap: snap
         t._now = lambda now=now: now
@@ -194,3 +195,16 @@ def test_a_bend_too_tight_for_the_speed_keeps_the_roadside_threat(lane_clear):
     mapped = _run(lane, car, 25.0, _STRAIGHT + 10.0, with_map=True, cal=cal)
     assert base[1] is not None and mapped[1] is not None
     assert abs(mapped[1] - base[1]) < 0.1
+
+
+def test_a_crashed_pile_up_round_a_bend_brakes_the_same_with_the_bend_pose_stage():
+    """README BendPoseFilter: a second car turned with the bend must not talk the map out of a crash."""
+    off = replace(CAL, bend_pose_enabled=False)
+    for radius, speed in ((250.0, 22.0), (150.0, 17.0), (60.0, 20.0), (40.0, 16.0)):
+        lane = _Lane(radius)
+        for ahead, second in ((12.0, 10.0), (35.0, 12.0), (35.0, 25.0), (55.0, 25.0)):
+            cars = [_parked(lane, _STRAIGHT + ahead, 0.0, 7), _parked(lane, _STRAIGHT + ahead + second, 0.0, 8)]
+            end = _STRAIGHT + ahead - 4.0
+            mapped = _run(lane, cars, speed, end, with_map=True)
+            assert mapped[1] is not None, (radius, ahead)
+            assert mapped == _run(lane, cars, speed, end, with_map=True, cal=off), (radius, ahead, second)
