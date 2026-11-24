@@ -15,9 +15,13 @@ from __future__ import annotations
 import math
 from collections.abc import Sequence
 from dataclasses import dataclass
+from functools import cached_property
 
 _STEP_M = 2.5
 _STRAIGHT_KAPPA = 1e-6
+# Stride of the coarse pass in the nearest-sample search, and its rounding slack.
+_COARSE = 4
+_GAP_SLACK_M = 1e-6
 
 
 @dataclass(frozen=True)
@@ -77,13 +81,7 @@ class MapPath:
         n = len(self.s)
         if n < 2:
             return None
-        best_i = 0
-        best_d = math.inf
-        for i in range(n):
-            d = (self.x[i] - px) ** 2 + (self.y[i] - py) ** 2
-            if d < best_d:
-                best_d = d
-                best_i = i
+        best_i = self._nearest(px, py)
         found = None
         for i in (best_i - 1, best_i):
             if i < 0 or i >= n - 1:
@@ -105,6 +103,49 @@ class MapPath:
         if (i == 0 and raw < 0.0) or (i == n - 2 and raw > 1.0):
             return None
         return s_at, side
+
+    @cached_property
+    def _gap(self) -> float:
+        """Longest step between neighbouring samples; inf with any non-finite sample."""
+        xs, ys = self.x, self.y
+        if not all(map(math.isfinite, xs)) or not all(map(math.isfinite, ys)):
+            return math.inf
+        return max((math.hypot(xs[i + 1] - xs[i], ys[i + 1] - ys[i]) for i in range(len(xs) - 1)), default=0.0)
+
+    def _nearest(self, px: float, py: float) -> int:
+        """First sample at the least distance, as a strict-less scan of every sample finds it.
+
+        Every fourth sample first; a block is scanned only if it can hold a sample as near as
+        the nearest of those, since no sample sits further than ``_gap`` from its neighbour.
+        """
+        xs, ys = self.x, self.y
+        n = len(xs)
+        gap = self._gap
+        if n <= 3 * _COARSE or gap == math.inf:
+            ds = [(x - px) ** 2 + (y - py) ** 2 for x, y in zip(xs, ys)]
+            # min() and index() pick the first nearest like a strict-less scan; a NaN first entry would not.
+            return ds.index(min(ds)) if ds[0] == ds[0] else _first_nearest(ds)
+        coarse = [(xs[c] - px) ** 2 + (ys[c] - py) ** 2 for c in range(0, n, _COARSE)]
+        bound = math.sqrt(min(coarse)) + gap * (_COARSE - 1) + _GAP_SLACK_M
+        best_i, best_d = 0, math.inf
+        for b, d0 in enumerate(coarse):
+            if math.sqrt(d0) > bound:
+                continue
+            for j in range(b * _COARSE, min(b * _COARSE + _COARSE, n)):
+                d = (xs[j] - px) ** 2 + (ys[j] - py) ** 2
+                if d < best_d:
+                    best_d, best_i = d, j
+        return best_i
+
+
+def _first_nearest(ds: list[float]) -> int:
+    best_i = 0
+    best_d = math.inf
+    for i, d in enumerate(ds):
+        if d < best_d:
+            best_d = d
+            best_i = i
+    return best_i
 
 
 def blend_length(speed_ms: float, params: PathParams = DEFAULT_PARAMS) -> float:
@@ -145,7 +186,8 @@ def build_map_path(
     h_out: list[float] = []
     w_out: list[float] = []
     merge_s = getattr(route, "merge_s", None)
-    for s, lx, ly, _off, lh in lane:
+    trusts = _branch_trusts(div, [row[0] for row in lane], params)
+    for (s, lx, ly, _off, lh), branch_w in zip(lane, trusts):
         ax, ay, ah = _arc(kappa, s)
         # Where two lanes become one, the offset ego holds from its lane fades out by the merge.
         held = offset * (1.0 - _smoothstep(s / merge_s)) if merge_s else offset
@@ -159,7 +201,7 @@ def build_map_path(
         x_out.append(px)
         y_out.append(py)
         h_out.append(ah + g * dh)
-        w_out.append(base * _branch_trust(div, s, params))
+        w_out.append(base * branch_w)
     return MapPath(
         tuple(s_out), tuple(x_out), tuple(y_out), tuple(h_out), tuple(w_out), offset, blend,
     )
@@ -189,14 +231,19 @@ def _base_trust(route, params: PathParams) -> float:
     return w_off * w_head
 
 
-def _branch_trust(div: Sequence[tuple[float, float]], s: float, params: PathParams) -> float:
-    """1 until a branch parts from the route, 0 once it is ``branch_zero_m`` away."""
+def _branch_trusts(div: Sequence[tuple[float, float]], ss: Sequence[float], params: PathParams) -> list[float]:
+    """At each of the rising ``ss``: 1 until a branch parts from the route, 0 once it is
+    ``branch_zero_m`` away. The widest gap is read up to the first ``div`` entry past ``s``."""
+    out = []
     widest = 0.0
-    for ds, gap in div:
-        if ds > s:
-            break
-        widest = max(widest, gap)
-    return 1.0 - _smoothstep(widest / params.branch_zero_m)
+    k = 0
+    n = len(div)
+    for s in ss:
+        while k < n and not div[k][0] > s:
+            widest = max(widest, div[k][1])
+            k += 1
+        out.append(1.0 - _smoothstep(widest / params.branch_zero_m))
+    return out
 
 
 def _arc(kappa: float, s: float) -> tuple[float, float, float]:

@@ -706,6 +706,36 @@ has already left, which one source alone can carry into the fit. Not chased
 further; `_CONF_SINGLE_SOURCE_CAP` bounds what a lone source can claim, and the
 bucket is about eight frames in 12,608.
 
+### Cost: unrolled loops, and every other sample of a long trail
+
+The fit runs every ACC tick over every trail sample of every vehicle (up to 64 each),
+and with 24 TruckersMP vehicles it was half of ACC's time (2026-11-23). Two changes.
+
+A trail of `_THIN_MIN_SAMPLES` (16) samples or more is fitted on every other one, the
+newest kept, each carrying its dropped neighbour's weight; the covariance still counts
+the dropped samples, so the trust a fit earns does not move with the sample count.
+Neighbours sit 0.5 m apart on the trail grid, so the fit loses almost no shape and keeps
+its total weight, and short trails (new vehicles) keep every sample. The base arc's
+re-basing vote and the trail statistics the trust reads still see every sample: thinned,
+the vote moved the base arc itself. It halves the fit's samples. Thinning off against
+on, same clips: the harness over 400 clips moved lock p90 1.86 -> 1.83 s, cut-in lock
+p90 2.53 -> 2.38 s, fresh-id lock p90 0.97 -> 1.03 s, hook p90 0.73 s unchanged, moving
+in-corridor locked 59.8 -> 59.9 %, stationary locked 8.6 % unchanged; against hindsight
+lanes (`tools/map_acc_eval.py`, 310 clips) every lock rate with the map moved by 0.1
+point or less, and without it by 0.3 at most (in-lane movers in sharp bends, 17.1 ->
+16.8 %). `_THIN_MIN_SAMPLES = 0` fits every sample.
+
+The normal equations, residuals and per-source sums are unrolled for the four
+coefficients (`core/acc/road_lsq.py` holds the kernels), each residual is computed
+once per solve and shared by the source scales, the reweighting,
+the per-source residuals and the covariance, and the covariance reuses the last
+solve's normal equations while every row has weight. Every sum keeps the old order of
+operations, and `_predict` keeps `sum()`, which adds floats compensated from Python
+3.12, so a plain `+` chain would change the result. The fit is bit-identical to the
+loops it replaced (thinning off): 3,000 random scenes, and the tracker's output on
+40,905 frames of 135 clips with the map; a fit went from 6.3 to 2.1 ms, and thinning
+takes it to about 1.4 ms. Changing `_N_COEF` means rewriting the unrolled loops.
+
 ### Things measured and rejected
 
 Recorded so they are not retried blind. All on the same 40-clip sample.

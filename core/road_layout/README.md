@@ -227,6 +227,14 @@ and junction turns, which is what the branch trust is for.
 queries consumers need: offset from the path, the arc's own lateral, distance
 to the nearest lane centreline, and a trust-weighted blend of a lateral.
 
+ACC asks for the offset at five points of every vehicle each tick, so
+`MapPath.coords` finds its nearest sample on every fourth one first and scans
+only the blocks that could hold one as near (no sample sits further than the
+path's longest step from its neighbour); the answer is the first nearest sample
+exactly as a full scan finds it, ties and a non-finite sample included. The branch
+trust is walked once along the rising samples instead of rescanned per sample.
+Both are bit-identical on 40,905 replayed ACC frames (2026-11-23).
+
 ## Other vehicles (`target_path.py`)
 
 The same router and path, one per tracked vehicle, fed its own positions,

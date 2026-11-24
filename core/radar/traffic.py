@@ -1062,6 +1062,24 @@ def _ray_ray_collision(
     return t_hit, (ax + bx) * 0.5, (az + bz) * 0.5
 
 
+_REACH_SLACK_M = 1.0
+
+
+def _out_of_reach(a: ArcPath, b: ArcPath, limit: float) -> bool:
+    """No probe can hit: each body stays within its arc length plus capsule of its path's first point.
+
+    ``limit`` bounds every probe's hit distance, so this skips only pairs the sampling
+    would miss anyway (README §8, "Out of reach")."""
+    ax, az = a.position_at_dist(0.0)
+    bx, bz = b.position_at_dist(0.0)
+    reach = (a.arc_length + max(a._cap_fwd, a._cap_back)
+             + b.arc_length + max(b._cap_fwd, b._cap_back)
+             + limit + _REACH_SLACK_M)
+    dx = ax - bx
+    dz = az - bz
+    return dx * dx + dz * dz > reach * reach
+
+
 def _sampled_collision(
     a: ArcPath, b: ArcPath, corridor_sq: float, horizon: float, n: int,
     min_lateral_gap: float = 0.0,
@@ -1074,6 +1092,12 @@ def _sampled_collision(
            if a.parallel_margin_scale < b.parallel_margin_scale
            else b.parallel_margin_scale)
     scale_margin = has_body and pms < 1.0 and margin > 0.0
+    # The scaled threshold runs from hw_sum + margin * pms (parallel) to hw_sum + margin.
+    limit = math.sqrt(corridor_sq)
+    if scale_margin:
+        limit = max(limit, abs(hw_sum + margin), abs(hw_sum + margin * pms))
+    if _out_of_reach(a, b, limit):
+        return None
 
     def _probe(t: float) -> tuple[float, float, float, float, float]:
         if has_body:

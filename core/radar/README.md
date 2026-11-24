@@ -1237,6 +1237,19 @@ if lat >= min_lateral_gap:
 - Applied in both `_ray_ray_collision` and `_sampled_collision`
 - In the sampled path, the lateral check runs at each coarse sample **before** entering bisection; during bisection, a failing lateral check advances `lo` rather than breaking, so the refiner keeps searching for a sample where lanes genuinely cross
 
+#### Out of reach
+
+`_sampled_collision` returns `None` before sampling when the two paths' first points are
+further apart than both arc lengths, both longer capsule ends, the largest hit distance
+any probe can use and 1 m of slack. Every probe of a body lies within its arc length of
+its path's first point (a chord never exceeds the arc; `BentPath` and the target-follow
+paths are polylines walked by arc length), so the skipped pairs are ones the sampling
+would miss anyway: the answer is the same, only cheaper. The hit distance bound is the
+corridor, or with the parallel margin scale the wider of `hw_sum + margin` and
+`hw_sum + margin * scale`. A replay of 159 clips with the map gave the same AEB output on
+all 49,010 ticks, and the AEB loop ran 16 % faster on TMP clips (2026-11-23). A new path
+type whose positions can leave that reach must not go through this test.
+
 ---
 
 ## 9. Forward Vector & Position Prediction

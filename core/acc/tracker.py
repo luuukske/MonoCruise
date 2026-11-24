@@ -330,20 +330,15 @@ class ACCTracker:
                 _ROAD_TRUST_MIN,
                 self._source_trust.get(v.id, _ROAD_TRUST_INITIAL),
             )
-            projected = [
-                self._ego_local(ego_x, ego_z, ego_fwd_x, ego_fwd_z, hx, hz)
-                for _, hx, hz in history
-            ]
-            in_span = [
-                (sx, sy) for sx, sy in projected
-                if _ROAD_SAMPLE_MIN_S_M
-                <= arc_coords(fallback_kappa, sx, sy)[0]
-                <= _ROAD_SAMPLE_MAX_S_M
-            ]
-            if not in_span:
-                continue
-            for sx, sy in in_span:
-                target_samples.append((v.id, sx, sy, weight))
+            # _ego_local inlined: this runs for every trail sample of every vehicle each tick.
+            vid = v.id
+            for _, hx, hz in history:
+                dx = hx - ego_x
+                dz = hz - ego_z
+                sx = dx * ego_fwd_x + dz * ego_fwd_z
+                sy = dx * (-ego_fwd_z) + dz * ego_fwd_x
+                if _ROAD_SAMPLE_MIN_S_M <= arc_coords(fallback_kappa, sx, sy)[0] <= _ROAD_SAMPLE_MAX_S_M:
+                    target_samples.append((vid, sx, sy, weight))
         return fit_road_model(ego_samples, target_samples, fallback_kappa)
 
     @staticmethod

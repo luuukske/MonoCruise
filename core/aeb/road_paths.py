@@ -83,6 +83,10 @@ class RoadPaths:
         self._change = None
         # (window, its lanes' points) for the neighbour-lane search.
         self._lane_pts = None
+        # (id(route), x, z, dx, dz) -> (route, curve) of the lane behind a vehicle, this frame only.
+        self._behind: dict = {}
+        # (id(frame), x, z) -> (frame, lane_offset answer): lane track, keep and clear ask alike.
+        self._offsets: dict = {}
 
     def frame(self, snap, cal: AEBCalibration, now: float = 0.0) -> None:
         """Bind this frame's map snapshot; None or a disabled calibration bends nothing."""
@@ -91,6 +95,8 @@ class RoadPaths:
         self._ego_curve = None
         self._lane = None
         self._keep = None
+        self._behind = {}
+        self._offsets = {}
         self._params = bend_params(cal)
         self._length_s = max(cal.arc_horizon_max, cal.clearance_horizon_s)
         self._targets = cal.road_bend_targets
@@ -174,9 +180,19 @@ class RoadPaths:
         hop = math.hypot(bx - ax, bz - az)
         if hop <= 1e-6:
             return None
+        return self._lane_behind(route, x, z, (bx - ax) / hop, (bz - az) / hop)
+
+    def _lane_behind(self, route, x: float, z: float, dx: float, dz: float):
+        """``road_curve`` of the lane behind a vehicle; target follow and lane keep share it."""
+        key = (id(route), x, z, dx, dz)
+        hit = self._behind.get(key)
+        if hit is not None and hit[0] is route:
+            return hit[1]
         behind = route_behind(getattr(self._snap, "window", None), route.lane_index, x, z,
-                              (bx - ax) / hop, (bz - az) / hop, 2.0 * _RECENT_M)
-        return road_curve(behind) if len(behind) >= 2 else None
+                              dx, dz, 2.0 * _RECENT_M)
+        curve = road_curve(behind) if len(behind) >= 2 else None
+        self._behind[key] = (route, curve)
+        return curve
 
     def follow_target(self, vid: int, arcs: list[ArcPath], cal: AEBCalibration,
                       ego_xz: tuple[float, float] | None = None) -> list[list[ArcPath]] | None:
@@ -356,12 +372,8 @@ class RoadPaths:
         if (abs(route.offset_m) > cal.lane_track_max_offset_m
                 or abs(route.heading_err_rad) > math.radians(cal.lane_track_max_heading_deg)):
             return False
-        ckey = (id(route), -1)
-        entry = self._curves.get(ckey)
-        if entry is None or entry[0] is not route:
-            entry = (route, road_curve(route.pts))
-            self._curves[ckey] = entry
-        curve = entry[1]
+        # The same curve _bend and follow_ego build for this route's own lane.
+        curve = self._route_curve(route, 0, route.pts)
         if curve is None:
             return False
         reach = curve.length
@@ -401,14 +413,13 @@ class RoadPaths:
         frame = self._keep if keep else self._lane
         if frame is None:
             return None
-        curve, ego_s, ego_right, reach = frame[:4]
-        s, right = fast_offset(curve, x, z)
-        if not math.isfinite(right) or s <= ego_s or s >= reach:
-            return None
-        h = _curve_heading(curve, s)
-        if h is None:
-            return None
-        return s - ego_s, right - ego_right, math.cos(h), math.sin(h)
+        key = (id(frame), x, z)
+        hit = self._offsets.get(key)
+        if hit is not None and hit[0] is frame:
+            return hit[1]
+        out = _lane_offset(frame, x, z)
+        self._offsets[key] = (frame, out)
+        return out
 
     def lane_bend(self, ahead: float, keep: bool = False) -> float:
         """Sharpest curvature of ego's lane over the next ``ahead`` metres; 0 with no frame."""
@@ -439,20 +450,13 @@ class RoadPaths:
         _ahead, right, tx, tz = at
         side = -1.0 if right > 0.0 else 1.0
         sign = 1.0 if side * (nx * -tz + nz * tx) >= 0.0 else -1.0
-        ckey = (id(route), -2)
-        entry = self._curves.get(ckey)
-        if entry is None or entry[0] is not route:
-            entry = (route, road_curve(route.pts))
-            self._curves[ckey] = entry
+        own = self._route_curve(route, 0, route.pts)
         # Curvature is positive to the left; ``sign`` says the lane's right points at ego's track.
         ks = [0.0]
-        if entry[1] is not None:
-            ks = [-sign * entry[1].kappa_at(d) for d in _frange(0.0, reach, _GAP_STEP_M)]
+        if own is not None:
+            ks = [-sign * own.kappa_at(d) for d in _frange(0.0, reach, _GAP_STEP_M)]
         # The lane just behind counts too: a vehicle's turn trails the bend it has left.
-        behind = route_behind(
-            getattr(self._snap, "window", None), route.lane_index, x, z,
-            (bx - ax) / hop, (bz - az) / hop, 2.0 * _RECENT_M)
-        back = road_curve(behind) if len(behind) >= 2 else None
+        back = self._lane_behind(route, x, z, (bx - ax) / hop, (bz - az) / hop)
         if back is not None:
             ks.extend(sign * back.kappa_at(d) for d in _frange(0.0, back.length, _GAP_STEP_M))
         return sign * route.offset_m, -sign * route.heading_err_rad, min(ks), max(ks), -sign
@@ -593,6 +597,17 @@ class RoadPaths:
 
 _FOLLOW_STEP_M = 2.0
 _NO_DRIFT = (0.0, 0.0)
+
+
+def _lane_offset(frame, x: float, z: float) -> tuple[float, float, float, float] | None:
+    curve, ego_s, ego_right, reach = frame[:4]
+    s, right = fast_offset(curve, x, z)
+    if not math.isfinite(right) or s <= ego_s or s >= reach:
+        return None
+    h = _curve_heading(curve, s)
+    if h is None:
+        return None
+    return s - ego_s, right - ego_right, math.cos(h), math.sin(h)
 
 
 def _lane_turn(curve, s_offset: float, length: float) -> float:

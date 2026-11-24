@@ -9,6 +9,11 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, field
 
+from .road_lsq import normal_equations as _normal_equations
+from .road_lsq import residuals as _residuals
+from .road_lsq import circle_kappa
+from .road_lsq import solve as _solve
+
 
 # Basis scale (m): v = s / _S_REF_M keeps the cubic design matrix conditioned
 # over the 150 m scoring range instead of spanning 10^6 in the s³ column.
@@ -40,6 +45,10 @@ _CONF_SINGLE_SOURCE_CAP: float = 0.25
 # A source needs this many samples to say anything about shape once its own
 # lateral offset is eliminated.
 _MIN_SOURCE_SAMPLES: int = 3
+
+# A trail of this many samples or more is fitted on every other one, each standing for
+# two (README §9, Cost). 0 fits every sample.
+_THIN_MIN_SAMPLES: int = 16
 
 # Raising this was measured to change nothing once the base arc carries ego's
 # curvature exactly, so it stays at parity. Dropped entirely when re-based.
@@ -355,43 +364,23 @@ def from_curvature(kappa: float) -> RoadModel:
     return RoadModel(base_kappa=kappa, confidence=0.0)
 
 
-def _solve(a: list[list[float]], b: list[float]) -> tuple[float, ...] | None:
-    """Gaussian elimination with partial pivoting on an n x n system."""
-    n = len(b)
-    m = [row[:] + [rhs] for row, rhs in zip(a, b)]
-    for col in range(n):
-        pivot = max(range(col, n), key=lambda r: abs(m[r][col]))
-        if abs(m[pivot][col]) < 1e-12:
-            return None
-        m[col], m[pivot] = m[pivot], m[col]
-        inv = 1.0 / m[col][col]
-        for r in range(col + 1, n):
-            factor = m[r][col] * inv
-            if factor == 0.0:
-                continue
-            for c in range(col, n + 1):
-                m[r][c] -= factor * m[col][c]
-    out = [0.0] * n
-    for row in range(n - 1, -1, -1):
-        acc = m[row][n]
-        for col in range(row + 1, n):
-            acc -= m[row][col] * out[col]
-        out[row] = acc / m[row][row]
-    return tuple(out)
-
-
 def _basis(s_m: float) -> tuple[float, ...]:
+    # The fit's loops are unrolled for _N_COEF == 4, in the old loops' arithmetic order (README §9).
     v = s_m / _S_REF_M
-    out = []
-    power = 1.0
-    for _ in range(_N_COEF):
-        power *= v
-        out.append(power)
-    return tuple(out)
+    v2 = v * v
+    v3 = v2 * v
+    return v, v2, v3, v3 * v
 
 
-def _predict(beta, basis) -> float:
-    return sum(b * c for b, c in zip(basis, beta))
+def _add_priors(ata: list[list[float]]) -> None:
+    # Heading prior: the road leaves ego along ego's heading, so c1 is pulled to
+    # zero. Without it a far source's local shape tilts the whole centreline.
+    ata[0][0] += _HEADING_PRIOR_WEIGHT
+    # Curvature prior: shape the traffic does not support relaxes onto the base arc,
+    # instead of the quartic whipping between short trails (README §9).
+    for i in range(_N_COEF):
+        for j in range(_N_COEF):
+            ata[i][j] += _CURV_PRIOR[i][j]
 
 
 _EGO_SOURCE_ID = -1
@@ -423,20 +412,22 @@ def _grouped_rows(
         total_w = sum(w for _, _, w in samples)
         if total_w <= 0.0:
             continue
-        mean_b = [0.0] * _N_COEF
+        bases = [_basis(x) for x, _, _ in samples]
+        m0 = m1 = m2 = m3 = 0.0
         mean_y = 0.0
-        for x, y, w in samples:
-            basis = _basis(x)
-            for i in range(_N_COEF):
-                mean_b[i] += w * basis[i]
+        for (_, y, w), (b0, b1, b2, b3) in zip(samples, bases):
+            m0 += w * b0
+            m1 += w * b1
+            m2 += w * b2
+            m3 += w * b3
             mean_y += w * y
-        for i in range(_N_COEF):
-            mean_b[i] /= total_w
+        m0 /= total_w
+        m1 /= total_w
+        m2 /= total_w
+        m3 /= total_w
         mean_y /= total_w
-        for x, y, w in samples:
-            basis = _basis(x)
-            centred = tuple(basis[i] - mean_b[i] for i in range(_N_COEF))
-            rows.append((source_id, centred, y - mean_y, w))
+        for (_, y, w), (b0, b1, b2, b3) in zip(samples, bases):
+            rows.append((source_id, (b0 - m0, b1 - m1, b2 - m2, b3 - m3), y - mean_y, w))
         n_sources += 1
     return rows, n_sources
 
@@ -463,54 +454,47 @@ _CURV_PRIOR = _curvature_prior()
 
 def _weighted_fit(rows) -> tuple[tuple[float, ...], float] | None:
     """Weighted normal equations plus the weighted residual RMS."""
-    ata = [[0.0] * _N_COEF for _ in range(_N_COEF)]
-    atb = [0.0] * _N_COEF
-    for _, basis, y, w in rows:
-        for i in range(_N_COEF):
-            atb[i] += w * basis[i] * y
-            for j in range(_N_COEF):
-                ata[i][j] += w * basis[i] * basis[j]
-    # Heading prior: the road leaves ego along ego's heading, so c1 is pulled to
-    # zero. Without it a far source's local shape tilts the whole centreline.
-    ata[0][0] += _HEADING_PRIOR_WEIGHT
-    # Curvature prior: shape the traffic does not support relaxes onto the base arc,
-    # instead of the quartic whipping between short trails (README §9).
-    for i in range(_N_COEF):
-        for j in range(_N_COEF):
-            ata[i][j] += _CURV_PRIOR[i][j]
+    fit = _fit(rows)
+    return None if fit is None else (fit[0], fit[1])
+
+
+def _fit(rows):
+    """``_weighted_fit`` plus the solved normal equations and each row's residual."""
+    ata, atb = _normal_equations(rows)
+    _add_priors(ata)
     beta = _solve(ata, atb)
     if beta is None:
         return None
+    res = _residuals(rows, beta)
     total_w = 0.0
     sq = 0.0
-    for _, basis, y, w in rows:
-        sq += w * (y - _predict(beta, basis)) ** 2
+    for (_, _, _, w), r in zip(rows, res):
+        sq += w * r ** 2
         total_w += w
     rms = math.sqrt(sq / total_w) if total_w > 0.0 else 0.0
-    return beta, rms
+    return beta, rms, ata, res
 
 
-def _covariance(rows, beta, n_sources: int) -> tuple:
+def _covariance(rows, beta, n_sources: int, ata=None, res=None, thinned: int = 0) -> tuple:
     """Coefficient covariance of the final weighted fit, as four rows.
 
     The same normal equations the fit solved, priors included, scaled by the
-    weighted residual variance. Symmetric, so a solved column is also a row."""
-    ata = [[0.0] * _N_COEF for _ in range(_N_COEF)]
+    weighted residual variance. Symmetric, so a solved column is also a row.
+    ``ata`` and ``res`` are that fit's, reused only while every row has weight. ``thinned``
+    samples were dropped by ``_thin_trails`` and still count toward the residual's degrees of freedom."""
+    if res is None:
+        res = _residuals(rows, beta)
+    if ata is None or not all(w > 0.0 for _, _, _, w in rows):
+        ata, _ = _normal_equations([row for row in rows if not row[3] <= 0.0])
+        _add_priors(ata)
     sq = 0.0
     used = 0
-    for _source_id, basis, y, w in rows:
+    for (_, _, _, w), r in zip(rows, res):
         if w <= 0.0:
             continue
-        for i in range(_N_COEF):
-            for j in range(_N_COEF):
-                ata[i][j] += w * basis[i] * basis[j]
-        sq += w * (y - _predict(beta, basis)) ** 2
+        sq += w * r ** 2
         used += 1
-    ata[0][0] += _HEADING_PRIOR_WEIGHT
-    for i in range(_N_COEF):
-        for j in range(_N_COEF):
-            ata[i][j] += _CURV_PRIOR[i][j]
-    scale = sq / max(1, used - _N_COEF - max(1, n_sources))
+    scale = sq / max(1, used + thinned - _N_COEF - max(1, n_sources))
     out = []
     for i in range(_N_COEF):
         column = _solve(ata, [1.0 if j == i else 0.0 for j in range(_N_COEF)])
@@ -540,30 +524,33 @@ def _trail_extent(target_samples) -> tuple[float, float]:
     return far, 0.5 * (spans[mid - 1] + spans[mid])
 
 
-def _source_residuals(rows, beta) -> dict[int, float]:
-    """Per-source residual RMS about the shared fit, ego excluded."""
+def _source_sums(rows, beta, res=None) -> dict[int, list[float]]:
+    """Per-source summed ``w*r^2`` and ``w`` about the shared fit, ego excluded."""
+    if res is None:
+        res = _residuals(rows, beta)
     acc: dict[int, list[float]] = {}
-    for source_id, basis, y, w in rows:
+    for (source_id, _, _, w), r in zip(rows, res):
         if source_id == _EGO_SOURCE_ID:
             continue
-        bucket = acc.setdefault(source_id, [0.0, 0.0])
-        bucket[0] += w * (y - _predict(beta, basis)) ** 2
+        bucket = acc.get(source_id)
+        if bucket is None:
+            bucket = acc[source_id] = [0.0, 0.0]
+        bucket[0] += w * r ** 2
         bucket[1] += w
+    return acc
+
+
+def _source_residuals(rows, beta, res=None) -> dict[int, float]:
+    """Per-source residual RMS about the shared fit, ego excluded."""
     return {
         sid: math.sqrt(sq / tw) if tw > 0.0 else math.inf
-        for sid, (sq, tw) in acc.items()
+        for sid, (sq, tw) in _source_sums(rows, beta, res).items()
     }
 
 
-def _source_scales(rows, beta) -> dict[int, float]:
+def _source_scales(rows, beta, res=None) -> dict[int, float]:
     """Per-source weight scale from its own residual RMS about the shared fit."""
-    acc: dict[int, list[float]] = {}
-    for source_id, basis, y, w in rows:
-        if source_id == _EGO_SOURCE_ID:
-            continue
-        bucket = acc.setdefault(source_id, [0.0, 0.0])
-        bucket[0] += w * (y - _predict(beta, basis)) ** 2
-        bucket[1] += w
+    acc = _source_sums(rows, beta, res)
     scales: dict[int, float] = {}
     for source_id, (sq, total_w) in acc.items():
         if total_w <= 0.0:
@@ -631,42 +618,8 @@ def _rows_for_base(
 
 
 def _trail_kappa(points: list[tuple[float, float]]) -> float | None:
-    """Signed curvature of the least-squares circle through a source's own
-    samples; + is left, and a straight trail reads as zero.
-
-    Its own trail, so its lane offset cancels instead of reading as a bend the
-    way a bearing from ego would. Least squares over the whole trail rather
-    than three points off it: the three-point circle reads the road off two
-    gaps and jitters frame to frame, which the base arc then passes on to
-    every lateral at once."""
-    ordered = sorted(points, key=lambda p: p[0] * p[0] + p[1] * p[1])
-    (x1, y1), (xn, yn) = ordered[0], ordered[-1]
-    if math.hypot(xn - x1, yn - y1) < _REBASE_MIN_SPAN_M:
-        return None
-    # Mean-centred algebraic fit: |p|² + D·x + E·y + F = 0.
-    mx = sum(p[0] for p in ordered) / len(ordered)
-    my = sum(p[1] for p in ordered) / len(ordered)
-    ata = [[0.0] * 3 for _ in range(3)]
-    atb = [0.0] * 3
-    for px, py in ordered:
-        x, y = px - mx, py - my
-        row = (x, y, 1.0)
-        rhs = -(x * x + y * y)
-        for i in range(3):
-            atb[i] += row[i] * rhs
-            for j in range(3):
-                ata[i][j] += row[i] * row[j]
-    sol = _solve(ata, atb)
-    if sol is None:
-        return None
-    cx, cy = -0.5 * sol[0], -0.5 * sol[1]
-    radius_sq = cx * cx + cy * cy - sol[2]
-    if radius_sq <= 1e-9:
-        return None
-    radius = math.sqrt(radius_sq)
-    # Centre to the right of travel means the road turns right, so kappa < 0.
-    cross = (xn - x1) * (cy - (y1 - my)) - (yn - y1) * (cx - (x1 - mx))
-    return (-1.0 if cross > 0.0 else 1.0) / radius
+    """Signed curvature of the trail's own least-squares circle (``road_lsq.circle_kappa``)."""
+    return circle_kappa(points, _REBASE_MIN_SPAN_M)
 
 
 def _rebased_kappa(
@@ -702,6 +655,33 @@ def _rebased_kappa(
     return max(-_REBASE_MAX_KAPPA, min(_REBASE_MAX_KAPPA, bent))
 
 
+def _thin_trails(target_samples):
+    """Every other sample of each long trail, newest kept, carrying its dropped neighbour's weight.
+
+    Neighbours sit 0.5 m apart on the trail grid, so the fit loses almost no shape and
+    keeps the same total weight. Returns the samples and how many each source dropped."""
+    if _THIN_MIN_SAMPLES <= 0:
+        return target_samples, {}
+    grouped: dict[int, list[tuple[int, float, float, float]]] = {}
+    for row in target_samples:
+        grouped.setdefault(row[0], []).append(row)
+    out: list[tuple[int, float, float, float]] = []
+    dropped: dict[int, int] = {}
+    for sid, rows in grouped.items():
+        n = len(rows)
+        if n < _THIN_MIN_SAMPLES:
+            out.extend(rows)
+            continue
+        kept = []
+        for i in range(n - 1, -1, -2):
+            _, x, y, w = rows[i]
+            kept.append((sid, x, y, w + rows[i - 1][3] if i > 0 else w))
+        kept.reverse()
+        out.extend(kept)
+        dropped[sid] = n - len(kept)
+    return out, dropped
+
+
 def fit_road_model(
     ego_samples: list[tuple[float, float]],
     target_samples: list[tuple[int, float, float, float]],
@@ -711,7 +691,10 @@ def fit_road_model(
 
     ``ego_samples`` are ego's own recent path in the current ego frame (x behind
     ego is negative). ``target_samples`` are ``(source_id, x, y, weight)``."""
+    # The base arc's vote and the trust's trail statistics read every sample; only the fit is thinned.
     base_kappa = _rebased_kappa(fallback_kappa, target_samples)
+    far_weight, span_med = _trail_extent(target_samples)
+    target_samples, dropped = _thin_trails(target_samples)
     # Ego's path lies on the base arc only while the base is ego's own
     # curvature, and it never described the road ahead anyway (README §9).
     ego_rows = ego_samples if base_kappa == fallback_kappa else []
@@ -726,37 +709,38 @@ def fit_road_model(
     if len(rows) < 4:
         return from_curvature(fallback_kappa)
 
-    fit = _weighted_fit(rows)
+    fit = _fit(rows)
     if fit is None:
         return from_curvature(fallback_kappa)
-    beta, rms = fit
+    beta, rms, ata, res = fit
 
     # Huber handles sample noise, source-level scaling drops a manoeuvring vehicle.
     # Each pass rescales the ORIGINAL weights; compounding craters every source.
     base_rows = rows
     for _ in range(_IRLS_PASSES):
-        scales = _source_scales(rows, beta)
+        scales = _source_scales(rows, beta, res)
         reweighted = []
-        for source_id, basis, y, w0 in base_rows:
-            residual = abs(y - _predict(beta, basis))
+        # Every pass keeps base_rows' order, basis and y, so ``res`` lines up with both.
+        for (source_id, basis, y, w0), r in zip(base_rows, res):
+            residual = abs(r)
             scale = 1.0 if residual <= _HUBER_DELTA_M else _HUBER_DELTA_M / residual
             scale *= scales.get(source_id, 1.0)
             reweighted.append((source_id, basis, y, w0 * scale))
-        fit = _weighted_fit(reweighted)
+        fit = _fit(reweighted)
         if fit is None:
             return from_curvature(fallback_kappa)
-        beta, rms = fit
+        beta, rms, ata, res = fit
         rows = reweighted
 
     # Ego anchors the fit but samples no road ahead, so it buys no confidence.
     target_weight = sum(w for sid, _, _, w in rows if sid != _EGO_SOURCE_ID)
-    source_rms = _source_residuals(rows, beta)
+    source_rms = _source_residuals(rows, beta, res)
     agreement = agreement_residual_m(source_rms)
     confidence = _confidence(target_weight, agreement, n_sources)
     # Trust is answered for every fit that solved, including one confidence rejects:
     # the blend still has to decide how much of the base arc to take instead.
-    cov = _covariance(rows, beta, n_sources)
-    far_weight, span_med = _trail_extent(target_samples)
+    thinned = sum(dropped.get(sid, 0) for sid in {row[0] for row in rows if row[3] > 0.0})
+    cov = _covariance(rows, beta, n_sources, ata, res, thinned)
     if confidence <= 0.0:
         # Keep the per-source diagnostics even when the fit is not trusted, or a
         # caller's trust loop can never bootstrap out of a cold start.
