@@ -73,11 +73,52 @@ every 20 ms during the gap, repo-relative paths) and which Python threads used t
 meanwhile. Every 10 s a debug line gives the longest gap and the busiest threads, so a drive
 shows what grows. Stall lines closer than 1 s are counted into the next one.
 
+Where and who: the 10 s line and every stall line end with where the truck was (`At x .. z ..`,
+10 m, speed, SP or TMP, paused) and the most vehicles, trailers, map lanes and routed vehicles
+seen in the window, read once a second from radar and the map worker (unknown while either is
+down). A second 10 s line, `Loops in the last 10 s`, gives every worker's loop rate against its
+target, its loop wall time p50, p99 and max against its `loop_interval`, and its CPU per loop,
+worst p99 share of the budget first; wall time beyond the CPU is mostly waiting for the GIL.
+`BaseThread` times each `loop()` on `perf_counter` (`monotonic` ticks at 15.6 ms on Windows)
+into its `LoopTimes` only while the probe runs (`LoopTimes.on`), so without `debug` a loop pays
+one clock read and one flag test. `tools/lag_report.py` turns a drive's log into a table: map
+cells ranked by process CPU with their stalls, traffic, lanes and busiest thread, each thread's
+late windows and how its CPU follows traffic and lanes. It splits stalls into busy (threads used
+the CPU) and quiet (under half a core: OS scheduling, disk or a blocking native call). A stall's
+CPU is read only once the gap is seen (`From 260 ms in:`) and shared over the time between the two
+reads; lines before 2026-11-23 divided it by the whole stall, which read busy stalls as quiet, so
+the report leaves those unclassified. For the
+functions behind a hot place, record the drive with `tools/profile_drive.py` (py-spy, GIL holder
+only) and read it with `tools/profile_report.py`.
+
 Why the CPU column matters: almost every PySide6 call releases the GIL and must win it
 back, so a GUI thread making many Qt calls slows down in proportion to how busy the
 workers are (2000 `drawLine` calls: 7 ms alone, 775 ms beside one busy thread). Thread CPU
 comes from `GetThreadTimes` (Windows, 15.6 ms ticks) or the thread CPU clock (Linux), never
 psutil: its thread list walks every process, 116 ms a call on Windows.
+
+## GIL switch interval (`gil_switch.py`)
+
+One thread runs Python at a time. A thread that wants the lock while a busy one holds it
+waits up to the switch interval, then asks it to let go; a thread that gives the lock up
+often (the GUI on almost every Qt call, every worker between loops) pays that wait each time
+it wants it back. In busy TruckersMP traffic the process sits at a full core and the GUI
+froze for 400 ms while the 100 Hz loops fell to 69-76 Hz (2026-11-23). `Settings.gil_switch_ms`
+(config.json only) sets the interval at start: 1 ms by default, Python's own is 5. The start
+logs it, and an unusable value keeps Python's interval with a warning.
+
+Windows counts that wait in whole milliseconds, rounded down, and ends it on the process
+timer tick: 15.6 ms unless something raised the timer (SDL, under pygame, normally sets
+1 ms). So 1 to 5 ms all behave as one tick on a default timer, and anything under 1 ms is
+no wait at all: the lock is handed over at once. A bench of a GUI-like thread (200
+lock-releasing calls) beside 3 busy threads, one 3 s run each, 1 ms timer: 619 ms at 5 ms,
+296 at 2, 149 at 1, 0.6 under 1 ms, but the busy threads then did 15 to 20 % less work. In
+a process already at a full core that loss lands on AEB and the map worker, so the
+default stays at 1 ms. With `debug` on, the stall probe logs once, at its first 10 s
+report, how long a 1 ms timed wait really lasts: about 1 ms means the interval works as
+set; about 15 ms means the timer was never raised and 1 ms buys nothing. Not yet measured
+in game: compare a busy drive at 1 ms against `gil_switch_ms: 5` with `tools/lag_report.py`
+(GUI gap above 95 % CPU, sending and cruise loop rates, AEB p99).
 
 ## Popup UI
 

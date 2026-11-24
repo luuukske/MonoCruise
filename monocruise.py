@@ -74,6 +74,7 @@ from core.version import __version__
 from core.thread_management.registry import registry
 from core.thread_management.watchdog import Watchdog
 from core.thread_management.monitor  import Monitor
+from core.thread_management.gil_switch import apply_gil_switch
 from core.thread_management.gui_stall_probe import GuiStallProbe
 from core.thread_management.popup_log_handler import PopupLogHandler
 from core.thread_management.log_queue import QueuedLogging
@@ -265,6 +266,7 @@ def main() -> None:
     _configure_logging()
     log = logging.getLogger("main")
     log.info("starting: debug=%s", settings.debug)
+    apply_gil_switch(settings.gil_switch_ms)
     previous_version = _read_version_marker()
     _write_version_marker()
     _sync_windows_app_details()

@@ -2,3 +2,4 @@
 pytest
 pyinstaller
 pygments>=2.20.0
+py-spy

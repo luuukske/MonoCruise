@@ -26,6 +26,27 @@ class ThreadData:
     pass
 
 
+class LoopTimes:
+    """Wall seconds of each loop() since the last take(). Recorded only while ``on`` (the debug GUI stall probe)."""
+
+    on: bool = False
+    _CAP = 4096
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._samples: list[float] = []
+
+    def add(self, seconds: float) -> None:
+        with self._lock:
+            if len(self._samples) < self._CAP:
+                self._samples.append(seconds)
+
+    def take(self) -> list[float]:
+        with self._lock:
+            out, self._samples = self._samples, []
+        return out
+
+
 # Internal backend wrappers: keep the two thread primitives behind one API
 
 class _StdThreadBackend:
@@ -125,6 +146,7 @@ class BaseThread:
 
         self._stop_event = threading.Event()
         self._fps_samples = 0
+        self.loop_times = LoopTimes()
         self._ident: int | None = None   # captured inside the running thread
 
         # Create the backend
@@ -251,6 +273,7 @@ class BaseThread:
             log.debug("loop starting")
             while not self._stop_event.is_set():
                 t0 = time.monotonic()
+                t0_precise = time.perf_counter()
                 try:
                     self.loop()
                     self.heartbeat_at = time.monotonic()
@@ -296,6 +319,8 @@ class BaseThread:
                     break
 
                 elapsed = time.monotonic() - t0
+                if LoopTimes.on:
+                    self.loop_times.add(time.perf_counter() - t0_precise)
                 cycle_duration = max(elapsed, self.loop_interval)
                 if cycle_duration > 0:
                     inst_fps = 1.0 / cycle_duration

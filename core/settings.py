@@ -74,6 +74,9 @@ class Settings(metaclass=_SingletonMeta):
     # General settings
     debug: bool = False
     last_game: int = 1 # 1 = ETS2, 2 = ATS
+    # How long a thread waiting for the Python lock lets a busy one run first (config.json only).
+    # Python's default is 5; see core/thread_management/README.md, "GIL switch interval".
+    gil_switch_ms: float = 1.0
 
     # Update channel: "stable" (default) or "preview" (opt into prereleases).
     # The updater reads this from config.json to decide which releases to offer.
