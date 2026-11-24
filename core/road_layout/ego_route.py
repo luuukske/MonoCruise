@@ -79,7 +79,9 @@ class LaneRoute:
 class EgoRouter:
     """Holds ego's lane across frames. One instance per consumer of the map."""
 
-    def __init__(self) -> None:
+    def __init__(self, divergence: bool = True) -> None:
+        # Off for other vehicles: their consumers read the branches, never how far they part.
+        self._divergence = divergence
         self._track = EgoLaneTrack()
         self._held: tuple[str, int, int] | None = None
         self._last: tuple[float, float] | None = None
@@ -127,7 +129,7 @@ class EgoRouter:
             and r[1] <= chosen[1] + _SIBLING_DIST_M
             and r[2] <= chosen[2] + _SIBLING_COST_M
         ]
-        return build_route(lanes, near, index, x, z, dx, dz, siblings)
+        return build_route(lanes, near, index, x, z, dx, dz, siblings, divergence=self._divergence)
 
 
 def build_route(
@@ -139,11 +141,14 @@ def build_route(
     dx: float,
     dz: float,
     siblings: Sequence[int] = (),
+    divergence: bool = True,
 ) -> LaneRoute | None:
     """Route along ``lanes[index]`` from the foot of ``(x, z)``, with branch divergence.
 
     ``siblings`` are lanes ego could equally be on. They count as branches from
     the start, compared at ego's held offset, so two parallel lanes cost nothing.
+
+    Without ``divergence`` the route is the same but for empty ``divergence`` and no ``branch_s``.
     """
     main = _assemble(lanes, near, index, x, z, dx, dz)
     if main is None:
@@ -151,12 +156,16 @@ def build_route(
     spans, route, boundaries, (fx, fz, tx, tz) = main
     right = (x - fx) * (-tz) + (z - fz) * tx
     heading_err = math.atan2(dx * tz - dz * tx, dx * tx + dz * tz)
-    divergence, branch_s, branches = _divergence(lanes, near, spans, route, boundaries)
+    branches, shapes, hops = _branches(lanes, near, spans, route, boundaries)
+    if divergence:
+        gaps, branch_s = _divergence(route, hops, shapes)
+    else:
+        gaps, branch_s = (), None
     alternatives = [
         a for a in (_clip(_prefix(route, s_at) + list(pts[1:]), _ROUTE_MAX_M) for s_at, pts in branches)
         if len(a) >= 2
     ]
-    held = _offset_polyline(route, right)
+    held = _offset_polyline(route, right) if divergence else None
     merge_s = None
     merge_offset = None
     merge_index = None
@@ -175,15 +184,21 @@ def build_route(
                 merge_offset = sib_right
                 merge_index = len(alternatives) - 1
             continue
-        divergence, branch_s = _merge_divergence(
-            divergence, branch_s, held, _offset_polyline(sib_route, sib_right),
-        )
+        if divergence:
+            gaps, branch_s = _merge_divergence(gaps, branch_s, held, _offset_polyline(sib_route, sib_right))
     lane = lanes[index]
     return LaneRoute(
         route, right, heading_err, index, lane.kind, getattr(lane, "lane_count", 0),
-        divergence, _length(route), branch_s, tuple(alternatives),
+        gaps, _length(route), branch_s, tuple(alternatives),
         merge_s, merge_offset, merge_index,
     )
+
+
+def route_points(lanes: Sequence, near: LineIndex, index: int, x: float, z: float, dx: float, dz: float):
+    """``build_route(...).pts`` alone, or None where it gives None: no branch divergence, for callers
+    that read only the points (AEB's neighbour lane)."""
+    main = _assemble(lanes, near, index, x, z, dx, dz)
+    return None if main is None else main[1]
 
 
 def route_behind(window, index: int, x: float, z: float, fwd_x: float, fwd_z: float,
@@ -251,16 +266,16 @@ def _offset_polyline(pts, right: float) -> tuple[tuple[float, float], ...]:
     return tuple(out)
 
 
-def _divergence(lanes, near, spans, route, boundaries):
-    """``(s, metres)`` the widest branch leaving any span tip has drifted from the route.
-    Bit for bit what measuring every branch with ``_distance_to`` gives (README, "Route cost")."""
+def _branches(lanes, near, spans, route, boundaries):
+    """``(branches, their shapes, route hops)``: every lane leaving a span tip, as ``(s_at, pts)``."""
     seen = {span.index for span in spans}
     branches: list[tuple[float, tuple[tuple[float, float], ...]]] = []
     shapes: list[tuple[float, tuple]] = []
+    hops = _hops(route)
     tips = [(s_at, spans[k - 1].index, spans[k].index) for s_at, k in boundaries]
     for s_at, prev_index, next_index in tips:
-        tip = _route_point(route, s_at)
-        tip_dir = _route_dir(route, s_at)
+        tip = _point_at(route, hops, s_at)
+        tip_dir = _dir_at(route, hops, s_at)
         if tip is None or tip_dir is None:
             continue
         for cand, pts, shape in _tip_branches(lanes, near, tip, tip_dir, prev_index, next_index):
@@ -268,13 +283,19 @@ def _divergence(lanes, near, spans, route, boundaries):
                 continue
             branches.append((s_at, pts))
             shapes.append((s_at, shape))
+    return branches, shapes, hops
+
+
+def _divergence(route, hops, shapes):
+    """``(s, metres)`` the widest branch leaving any span tip has drifted from the route, and the first
+    ``s`` past 0.5 m. Bit for bit what measuring every branch with ``_distance_to`` gives (README)."""
     total = _length(route)
     out: list[tuple[float, float]] = []
     first: float | None = None
     s = 0.0
     while s <= total + 1e-6:
         widest = 0.0
-        p = _route_point(route, s)
+        p = _point_at(route, hops, s)
         for s_at, shape in shapes:
             if s < s_at or p is None or s > s_at + _ALT_REACH_M:
                 continue
@@ -285,7 +306,7 @@ def _divergence(lanes, near, spans, route, boundaries):
             first = s
         out.append((s, widest))
         s += _DIV_STEP_M
-    return tuple(out), first, branches
+    return tuple(out), first
 
 
 def _tip_branches(lanes, near, tip, tip_dir, prev_index, next_index) -> tuple:
@@ -522,6 +543,38 @@ def _route_dir(pts, s: float):
     for i in range(1, len(pts)):
         hop = math.hypot(pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1])
         if hop >= left or i == len(pts) - 1:
+            if hop < 1e-9:
+                continue
+            return ((pts[i][0] - pts[i - 1][0]) / hop, (pts[i][1] - pts[i - 1][1]) / hop)
+        left -= hop
+    return None
+
+
+def _hops(pts) -> tuple[float, ...]:
+    """Segment lengths of ``pts``, the same ``hypot`` each walk below would take."""
+    return tuple(math.hypot(pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]) for i in range(1, len(pts)))
+
+
+def _point_at(pts, hops, s: float):
+    """``_route_point`` bit for bit, on lengths measured once: the divergence walks one route 50 times."""
+    if not pts:
+        return None
+    left = s
+    for i, hop in enumerate(hops, 1):
+        if hop >= left:
+            f = left / hop if hop > 1e-9 else 0.0
+            return (pts[i - 1][0] + f * (pts[i][0] - pts[i - 1][0]),
+                    pts[i - 1][1] + f * (pts[i][1] - pts[i - 1][1]))
+        left -= hop
+    return pts[-1]
+
+
+def _dir_at(pts, hops, s: float):
+    """``_route_dir`` bit for bit, on lengths measured once."""
+    left = s
+    last = len(hops)
+    for i, hop in enumerate(hops, 1):
+        if hop >= left or i == last:
             if hop < 1e-9:
                 continue
             return ((pts[i][0] - pts[i - 1][0]) / hop, (pts[i][1] - pts[i - 1][1]) / hop)

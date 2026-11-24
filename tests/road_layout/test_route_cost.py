@@ -31,8 +31,8 @@ def _junctions() -> LaneWindow:
     return LaneWindow(tuple(lines), (), (0, 0, 0, 0), lanes, LineIndex(lanes))
 
 
-def _plain_divergence(lanes, near, spans, route, boundaries):
-    """The measure as it was: every branch rebuilt and measured over all its segments."""
+def _plain_branches(lanes, near, spans, route, boundaries):
+    """The branches as they were found: every one rebuilt, no memo, plain walks."""
     seen = {span.index for span in spans}
     branches = []
     for s_at, k in boundaries:
@@ -47,12 +47,17 @@ def _plain_divergence(lanes, near, spans, route, boundaries):
             pts = er._join(extend_lane(lanes, cand, tip[0], tip[1], tip_dir[0], tip_dir[1], near), tip)
             if len(pts) >= 2:
                 branches.append((s_at, pts))
+    return branches, [(s_at, (pts, ())) for s_at, pts in branches], None
+
+
+def _plain_divergence(route, _hops, shapes):
+    """The measure as it was: every branch measured over all its segments."""
     out, first, s = [], None, 0.0
     total = er._length(route)
     while s <= total + 1e-6:
         widest = 0.0
         p = er._route_point(route, s)
-        for s_at, pts in branches:
+        for s_at, (pts, _boxes) in shapes:
             if s < s_at or p is None or s > s_at + er._ALT_REACH_M:
                 continue
             widest = max(widest, er._distance_to(pts, p[0], p[1]))
@@ -60,7 +65,7 @@ def _plain_divergence(lanes, near, spans, route, boundaries):
             first = s
         out.append((s, widest))
         s += er._DIV_STEP_M
-    return tuple(out), first, branches
+    return tuple(out), first
 
 
 def _poses(n: int):
@@ -74,6 +79,7 @@ def test_divergence_matches_the_plain_measure_bit_for_bit(monkeypatch):
     fast = [er.build_route(window.lanes, window.index, 0, x, z, dx, dz) for x, z, dx, dz in _poses(60)]
     assert any(r is not None and r.branch_s is not None for r in fast), "the fixture has branches"
     assert window.index.branch_cache, "tips were memoized"
+    monkeypatch.setattr(er, "_branches", _plain_branches)
     monkeypatch.setattr(er, "_divergence", _plain_divergence)
     fresh = _junctions()
     plain = [er.build_route(fresh.lanes, fresh.index, 0, x, z, dx, dz) for x, z, dx, dz in _poses(60)]
@@ -93,6 +99,59 @@ def test_lanes_from_another_window_never_read_its_cache():
     other = list(window.lanes)
     er.build_route(other, window.index, 0, -50.0, 0.3, 1.0, 0.0)
     assert not window.index.branch_cache
+
+
+def test_walks_on_measured_lengths_equal_the_plain_walks():
+    rng = random.Random(5)
+    for n in (0, 1, 2, 3, 40):
+        pts = tuple((10.0 * k + rng.uniform(-3, 3), rng.uniform(-20, 20)) for k in range(n))
+        if n == 3:
+            pts = (pts[0], pts[0], pts[2])
+        hops = er._hops(pts)
+        for s in [rng.uniform(-5, 500) for _ in range(200)] + [0.0, 1e-12]:
+            assert er._point_at(pts, hops, s) == er._route_point(pts, s)
+            assert er._dir_at(pts, hops, s) == er._route_dir(pts, s)
+
+
+def test_route_points_are_the_route_without_its_divergence():
+    window = _junctions()
+    for x, z, dx, dz in _poses(60):
+        full = er.build_route(window.lanes, window.index, 0, x, z, dx, dz)
+        pts = er.route_points(window.lanes, window.index, 0, x, z, dx, dz)
+        assert pts == (full.pts if full is not None else None)
+
+
+def _consumed(route):
+    """Every field AEB reads from a target route: all but ``divergence`` and ``branch_s``."""
+    if route is None:
+        return None
+    return (route.pts, route.offset_m, route.heading_err_rad, route.lane_index, route.kind, route.lane_count,
+            route.reach_m, route.alternatives, route.merge_s, route.merge_offset_m, route.merge_index)
+
+
+def test_a_route_without_divergence_is_the_same_route_for_what_reads_it():
+    window = _junctions()
+    full = er.EgoRouter()
+    bare = er.EgoRouter(divergence=False)
+    seen_branch = False
+    for x, z, dx, dz in _poses(60):
+        a = full.step(window, x, 0.0, z, dx, dz)
+        b = bare.step(window, x, 0.0, z, dx, dz)
+        assert _consumed(a) == _consumed(b)
+        if b is not None:
+            assert b.divergence == () and b.branch_s is None
+            seen_branch = seen_branch or a.branch_s is not None
+    assert seen_branch, "the fixture has routes with branches"
+
+
+def test_targets_are_routed_without_divergence():
+    from core.road_layout.target_path import TargetRouter
+
+    window = _junctions()
+    route = TargetRouter().route(1, window, -50.0, 0.0, 0.3, 1.0, 0.0)
+    assert route is not None and route.alternatives and route.divergence == ()
+    kept = TargetRouter(divergence=True).route(1, window, -50.0, 0.0, 0.3, 1.0, 0.0)
+    assert kept.divergence and _consumed(kept) == _consumed(route)
 
 
 def test_culled_distance_equals_the_plain_distance():

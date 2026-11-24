@@ -27,7 +27,8 @@ the installed ETS2: 178 ms once at start (install lookup), about 100 ms for the
 catalog and the densest sector, 0.3 ms per pass once ready. It also routes every
 moving vehicle within 120 m and not more than 10 m behind ego, nearest first,
 inside a 15 ms budget, and publishes them as `target_routes`: AEB bends the arcs of
-targets its road path puts in ego's lane. Status changes log
+targets its road path puts in ego's lane. Target routes carry their branches but no
+divergence (core/road_layout/README.md, Route cost). Status changes log
 once at info level; nothing here raises a popup, because the driver cannot act
 on it. Logs name sectors and counts, never world coordinates.
 

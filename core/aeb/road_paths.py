@@ -15,7 +15,7 @@ from core.aeb.calibration import AEBCalibration
 from core.radar.bent_path import BentPath, bend_arc
 from core.radar.traffic import ArcPath
 from core.road_layout.ego_lane import ranked_lanes
-from core.road_layout.ego_route import build_route, route_behind
+from core.road_layout.ego_route import route_behind, route_points
 from core.road_layout.road_bend import (
     BendParams, _arc_xy, _curve_heading, _curve_point, _frange, _held_offset, _smoothstep, _wrap,
     bend_profile, fast_offset, foot_kappa, foot_offset, lateral_offset, rank_routes, road_curve,
@@ -545,8 +545,8 @@ class RoadPaths:
             for index, dist, _cost in ranked_lanes(pts, px, pz, tx, tz, near, 0.0, limit=4):
                 if dist > _CHANGE_SNAP_M:
                     continue
-                route = build_route(lanes, near, index, px, pz, tx, tz)
-                found = road_curve(route.pts) if route is not None else None
+                route = route_points(lanes, near, index, px, pz, tx, tz)
+                found = road_curve(route) if route is not None else None
                 if found is None:
                     continue
                 off = side * fast_offset(curve, *found.pts[0])[1]

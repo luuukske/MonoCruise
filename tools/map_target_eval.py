@@ -71,7 +71,8 @@ def eval_clip(path_str: str) -> dict:
                 continue
             tracks.setdefault(v.id, []).append((t, v.position.x, v.position.z))
     blender = VehicleCurvatureBlender(CAL)
-    router = TargetRouter()
+    # target_path trusts a route only up to where its branches part, so this tool keeps the divergence.
+    router = TargetRouter(divergence=True)
     rows = []
     for k, t in enumerate(frame_t):
         ego = ego_by_t.get(t)

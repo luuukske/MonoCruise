@@ -16,15 +16,19 @@ from core.road_layout.map_path import DEFAULT_PARAMS, MapPath, PathParams, build
 
 
 class TargetRouter:
-    """One lane router per vehicle id; ``prune`` drops vehicles no longer seen."""
+    """One lane router per vehicle id; ``prune`` drops vehicles no longer seen.
 
-    def __init__(self) -> None:
+    Routes carry no ``divergence`` unless asked: AEB reads their branches only (README, Route cost).
+    """
+
+    def __init__(self, divergence: bool = False) -> None:
         self._routers: dict[int, EgoRouter] = {}
+        self._divergence = divergence
 
     def route(self, vid: int, window, x: float, y: float, z: float, fwd_x: float, fwd_z: float) -> LaneRoute | None:
         router = self._routers.get(vid)
         if router is None:
-            router = EgoRouter()
+            router = EgoRouter(divergence=self._divergence)
             self._routers[vid] = router
         return router.step(window, x, y, z, fwd_x, fwd_z)
 

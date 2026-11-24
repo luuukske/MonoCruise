@@ -168,6 +168,29 @@ held Python's lock 100 % of a core and froze the GUI for up to a second
 18,194 routes from six clips of that drive matched the old code exactly; ego's
 route went from 24 to 5 ms there (`tests/road_layout/test_route_cost.py`).
 
+Busy TruckersMP traffic still made route building the map worker's and AEB's
+largest growth (py-spy, `tools/profile_report.py`, 2026-11-23): the map worker
+routes every mover near ego each pass. Two more, bit for bit:
+
+- The divergence walks one route about 50 times (every 5 m and each tip); it
+  measures the segment lengths once (`_hops`, `_point_at`, `_dir_at`) instead
+  of a `hypot` per segment per walk.
+- `route_points` is `build_route(...).pts` without the divergence, for callers
+  that read only the points: AEB's neighbour lane for a lane change.
+- Other vehicles' routes (`TargetRouter`) carry no `divergence` and no `branch_s`:
+  nothing in `core/` reads them on a target, only the branches (`alternatives`)
+  and the merge fields, which are found exactly as before. The sampling every 5 m,
+  the held-offset polylines and the sibling merge of the divergence are skipped.
+  On the real map around the 2026-11-23 hot spots, 7,431 steps of 297 short drives
+  gave ego routes identical in every field and target routes identical in every
+  field AEB reads; a target step went from 0.47 to 0.22 ms. A tool that wants a
+  target's divergence asks for it (`TargetRouter(divergence=True)`,
+  `tools/map_target_eval.py`, whose `target_path` trusts a route only to its branch).
+
+On the real map at two TruckersMP hot spots, 1312 routes (746 with a branch)
+matched the committed code exactly; a route went from 0.69 to 0.59 ms, and the
+points alone take 0.13 ms.
+
 `route_behind` follows ego's lane the other way from its foot, the same
 assembly with the direction flipped; the lane departure thread's side traffic
 experiment reads traffic behind the rig in it.
