@@ -45,7 +45,7 @@ class ACCData(ThreadData):
     blinker_lane_offset_m: float = 0.0
     blinker_committed: bool = False
 
-    # Driver has followed closer than 0.5 s for a while (README §11). Display only.
+    # Driver has followed closer than 0.7 s for a while (README §11). Display only.
     close_follow_warn: bool = False
 
     # Monotonic time this snapshot corresponds to (= radar t_mono).

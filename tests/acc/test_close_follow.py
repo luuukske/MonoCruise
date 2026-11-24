@@ -33,12 +33,12 @@ def _armed() -> tuple[CloseFollow, float]:
     return w, 0.0
 
 
-@pytest.mark.parametrize("gap_s, delay", [(0.0, 1.0), (0.4, 1.0), (0.45, 3.0), (0.5, 5.0), (2.0, 5.0)])
-def test_the_delay_grows_from_one_second_to_five(gap_s, delay):
+@pytest.mark.parametrize("gap_s, delay", [(0.0, 0.5), (0.5, 0.5), (0.6, 1.75), (0.7, 3.0), (2.0, 3.0)])
+def test_the_delay_grows_from_half_a_second_to_three(gap_s, delay):
     assert delay_for_gap(gap_s) == pytest.approx(delay)
 
 
-@pytest.mark.parametrize("gap_s, delay", [(0.1, 1.0), (0.39, 1.0), (0.45, 3.0), (0.49, 4.6)])
+@pytest.mark.parametrize("gap_s, delay", [(0.1, 0.5), (0.49, 0.5), (0.6, 1.75), (0.69, 2.875)])
 def test_it_warns_once_the_gap_was_held_for_its_delay(gap_s, delay):
     w, t = _armed()
     t = _hold(w, t, delay - 0.2, gap_s)
@@ -47,9 +47,9 @@ def test_it_warns_once_the_gap_was_held_for_its_delay(gap_s, delay):
     assert w.warn
 
 
-def test_half_a_second_and_more_never_warns():
+def test_seven_tenths_of_a_second_and_more_never_warns():
     w, t = _armed()
-    _hold(w, t, 30.0, 0.5)
+    _hold(w, t, 30.0, 0.7)
     assert not w.warn
 
 
@@ -57,8 +57,8 @@ def test_the_gap_is_bumper_to_bumper_over_ego_speed():
     w, t = _armed()
     for _ in range(300):
         t += DT
-        w.step(t, EGO_FRONT_OFFSET_M + 0.6 * V, V)
-    assert not w.warn, "0.6 s behind the lead's rear, measured from ego's front"
+        w.step(t, EGO_FRONT_OFFSET_M + 0.8 * V, V)
+    assert not w.warn, "0.8 s behind the lead's rear, measured from ego's front"
 
 
 @pytest.mark.parametrize("rel_kmh", [-12.0, 12.0])
@@ -84,12 +84,19 @@ def test_standing_or_reversing_never_warns():
         assert not w.warn
 
 
-def test_it_stays_on_while_easing_off_inside_half_a_second():
+@pytest.mark.parametrize("v, warns", [(4.9, False), (5.5, True)])
+def test_only_following_above_eighteen_kmh_counts(v, warns):
+    w, t = _armed()
+    _hold(w, t, 2.0, 0.2, v=v)
+    assert w.warn is warns
+
+
+def test_it_stays_on_while_easing_off_inside_seven_tenths():
     w, t = _armed()
     t = _hold(w, t, 1.2, 0.2)
     assert w.warn
-    _hold(w, t, 0.5, 0.45)
-    assert w.warn, "0.45 s alone would need 3 s; a warning already showing does not blink off"
+    _hold(w, t, 0.5, 0.65)
+    assert w.warn, "0.65 s alone would need 2.4 s; a warning already showing does not blink off"
 
 
 def test_backing_off_clears_it_and_the_timer_starts_over():
@@ -97,9 +104,9 @@ def test_backing_off_clears_it_and_the_timer_starts_over():
     t = _hold(w, t, 1.2, 0.2)
     t = _hold(w, t, cf.RELEASE_S + 0.1, 0.8)
     assert not w.warn
-    t = _hold(w, t, 0.8, 0.2)
+    t = _hold(w, t, 0.4, 0.2)
     assert not w.warn
-    _hold(w, t, 0.4, 0.2)
+    _hold(w, t, 0.2, 0.2)
     assert w.warn
 
 
@@ -109,15 +116,16 @@ def test_a_short_dropout_neither_clears_it_nor_restarts_the_timer():
     t = _hold(w, t, cf.RELEASE_S - 0.2, None)
     assert w.warn
     w2, t2 = _armed()
-    t2 = _hold(w2, t2, 0.6, 0.2)
+    t2 = _hold(w2, t2, 1.3, 0.65)
+    assert not w2.warn
     t2 = _hold(w2, t2, cf.RELEASE_S - 0.2, None)
-    _hold(w2, t2, 0.6, 0.2)
-    assert w2.warn, "0.6 s before and 0.6 s after the dropout add up"
+    _hold(w2, t2, 1.3, 0.65)
+    assert w2.warn, "1.3 s before and 1.3 s after the dropout add up to 0.65 s's 2.4 s"
 
 
 def test_a_frozen_clock_holds_the_timer():
     w, t = _armed()
-    t = _hold(w, t, 0.5, 0.2)
+    t = _hold(w, t, 0.3, 0.2)
     for _ in range(300):
         w.step(t, _dist(0.2), V)
     assert not w.warn
@@ -172,7 +180,7 @@ def rig(monkeypatch):
 
 def test_the_thread_publishes_it_for_the_primary_lead(rig):
     rig.leads = [_lead(_dist(0.2))]
-    assert not rig.run(0.8)
+    assert not rig.run(0.3)
     assert rig.run(0.4)
 
 
@@ -182,19 +190,19 @@ def test_the_thread_needs_the_acc_option_and_cruise_control_mode(rig, monkeypatc
     monkeypatch.setattr(Settings.instance(), "cc_mode", "Speed limiter")
     assert not rig.run(DT)
     monkeypatch.setattr(Settings.instance(), "cc_mode", "Cruise control")
-    assert not rig.run(0.8), "back on, the timer starts over"
+    assert not rig.run(0.3), "back on, the timer starts over"
     monkeypatch.setattr(Settings.instance(), "acc_enabled", False)
     assert not rig.run(3.0)
 
 
 def test_the_thread_holds_it_through_a_pause(rig):
     rig.leads = [_lead(_dist(0.2))]
-    rig.run(0.6)
+    rig.run(0.3)
     rig.paused = True
     assert not rig.run(5.0), "a paused game adds no following time"
     rig.paused = False
-    assert not rig.run(0.2)
-    assert rig.run(0.4)
+    assert not rig.run(0.1)
+    assert rig.run(0.3)
 
 
 def test_the_thread_drops_it_without_a_lead(rig):

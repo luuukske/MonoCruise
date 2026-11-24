@@ -19,13 +19,13 @@ _DT_MAX_S: float = 0.2
 
 
 def delay_for_gap(gap_s: float) -> float:
-    """Seconds a time gap must be held: 1 s at 0.4 s and under, rising to 5 s at 0.5 s."""
+    """Seconds a time gap must be held: 0.5 s at 0.5 s and under, rising to 3 s at 0.7 s."""
     frac = (gap_s - GAP_NEAR_S) / (GAP_FAR_S - GAP_NEAR_S)
     return DELAY_NEAR_S + (DELAY_FAR_S - DELAY_NEAR_S) * max(0.0, min(1.0, frac))
 
 
 class CloseFollow:
-    """Latches ``warn`` once ego has followed closer than 0.5 s for the gap's delay."""
+    """Latches ``warn`` once ego has followed closer than 0.7 s for the gap's delay."""
 
     def __init__(self) -> None:
         self.warn = False
@@ -53,7 +53,7 @@ class CloseFollow:
         if gap_s < GAP_FAR_S:
             self._held_s = min(DELAY_FAR_S, self._held_s + dt)
             self._last_close_t = now
-            # Latched until ego backs off: easing from 0.3 s to 0.45 s must not blink it off and on.
+            # Latched until ego backs off: easing from 0.4 s to 0.65 s must not blink it off and on.
             self.warn = self.warn or self._held_s >= delay_for_gap(gap_s)
         elif self._last_close_t is None or now - self._last_close_t > RELEASE_S:
             self._held_s = 0.0

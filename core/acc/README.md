@@ -1742,7 +1742,7 @@ classification, which §8 rule 2 keeps separate from ACC's history fit.
         indicated_lead: LeadInfo | None  # blinker candidate; never inside leads[]
         blinker_b_eff: float     # gated blinker scalar the controller arbitrates on
         ego_lat_vel_ms: float    # signed lateral vel (right +) for stage-2 commit
-        close_follow_warn: bool  # followed closer than 0.5 s for a while (§11), display only
+        close_follow_warn: bool  # followed closer than 0.7 s for a while (§11), display only
         t_mono: float            # radar t_mono the snapshot is tied to
         _lock: threading.Lock
 
@@ -1852,15 +1852,16 @@ and AEB never read it. The cruise control panel moves the tracked vehicle
 to the closest slot and stands an orange warning triangle on the closest line in front of it while it is set
 (`ui/cc_panel/README.md`).
 
-The rule (Lukas, 2026-11-11), kept simple on purpose:
+The rule (Lukas, 2026-11-11, retuned faster 2026-11-21), kept simple on purpose:
 
 - Time gap = bumper gap (`dist_m - EGO_FRONT_OFFSET_M`) over ego speed.
-- Under 0.5 s it counts. The gap must be held 1 s at 0.4 s and under, rising
-  linearly to 5 s at 0.5 s, so a cut-in or a late brake does not show it.
-  (First built as 1 s at 0.2 s to 7 s at 0.5 s; that felt too long in game.)
+- Under 0.7 s it counts. The gap must be held 0.5 s at 0.5 s and under, rising
+  linearly to 3 s at 0.7 s, so a cut-in or a late brake does not show it.
+  (First built as 1 s at 0.2 s to 7 s at 0.5 s, then 1 s at 0.4 s to 5 s at
+  0.5 s; both felt too slow in game.)
 - Only steady following counts: lead and ego within 10 km/h of each other.
-- Once shown it stays until the gap is back at 0.5 s or more, so easing off
-  from 0.3 s to 0.45 s does not blink it off and on again.
+- Once shown it stays until the gap is back at 0.7 s or more, so easing off
+  from 0.4 s to 0.65 s does not blink it off and on again.
 - A lost lead or a speed blip under 0.5 s (`RELEASE_S`) neither clears it nor
   restarts the timer. Longer than that clears both.
 - It runs on radar time, so a paused game adds no following time.
@@ -1868,7 +1869,9 @@ The rule (Lukas, 2026-11-11), kept simple on purpose:
   which is when the panel has distance lines to draw it on.
 
 There is no speed or acceleration term beyond those, no sound and no popup.
-ACC's own closest gap is 0.7 s plus the 5 m standstill gap, so ACC following
-on its own does not set it. Below 1 m/s ego is treated as not following.
+ACC's own closest gap is 0.7 s plus the 5 m standstill gap, so steady ACC
+following on its own does not set it; the margin is that 5 m alone (0.2 s at
+90 km/h, 0.14 s at 130 km/h), so a long dip inside ACC's gap can. Below
+5 m/s (18 km/h) ego is treated as not following.
 
 Enforced by `tests/acc/test_close_follow.py`.
