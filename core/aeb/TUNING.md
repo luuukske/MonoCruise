@@ -99,6 +99,10 @@ instance to `build_pipeline(cal)` or `evaluate_frame(frame, cal)`.
 | `tmp_cross_los_keep_range_m` | 28 m | LOS keep range (no range: 25 worse, 28 m: 15) |
 | `tmp_cross_los_keep_min_fwd_dot` | −0.9 | LOS keep only for a crosser, not a near head-on car (identical at −0.93) |
 | `tmp_cross_los_keep_min_speed_ms` | 6.0 m/s | LOS keep skips junction crawlers (identical at 6.7; `fwd_dot` alone: 3 more FPs) |
+| `avoidability_gate_tmp_cross` | true | TmpCross runs in the gate's TMP crossing scope: a car coming at ego on a measured line inside ego's half width is released at the braking deadline (false: bare stage) |
+| `tmp_cross_gate_min_fwd_dot` | −0.9 | Crossing scope: crossers down to this; below it a head-on car counts only on ego's path |
+| `tmp_cross_gate_head_on_lat_m` | 0.5 m | Crossing scope head-on band off ego's path (1.0: +1 TP +1 FP; 1.5: +2 TP +4 FP) |
+| `tmp_cross_gate_confirm_s` / `_confirm_miss_m` | 0.20 s / 0.3 m | Engage confirm for a released crosser on a measured line this close to ego's centre (None: oblique 0.40 s). `249e9d51` 3.75 s to 3.54 s for +3 FP; 0.30 s any line 3.65 s +2; 0.10 s 3.45 s +5; 0.06 s +5 |
 | `co_same_turn_lookahead_scale` | 0.5 | Extended lookahead fraction of horizon |
 | `diverge_dip_samples` | 8 | `_is_approaching` window samples for the in-lane pass-through dip check |
 | `aeb_engage_confirm_s` | 0.06 s | Sustained-qualification wait for near-certain engagement entries (3rd tick at 30 Hz) |

@@ -296,7 +296,7 @@ pass, the vehicle enters collision evaluation.
 | `TurningCrossTrafficFilter` | Cross-traffic turning through intersection (Fix D absorbed) |
 | `TurnCompletionFilter` | Crosser turning into the oncoming lane whose turn-then-hold path never reaches ego's corridor |
 | `OutOfLaneParallelFilter` | Capsule lane-keeping adjacent / roadside traffic; also rear overtakers |
-| `TmpCrossTrafficFilter` | TMP-only: straight snapshot uses centre closest-approach (T-bone vs body-graze), turning snapshot uses full-horizon endpoint lane |
+| `TmpCrossTrafficFilter` | TMP-only: straight snapshot uses centre closest-approach (T-bone vs body-graze), turning snapshot uses full-horizon endpoint lane; inside `AvoidabilityGate`'s TMP crossing scope |
 | `SweepPassFilter` | Stationary cross-traffic ego turns through |
 | `CornerEntryStationaryFilter` | Stationary at corner entry: out-of-lane oncoming/co-dir, or in-lane with arc consistency |
 | `BendChainFilter` | Stopped or crawling car facing ego whose neighbours bend their lane beside ego, not through it |
@@ -675,7 +675,22 @@ No imminence / TTB floor is used: the turning phantom persists to `hit ≈ 0`
 so any positive "never suppress below this hit time" floor would leak that
 regression. A turning TMP target that is genuinely on a collision course and
 close-in relies on the engagement-certainty gate + TTB slam net downstream, not
-this stage.
+this stage. That net never saw such a target: a suppressed vehicle reaches no
+engagement test, so the stage dropped a slow left turner from 31.7 m to impact
+(`249e9d51`). Since 2026-11-24 the stage runs inside `AvoidabilityGate`'s TMP
+crossing scope ("Avoidability gate" below): the drop of a car coming at ego on a
+measured line through ego's width ends at the braking deadline, which is a
+deadline on the guess, not a hit-time floor on the stage.
+
+**Why it could drop that car.** The stage drops every TMP hit it is handed unless
+a keep recognises it; the 3 s end point is its only evidence of a phantom. In
+`249e9d51` the max-evasion keep held the car to 33.5 m and switched off at 31.7 m,
+where the car came inside its 3 m arm (steering clear still needed 4.6 m/s^2).
+The LOS keep never applied: 4.0 to 4.6 m/s against its 6 m/s bar, outside 28 m
+until 27.4 m, and from 27.9 m its closing test failed because `d_miss` is a
+distance: once the line passes ego's centre `|d_miss|` grows again (0.02 to 0.85 m)
+while the line stays inside ego. The turning branch's end point lay 5.8 to 8.9 m off
+ego's path while the same path put the car 1.3 to 1.8 m off it at ego's arrival.
 
 **LOS keep.** Both branches judge one jittered snapshot. The measured line of sight
 averages the track over `los_veto_window_s`, so when it says the crosser is coming
@@ -811,8 +826,8 @@ the hit, clears the bare body (a steer already under way). Corpus delta +0.02.
 **What it does not cover.** The window between the engage bar and capacity,
 where a guess still stands by design (`30ad90a1`: demand crosses the bar at
 4.12 s, the deadline releases at 4.43 s, AEB brakes at 4.60 s after its confirm
-windows, against 5.25 s without the gate). Moving targets (`736195a7` is held
-by the LOS veto, not by a stage).
+windows, against 5.25 s without the gate). Moving targets outside the oncoming
+and TMP crossing scopes (`736195a7` is held by the LOS veto, not by a stage).
 
 **Corpus** (1366 labelled clips, 2026-10-06, engage bar at 0.50, without the
 corner-entry override above):
@@ -860,6 +875,62 @@ body test and the deadline still apply. Measured on 2625 clips: the bare band -6
 10 m/s floor -70 (5 worse), plus the lane condition -79 (1 worse). Not kept:
 releasing before the deadline for a miss under 0.6 m closing at 2.5 m/s (+3, one
 new FP, nothing gained).
+
+**TMP crossing scope (`TmpCrossTrafficFilter`, 2026-11-24).** The stage's drop is a
+guess as well: that a TMP car whose hit it vetoes finishes its turn or sweeps past.
+`build_pipeline` wraps it in `AvoidabilityGate(..., crossing=True)`, which swaps
+stationarity for `tmp_crossing_in`: `head_on` or `near_head_on`, the measured CBDR
+line inside ego's own half width, and either a crosser (`fwd_dot >=
+tmp_cross_gate_min_fwd_dot`, -0.9) or a head-on car within
+`tmp_cross_gate_head_on_lat_m` (0.5 m) of ego's path; a head-on car in its own lane
+is the ordinary pass. There is no rate condition: a car crossing in front of ego
+moves its line through ego's centre, so `|d_miss|` grows while it is still coming
+at ego. The body test and the deadline apply unchanged; lane track and lane clear
+do not, they speak about parked bodies. `avoidability_gate_tmp_cross` False is
+the bare stage.
+
+**Crosser confirm.** A released crosser whose measured line passes within
+`tmp_cross_gate_confirm_miss_m` (0.3 m) of ego's centre engages after
+`tmp_cross_gate_confirm_s` (0.20 s) instead of the 0.40 s oblique window (tiered
+entry). `249e9d51` is eligible from 3.38 s and the oblique window alone held the
+brake to 3.75 s; with it AEB brakes at 3.54 s. No position or demand rule could
+have avoided that crash: at 3.38 s, the first tick it was a threat, stopping
+needed 17.6 m/s^2. Lukas chose 0.20 s / 0.3 m over 0.30 s for any released line
+(3.65 s, 2 fewer false brakes), 2026-11-24. None skips the oblique window for
+another vehicle. The confirm adds no positives; it only brakes earlier.
+
+Measured on 4596 labelled clips (both stores, no map, 2026-11-24): 8 positives FN
+to TP (`249e9d51`, which brakes at 3.54 s in its 3.13 to 4.50 s window,
+`dbf66b2f`, `4389976a`, `0e80305a`, `d432fe91`, `94625253`, `4b14b801`,
+`d1806233`), 6 TN to FP (single brakes of about 0.3 s: `cd8fc218`, `39b3bcbb`,
+`d208a62f` from the scope, `c27c22e7`, `b59695d8`, `bcbe5886` from the crosser
+confirm), and 4 brake onsets outside a positive's window (`e5b79e2a`, one tick at
+the burn-in edge, `33972682`, `b0f9c7ce`, `66cf7904`). With the map (1076 local
+clips on a map): only `d208a62f` and `cd8fc218` TN to FP (`c27c22e7` stays quiet
+with the map; `b59695d8` and `bcbe5886` are contributed clips, not in that run); the
+map already catches the local positives, and `249e9d51` has no replay map match.
+
+Measured and not kept:
+
+- Judging the turning branch at ego's arrival instead of at the 3 s end point (the
+  bare swept body meeting ego at the same moment, with or without the measured
+  line): +7 TP for +27 to 28 FP on the local store without the map, +2 for about
+  +20 with it. The end point stands
+  in for the junction driver who yields or finishes the turn, which no kinematic
+  test separated: `10c5079c` (labelled fp) reads like `249e9d51`, a crawling car on
+  a 0.6 m line 24 m out.
+- A closing-rate condition (-1.0 m/s): loses `249e9d51`, whose line stops shrinking
+  at 27 m. Any angle (90 degree crossers): +1 TP, +5 FP. A head-on band of 1.0 m:
+  +1 TP, +1 FP; 1.5 m: +2 TP, +4 FP. A 0.6 m line bar, picked on the local false
+  brakes, lost `4389976a` and `d432fe91` on the contributed store.
+- Lowering the stage's own max-evasion arm (3 m to 0, 1.5 or 2 m): +1 TP, +3 FP.
+- Crosser confirm variants, each against the scope alone: the near-certain 0.06 s
+  window for every released crosser, `249e9d51` at 3.45 s, +9 FP (+8 with a line
+  under 0.5 m, +5 under 0.3 m); 0.20 s for any released line +4 FP, under 0.5 m +3
+  and one more stray onset; 0.30 s for any line 3.65 s, +2 FP. Over the kept 0.20 s
+  / 0.3 m, 0.10 s / 0.3 m brakes `249e9d51` at 3.45 s for 2 more FP (`c0599748`,
+  `ec882814`) and no positive (Lukas kept 0.20 s). A 0.06 s window for
+  every vehicle on a line under 0.5 m, not just released crossers: +42 FP.
 
 `tests/aeb/harness.py::evaluate_frame` builds its context without a LOS track
 or `clearance_fn`, so the gate fails closed there and scenarios see the bare
@@ -1853,6 +1924,9 @@ aeb.snapshot                       # AEBSnapshot: full debug state
      certain), else `aeb_engage_confirm_oblique_s` for **oblique
      out-of-lane** threats, the extrapolation-fragile class (corner
      sweeps, mutual-turn passes) whose corpus phantoms qualify ≤ ~0.15 s.
+     A TMP crosser the avoidability gate released, on a measured line within
+     0.3 m of ego's centre, waits `tmp_cross_gate_confirm_s` (0.20 s) instead
+     ("Avoidability gate", crosser confirm).
      **Lapse tolerance (occupancy window).** The confirm window is not a
      hard-reset timer. `OccupancyConfirm` (`core/aeb/confirm.py`) tracks the
      per-frame qualification over a trailing window and fires when the

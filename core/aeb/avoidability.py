@@ -117,36 +117,54 @@ def oncoming_drifting_in(ctx: "FilterContext", cal: AEBCalibration) -> bool:
                  or rate <= cal.oncoming_gate_dmiss_rate_mps))
 
 
-class AvoidabilityGate:
-    """Wraps a stage that drops a stationary body (or, ``oncoming``, a drifting-in car) on a guess.
+def tmp_crossing_in(ctx: "FilterContext", cal: AEBCalibration) -> bool:
+    """TMP car coming at ego on a measured line through ego's own width (README TMP crossing scope)."""
+    if not cal.avoidability_gate_tmp_cross or not (ctx.head_on or ctx.near_head_on):
+        return False
+    miss = getattr(ctx, "d_miss", None)
+    if miss is None or miss > ctx.ego_hw:
+        return False
+    if ctx.fwd_dot >= cal.tmp_cross_gate_min_fwd_dot:
+        return True
+    # Head on: only a car already on ego's own path; one passing in its lane is the ordinary pass.
+    return abs(-ctx.dx * ctx.ego_fwd_z + ctx.dz * ctx.ego_fwd_x) <= cal.tmp_cross_gate_head_on_lat_m
 
-    The drop stands only while braking could still stop short of the body if the guess is wrong.
+
+class AvoidabilityGate:
+    """Wraps a stage that drops a stationary body (``oncoming``: a drifting-in car, ``crossing``:
+    a TMP crosser) on a guess. The drop stands only while braking could still stop short of the body.
     """
 
-    def __init__(self, inner, cal: AEBCalibration, *, oncoming: bool = False) -> None:
+    def __init__(self, inner, cal: AEBCalibration, *, oncoming: bool = False,
+                 crossing: bool = False) -> None:
         self._inner = inner
         self._cal = cal
         self.name = inner.name
         self._oncoming = oncoming
+        self._crossing = crossing
 
     def _in_scope(self, ctx: FilterContext) -> bool:
         if self._oncoming:
             return oncoming_drifting_in(ctx, self._cal)
+        if self._crossing:
+            return tmp_crossing_in(ctx, self._cal)
         return measured_stationary(ctx, self._cal)
 
     def apply(self, ctx: FilterContext) -> FilterResult:
         res = self._inner.apply(ctx)
         cal = self._cal
+        parked = not (self._oncoming or self._crossing)
         # A parked body the map holds on ego's own track is not beside ego's path (README lane track).
-        if (res.suppressed and not self._oncoming and cal.lane_track_stationary
+        if (res.suppressed and parked and cal.lane_track_stationary
                 and ctx.abs_v_speed < cal.sweep_pass_max_target_speed
                 and lane_track_held(ctx, cal)):
             return _PASS
         if (res.suppressed and cal.avoidability_gate_enabled
-                and not (not self._oncoming and lane_clear_held(ctx, cal))
+                and not (parked and lane_clear_held(ctx, cal))
                 and self._in_scope(ctx)
                 and measured_miss_inside_body(ctx)
                 and braking_deadline_passed(ctx, cal)):
             ctx.deadline_released = True
+            ctx.crossing_released = self._crossing
             return _PASS
         return res

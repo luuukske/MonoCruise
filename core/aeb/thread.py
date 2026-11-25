@@ -1422,6 +1422,8 @@ class AEBThread(BaseThread):
         # certain_geom / nearcertain_geom drive tiered confirm (README tiered entry).
         certain_geom_ids: set[int] = set()
         nearcertain_geom_ids: set[int] = set()
+        # Released TMP crossers on a line deep inside ego (README TMP crossing scope).
+        crossing_released_ids: set[int] = set()
         # Colliding ids whose pose sits in ego's lane band, for the warn gate.
         ego_lane_colliding_ids: set[int] = set()
         # Warn-gate evidence classes: oncoming, and a full lane off the ego arc.
@@ -1895,6 +1897,10 @@ class AEBThread(BaseThread):
                             or getattr(v, "crash_confirmed", False)
                             or v.id in certain_geom_ids):
                         nearcertain_geom_ids.add(v.id)
+                    if (cal.tmp_cross_gate_confirm_s is not None
+                            and getattr(ctx, "crossing_released", False)
+                            and d_miss_v is not None and d_miss_v <= cal.tmp_cross_gate_confirm_miss_m):
+                        crossing_released_ids.add(v.id)
                     # Warn classes add latency only (README warn classes). A clear threat
                     # is never oncoming traffic.
                     if (head_on or near_head_on) and not (clear_threat or near_threat):
@@ -2217,11 +2223,12 @@ class AEBThread(BaseThread):
         )
         # Tiered engage confirm window and the instant paths: TTB slam, certain
         # geometry, latched (README tiered entry).
-        confirm_window_s = (
-            cal.aeb_engage_confirm_s
-            if any(vid in nearcertain_geom_ids for vid in colliding_ids)
-            else cal.aeb_engage_confirm_oblique_s
-        )
+        if any(vid in nearcertain_geom_ids for vid in colliding_ids):
+            confirm_window_s = cal.aeb_engage_confirm_s
+        elif any(vid in crossing_released_ids for vid in colliding_ids):
+            confirm_window_s = cal.tmp_cross_gate_confirm_s
+        else:
+            confirm_window_s = cal.aeb_engage_confirm_oblique_s
         instant_engage = (
             brake_ttb_engage_active
             or any(vid in certain_geom_ids and vid not in engage_vetoed_ids

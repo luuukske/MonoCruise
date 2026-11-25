@@ -362,6 +362,15 @@ class AEBCalibration:
     oncoming_gate_wide_min_speed_ms: float = 14.0
     oncoming_gate_wide_opposite_lane: bool = False
     oncoming_gate_wide_range_m: float = 45.0
+    # TMP car coming at ego on TmpCrossTrafficFilter: a crosser down to this fwd_dot, a head-on car
+    # only within this many metres of ego's path (README avoidability gate, TMP crossing scope).
+    avoidability_gate_tmp_cross: bool = True
+    tmp_cross_gate_min_fwd_dot: float = -0.9
+    tmp_cross_gate_head_on_lat_m: float = 0.5
+    # A released crosser whose measured line is within this of ego's centre engages after this
+    # confirm instead of the oblique one (None: oblique; README TMP crossing scope).
+    tmp_cross_gate_confirm_s: float | None = 0.20
+    tmp_cross_gate_confirm_miss_m: float = 0.3
 
     # Clearance-based required decel (README continuous-decel). False restores
     # the pre-clearance relative-frame path and is how the corpus is A/B'd.

@@ -343,6 +343,8 @@ class FilterContext:
     clearance_fn: object | None = None
     deadline_passed: bool | None = None
     deadline_released: bool = False
+    # The TMP crossing scope released this drop (README avoidability gate, TMP crossing scope).
+    crossing_released: bool = False
 
     # Map second opinion (README lane track): the body in ego's lane frame, and how long
     # it has sat on ego's own track. None and 0 without a map.
@@ -1176,7 +1178,7 @@ def build_pipeline(cal: AEBCalibration) -> list:
         TurningCrossTrafficFilter(cal),
         TurnCompletionFilter(cal),
         AvoidabilityGate(OutOfLaneParallelFilter(cal), cal),
-        TmpCrossTrafficFilter(cal),
+        AvoidabilityGate(TmpCrossTrafficFilter(cal), cal, crossing=True),
         AvoidabilityGate(SweepPassFilter(cal), cal),
         AvoidabilityGate(CornerEntryStationaryFilter(cal), cal),
         AvoidabilityGate(CornerEntryStationaryFilterMirrored(cal), cal),

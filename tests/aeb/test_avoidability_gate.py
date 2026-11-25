@@ -17,7 +17,7 @@ from core.aeb.filters import (
     CornerEntryStationaryFilter, CornerEntryStationaryFilterMirrored, EgoEvasionFilter,
     FilterResult, OppositeLaneFilter, OutOfLaneParallelFilter, SweepPassFilter,
     TmpCrossTrafficFilter,
-    build_pipeline,
+    build_pipeline, lane_clear_held,
 )
 from core.aeb.lane_frame import Lane
 from core.radar.traffic import build_arc, capsule_extents
@@ -190,6 +190,57 @@ def test_wide_oncoming_scope_needs_speed_and_a_car_off_the_opposite_lane():
     assert not _onc_suppressed(ctx(dist=60.0, rate=-2.0), wide)
 
 
+def _crossing(ctx, *, d_miss: float | None = 0.3, rate: float | None = 1.0, near: bool = True,
+              fwd_dot: float = -0.8, lat: float = 0.0):
+    """A slow TMP car turning across ego's lane; past the centre line its miss grows again."""
+    ctx.head_on, ctx.near_head_on, ctx.fwd_dot = False, near, fwd_dot
+    ctx.d_miss, ctx.d_miss_rate = d_miss, rate
+    ctx.abs_v_speed = ctx.v_ground_meas = 4.5
+    ctx.dx = lat
+    return ctx
+
+
+def _cross_suppressed(ctx, cal=CAL) -> bool:
+    return AvoidabilityGate(_AlwaysDrops(), cal, crossing=True).apply(ctx).suppressed
+
+
+def test_tmp_crosser_on_a_line_through_ego_ends_the_drop_at_the_deadline():
+    """249e9d51: a left turner at 16 km/h, ego at 90; the miss line stays under 1 m to impact,
+    the rate positive once it passes ego's centre, and TmpCross dropped it from 31.7 m to impact."""
+    demand = _demand(25.0)
+    ctx = _crossing(_ctx(25.0, deadline=demand - 0.5))
+    assert not _cross_suppressed(ctx)
+    assert ctx.deadline_released
+    assert _cross_suppressed(_crossing(_ctx(25.0, deadline=demand + 0.5)))
+
+
+def test_tmp_crossing_scope_needs_a_measured_line_inside_ego_width():
+    assert _cross_suppressed(_crossing(_ctx(25.0, deadline=0.1), d_miss=CAL.ego_half_width + 0.1))
+    assert _cross_suppressed(_crossing(_ctx(25.0, deadline=0.1), d_miss=None))
+    assert _cross_suppressed(_crossing(_ctx(25.0, deadline=0.1)),
+                             replace(CAL, avoidability_gate_tmp_cross=False))
+
+
+def test_tmp_crossing_scope_is_cars_coming_at_ego():
+    """A crosser coming the other way; a 90 degree crosser stays with the stage (5 more FPs)."""
+    assert _cross_suppressed(_crossing(_ctx(25.0, deadline=0.1), near=False))
+
+
+def test_a_head_on_car_counts_only_on_egos_own_path():
+    """Head on in the next lane is the ordinary pass; within 0.5 m of ego's path it is not."""
+    assert not _cross_suppressed(_crossing(_ctx(25.0, deadline=0.1), fwd_dot=-1.0, lat=0.4))
+    assert _cross_suppressed(_crossing(_ctx(25.0, deadline=0.1), fwd_dot=-1.0, lat=0.6))
+    assert not _cross_suppressed(_crossing(_ctx(25.0, deadline=0.1), fwd_dot=-0.85, lat=0.6))
+
+
+def test_tmp_crossing_scope_skips_the_parked_body_map_rules():
+    """Lane track and lane clear speak about parked bodies; a crosser keeps the bare gate."""
+    ctx = _crossing(_ctx(25.0, deadline=0.1))
+    ctx.lane_track_s, ctx.lane_clear_s, ctx.latched_threat_ids = 0.0, 99.0, set()
+    assert lane_clear_held(ctx, CAL)
+    assert not _cross_suppressed(ctx)
+
+
 def test_only_guess_stages_are_gated():
     gated = {
         type(s._inner) for s in build_pipeline(CAL) if isinstance(s, AvoidabilityGate)
@@ -197,9 +248,11 @@ def test_only_guess_stages_are_gated():
     assert gated == {
         OutOfLaneParallelFilter, SweepPassFilter,
         CornerEntryStationaryFilter, CornerEntryStationaryFilterMirrored,
-        OppositeLaneFilter, BendChainFilter,
+        OppositeLaneFilter, BendChainFilter, TmpCrossTrafficFilter,
     }
     onc = [s for s in build_pipeline(CAL) if isinstance(s, AvoidabilityGate) and s._oncoming]
     assert [type(s._inner) for s in onc] == [OppositeLaneFilter]
+    cross = [s for s in build_pipeline(CAL) if isinstance(s, AvoidabilityGate) and s._crossing]
+    assert [type(s._inner) for s in cross] == [TmpCrossTrafficFilter]
     bare = {type(s) for s in build_pipeline(CAL) if not isinstance(s, AvoidabilityGate)}
-    assert {EgoEvasionFilter, TmpCrossTrafficFilter} <= bare
+    assert {EgoEvasionFilter} <= bare
