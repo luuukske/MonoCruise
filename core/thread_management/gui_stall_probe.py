@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import ctypes
 import logging
+import os
 import sys
 import threading
 import time
@@ -302,6 +303,19 @@ def timed_wait_ms(samples: int = 5) -> float:
     return waits[len(waits) // 2]
 
 
+_CLOCK_TICKS_PER_S = os.sysconf("SC_CLK_TCK") if hasattr(os, "sysconf") else 100
+
+
+def task_stat_cpu_s(stat: bytes, ticks_per_s: float) -> float | None:
+    """User plus system CPU seconds from one /proc/<pid>/task/<tid>/stat line; None when malformed."""
+    try:
+        # The name in field 2 may hold spaces and brackets, so count from its closing bracket.
+        fields = stat[stat.rindex(b")") + 2:].split()
+        return (int(fields[11]) + int(fields[12])) / ticks_per_s
+    except (ValueError, IndexError, ZeroDivisionError):
+        return None
+
+
 def _thread_cpu() -> dict[int, float]:
     """CPU seconds per native id of each Python thread. Never psutil: its thread list walks
     every process on the machine, 116 ms a call on Windows, and would deepen the stall it measures."""
@@ -337,9 +351,13 @@ if sys.platform == "win32":
             _k32.CloseHandle(handle)
 else:
     def _one_thread_cpu(t: threading.Thread) -> float | None:
+        # procfs, not pthread_getcpuclockid: that call segfaults on a thread that already exited.
+        if t.native_id is None:
+            return None
         try:
-            return time.clock_gettime(time.pthread_getcpuclockid(t.ident))
-        except (AttributeError, OSError, TypeError, ValueError):
+            with open(f"/proc/self/task/{t.native_id}/stat", "rb") as stat:
+                return task_stat_cpu_s(stat.read(), _CLOCK_TICKS_PER_S)
+        except OSError:
             return None
 
 
