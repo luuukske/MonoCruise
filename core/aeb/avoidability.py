@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING
 from core.aeb.calibration import AEBCalibration
 from core.aeb.cross_zone import _apply_cross_zone
 from core.aeb.filters import (
-    _PASS, FilterResult, _earliest_hit, lane_clear_held, lane_track_held,
+    _PASS, FilterResult, _earliest_hit, bend_miss, lane_clear_held, lane_track_held,
 )
 from core.aeb.lane_frame import Lane
 from core.radar.traffic import ArcPath
@@ -102,7 +102,7 @@ def oncoming_drifting_in(ctx: "FilterContext", cal: AEBCalibration) -> bool:
     """Oncoming whose measured miss line already crosses ego's own width and keeps closing."""
     if not cal.avoidability_gate_oncoming or not (ctx.head_on or ctx.near_head_on):
         return False
-    miss = getattr(ctx, "d_miss", None)
+    miss = bend_miss(ctx)
     rate = getattr(ctx, "d_miss_rate", None)
     if miss is None or rate is None:
         return False
@@ -121,7 +121,7 @@ def tmp_crossing_in(ctx: "FilterContext", cal: AEBCalibration) -> bool:
     """TMP car coming at ego on a measured line through ego's own width (README TMP crossing scope)."""
     if not cal.avoidability_gate_tmp_cross or not (ctx.head_on or ctx.near_head_on):
         return False
-    miss = getattr(ctx, "d_miss", None)
+    miss = bend_miss(ctx)
     if miss is None or miss > ctx.ego_hw:
         return False
     if ctx.fwd_dot >= cal.tmp_cross_gate_min_fwd_dot:

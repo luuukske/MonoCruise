@@ -201,6 +201,14 @@ class AEBCalibration:
     # OppositeLaneFilter body-separation fast path: the measured miss must also
     # clear this multiple of the body bar. 0 trusts pose alone (README).
     oncoming_body_sep_miss_scale: float = 0.25
+    # The measured line bent by both turns joins the oncoming tests (README, bend miss):
+    # either line clear agrees with body-sep, both inside are needed to release a drop.
+    los_bend_miss_enabled: bool = True
+    los_bend_horizon_s: float = 6.0
+    los_bend_min_kappa: float = 0.004
+    los_bend_max_kappa: float = 0.015
+    # Ego's curvature must hold within this over the LOS window: a swerve is no bend.
+    los_bend_steady_kappa: float = 0.003
     # Turn-into-path: CBDR miss closing this fast (m/s) with ego turning skips
     # OppositeLane body-sep / Fix B (README turn-into-path). e0fd ~ -5.6 m/s.
     oncoming_closing_dmiss_rate_mps: float = -1.5
@@ -432,6 +440,8 @@ class AEBCalibration:
     lane_clear_stationary: bool = True
     lane_clear_max_offset_m: float = 0.8
     lane_clear_max_drift_ms: float = 0.3
+    # Drift to the bar (README, on since 2026-11-25): faster drift that leaves ego in the offset bar counts.
+    lane_clear_drift_to_arrival: bool = True
     lane_clear_min_free_m: float = 1.3
     lane_clear_arrival_free_m: float = 0.5
     lane_clear_drift_horizon_s: float = 1.5

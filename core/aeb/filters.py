@@ -319,6 +319,8 @@ class FilterContext:
     d_miss: float | None = None
     # d(d_miss)/dt over the LOS window; None until the track spans enough time.
     d_miss_rate: float | None = None
+    # The same line bent by both turns on a shared road bend, else None (README, bend miss).
+    d_miss_bend: float | None = None
     # Ground speed from the target's raw positions over the LOS window, so a
     # TMP speed field stuck at 0 cannot pass for a parked body. None: too short.
     v_ground_meas: float | None = None
@@ -387,6 +389,12 @@ def lane_clear_held(ctx: "FilterContext", cal: AEBCalibration) -> bool:
             and getattr(ctx, "lane_clear_s", 0.0) >= cal.lane_clear_hold_s
             and ctx.v.id not in ctx.latched_threat_ids
             and not getattr(ctx.v, "crash_confirmed", False))
+
+
+def bend_miss(ctx: "FilterContext") -> float | None:
+    """The wider of the straight and the bent measured line; the straight one without a bend reading."""
+    bend = getattr(ctx, "d_miss_bend", None)
+    return ctx.d_miss if ctx.d_miss is None or bend is None else max(ctx.d_miss, bend)
 
 
 def oncoming_closing_into(
@@ -604,7 +612,7 @@ class OppositeLaneFilter:
         closing_into = oncoming_closing_into(ctx, cal, d_abs=d_abs)
         measured_clear = (
             ctx.d_miss is None
-            or ctx.d_miss >= clear_bar * cal.oncoming_body_sep_miss_scale
+            or bend_miss(ctx) >= clear_bar * cal.oncoming_body_sep_miss_scale
         )
         soft = cal.oncoming_body_sep_soft_m
         pose_clear = d_abs >= (clear_bar - soft)

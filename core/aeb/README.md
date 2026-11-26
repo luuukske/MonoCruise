@@ -483,6 +483,45 @@ same-signed. The magnitude ratio carries the whole test and stays correct under
 either convention. `CoDirectionalDivergeFilter` Fix C does use a sign test, but
 it compares co-directional traffic, where both vehicles sign the same way.
 
+**Bend miss (2026-11-25).** The CBDR line assumes both vehicles drive straight. On
+a bend that is false, and for the car in the inner lane the straight line sweeps
+through ego's centre on every pass: two cars on concentric lanes 5.5 m apart
+(radius 178 m, 11.6 and 26.2 m/s) read 0.28 m at 60 m apart. That is what braked
+`132557d1` (an oncoming truck at 94 km/h a lane over on a gentle bend, line 0.97 to
+0.13 m, map lane 5.5 m over the whole pass): the body-sep fast path refused on the
+measured band and the oncoming gate released the drop.
+`thread._los_bend_shift` fits the same LOS window in Cartesian form and returns how far
+bending the extrapolation by each vehicle's own turn (ego's path curvature, the
+target's blended curvature) moves the closest approach; `d_miss_bend` is the
+straight line plus that shift. It is read only on a shared road bend: `shares_bend`
+holds, both curvatures lie between `los_bend_min_kappa` (0.004) and
+`los_bend_max_kappa` (0.015), and ego's curvature held within `los_bend_steady_kappa`
+(0.003) over the LOS window (`_steady_kappa`). `filters.bend_miss`
+is the wider of the two lines, read by body-sep's measured agreement and by both gate
+scopes (oncoming, TMP crossing): the bent line can only agree with a pose that says
+clear and only keep a drop. The LOS veto, the extrapolation veto, TmpCross's LOS keep
+and the gates' body test keep the straight line. `los_bend_miss_enabled` False is
+the old behaviour.
+
+Measured and not kept (983-clip subset with the map): the Cartesian bent line as the
+miss itself, ego's turn counted without a shared bend, and junction-turn curvature.
+Together they cleared about 40 false brakes on the subset but lost 9 labelled
+positives at 36 to 60 each (`c84e4989`, `9b2eac5b`, `05d140ae`, `aaf430a8`,
+`fec92301`, `0e80305a`): the straight polar fit reads short at high closing speed,
+and that bias is what catches an oncoming car drifting in; ego's own turn at the
+onset of a swerve (`9b2eac5b`, -0.007 rising to -0.05) bent the line clear of a car
+it then met; a junction turner straightens out (`249e9d51` lost its brake). Without
+the two floors and ego's steadiness a TMP curvature blip (0.015 then 0.002) moved
+`01e038e7`'s brake 0.27 s later and a 0.007 one lost `6990e48a`. A steadiness test on
+the target's curvature too lost `132557d1` itself (the truck's curvature ramps into
+the bend); ego's steadiness costs `39b3bcbb` and `931d4268` (ego still turning in).
+Do not widen the scope without a full map corpus run on those clips. Also measured and
+not kept: the TMP crossing scope's head-on offset read off ego's arc instead of the
+straight-ahead axis (`810432e1`, 0.4 m ahead, 3 m off the arc) lost `94625253` without
+the map, a head-on car 0.15 m off the axis and 0.6 m off a barely curved arc. `78456931` (tp) keeps
+its 4.47 s brake on the lead; only the tail after its window goes, held at HEAD by a
+truck passing 5.2 m clear on the bend.
+
 ### `CoDirectionalDivergeFilter`
 
 Applies only to `co_directional` vehicles (`fwd_dot > cal.co_directional_dot=0.7`).
@@ -1099,13 +1138,34 @@ and crash-confirmed bodies are exempt. At the defaults the arrival term cannot
 bind (0.3 m/s for 1.5 s leaves 0.85 m); it is there for a looser drift bar. The
 hold must never be 0: a missing sight then counts as held.
 
+**Drift to the bar** (`lane_clear_drift_to_arrival`, on since 2026-11-25, Lukas).
+The drift is ego's speed times the sine of its heading error, so a centred truck
+angled one degree across its lane at 80 km/h reads 0.4 m/s and fails the calm bar
+while keeping its lane. With the switch on, a drift above the bar still counts as
+keeping the lane while, held for `lane_clear_drift_horizon_s` (1.5 s), it leaves ego
+within `lane_clear_max_offset_m` of its lane centre, either side. It only widens the
+calm test: every calm verdict stands and the arrival room still binds. A lane change
+(1.2 m/s, `e0f4b928`) never stays in the bar. Full map replay of 4597 labelled clips
+against 173d824: six false brakes and one false warning gone (`e3263183`, `a784a7cb`,
+`7f9d79cb`, `082e1a0f`, `d5b5aa69`, `2f46e0eb`, `4acbdfd3`), one brake down to a
+warning (`4a619b2a`), four false brakes later, no true positive lost, braked or warned
+later. It moves one pinned cost, accepted by Lukas (2026-11-25): the synthetic driver
+going straight on at an R 250 bend warns 0.77 s later instead of 0.67, so the test
+now allows 0.8 (the brake is unchanged). Every variant that counts the lane's own turn against
+ego's steering keeps that warning at 0.67 but clears at most one of the six
+(`7f9d79cb`): over the whole horizon, at ego's foot, or beyond lane keep's 0.5 m/s^2
+tolerance. Real bend entries look like that synthetic driver until the driver steers
+in. Dropping the calm bar outright cleared 22 on a 658-clip subset but lost
+`da9fbbba` and `b9b7a8ed`, which drift toward the body at 0.4 to 2.5 m/s.
+
 With lane clear enabled, two cases in `tests/aeb/test_road_bent_scenarios.py`
 change. Those tests build their own lane, a straight followed by a bend, from
 synthetic points. In the R 250 case with a car parked 4.5 m outside the bend,
 lane clear removes the warning at 5.57 s and the brake at 6.30 s as intended.
 When the driver continues straight toward a car on that line, the truck is
 still centred on the shared approach at 6.40 s, when the plain arc first warns.
-Lane clear trusts the mapped bend and holds the warning until 7.07 s, when ego
+Lane clear trusts the mapped bend and holds the warning until 7.17 s (7.07 before
+drift to the bar), when ego
 has started leaving the lane. Braking starts at 7.20 s either way. That warning
 delay kept lane clear off by default until Lukas switched it on (2026-11-18),
 accepting it for the false brakes it removes: on the same synthetic bends it
@@ -1113,7 +1173,8 @@ drops two brakes and three warnings for cars parked 4 to 4.5 m outside the bend
 and adds nothing. Both tests now pin the road path alone with lane clear off, and
 `test_lane_clear_drops_parked_cars_beside_a_bend_and_adds_nothing` and
 `test_lane_clear_delays_the_warning_for_a_driver_not_taking_the_bend_but_never_the_brake`
-pin the default: never a later brake, the warning at most 0.7 s later.
+pin the default: never a later brake, the warning at most 0.8 s later (0.7 until
+drift to the bar, 2026-11-25).
 
 **Drivable bend.** Lane clear and lane keep both assume ego follows its lane, so
 neither speaks where that lane, between ego and the body, bends harder than
@@ -1126,7 +1187,9 @@ curvature), and 11 false brakes beside such bends stood on this guard alone.
 The first version (ego within 1.5 m, 2.0 m free, drift toward the body only,
 3 s) cleared 19 false brakes and 15 false warnings on its 288-clip subset and
 lost three true positives (`793a60fd`, `72456399`, `6c7d47b4`) with a fourth
-late (`1d7eb731`): ego changing lanes toward a parked rig. Centred and calm
+late (`1d7eb731`): ego changing lanes toward a parked rig. Lukas has since
+relabelled `72456399` and `1d7eb731` fp (by 2026-11-22) and `6c7d47b4` fp (2026-11-25);
+`793a60fd` stays tp. Centred and calm
 keeps all four. Do not go back to a toward-only drift test, and do not widen
 this calm test to lane changes: at the onset of `e0f4b928` ego is 1.4 m off its
 lane centre moving across at 1.2 m/s, the same picture as the four. Lane changes
@@ -1176,7 +1239,8 @@ braking. One true positive is lost (`28382b5f`, sev 1) and `32f67b3d` brakes 0.2
 later, both accepted by Lukas; early brakes before the window (`2183c4c3`,
 `2e15d24b`, `da9fbbba`) are gone, which he wants. Raising lane clear's calm drift
 bar to 0.5 m/s cleared about 11 more false-positive clips but lost `72456399`, one of
-the four above; it stays at 0.3.
+the four above; it stays at 0.3. `72456399` is fp now and does not brake
+at 173d824, so that loss no longer stands; the drift case is below (drift to the bar).
 
 **Lane keep: a mover on its own lane, clear of ego's, is not braked for.**
 `LaneKeepFilter` is the last stage, so it only judges what every other stage let
@@ -1483,8 +1547,7 @@ body with a centreline sample in the lane band of ego's arc, and the corner-entr
 stages need an implied curvature `bend / range` of 0.005 where these read 0.0021 and
 0.0034 (lowering it to 0.0025 already lost `c7546a38`). With the map, lane clear
 drops `c5db3acb` for a second and then ego's drift toward the body (0.30 to 0.43 m/s,
-the driver late into the bend) breaks its 0.3 m/s calm bar; that bar is what keeps
-`72456399`.
+the driver late into the bend) breaks its 0.3 m/s calm bar.
 
 **The pose alone does not separate them.** Over the corpus, of the stationary bodies at
 brake onsets turned 4 to 30 degrees and standing 2 m or more outside a lane bent by their
@@ -2267,6 +2330,20 @@ the lateral test runs *before* the arc-length one so `project_to_ego_arc` and
 its `atan2` are only paid for points already inside the corridor (213 µs → 62 µs
 for an identical result), and each arc is coarse-rejected on its body centre
 before its five body points are touched.
+
+**Bodies abreast (CD-S1b, 2026-11-25).** A body alongside or behind ego's front that
+the unbraked arcs still touch reads INF (no decel puts ego's front behind it). That is
+the fail-closed overlap below, kept by decision, not a slip in `occupancy_profile`'s
+`p_s <= 0` order: moving the test past the half width only drops points within a half
+width of the rear axle. Lukas wants ego merging or turning into an occupied lane braked
+(`3b90c5e8`, `8a2fcf11`; `2ffc40fe` less so at its higher speed), which is the same
+geometry. Measured and not kept: treating a body wholly behind ego's front surface that
+is slower than ego as braking worsens. It cleared 12 false brakes and 2 false warns
+(`1108af1c`, `ca7c5dad`, `fe291ab0`, `94400375`) and lost 6 labelled positives at 12 to
+48 each (`5ececafb`, `0d4f0d59`, ego turning hard past a car beside it; `5a61af51`,
+`10d4ea02`, `bfbb018d`, `f9132bca`), the late brakes of `3b90c5e8` and `8a2fcf11`, and
+later brakes on crash positives; a 2 m/s margin, no turn and no latched body still lost
+`10d4ea02`.
 
 **Fail-closed properties.** Every degenerate input resolves toward braking, not
 away from it: a target that never clears gives stop-short; an already-overlapping

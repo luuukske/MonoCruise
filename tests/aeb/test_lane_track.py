@@ -165,6 +165,27 @@ def test_clear_of_the_track_needs_room_and_ego_calm_in_its_lane():
     assert not clear_of_ego_track(None, _BAR, 0.0, 0.0, 25.0, CAL)
 
 
+def test_faster_drift_still_keeps_the_lane_while_it_leaves_ego_in_the_offset_bar():
+    on = replace(CAL, lane_clear_drift_to_arrival=True)
+    off = replace(CAL, lane_clear_drift_to_arrival=False)
+    beside = LaneSight(50.0, 4.8, 4.8, 1.0)
+    # Centred and angled across at 0.4 m/s (1 degree at 80 km/h): 0.6 m off by the horizon.
+    assert clear_of_ego_track(beside, _BAR, 0.0, 0.4, 25.0, on)
+    assert clear_of_ego_track(beside, _BAR, 0.0, -0.4, 25.0, on)
+    assert not clear_of_ego_track(beside, _BAR, 0.0, 0.4, 25.0, off)
+    # The same drift from 0.4 m off centre leaves the bar, and a lane change's never stays in it.
+    assert not clear_of_ego_track(beside, _BAR, 0.4, 0.4, 25.0, on)
+    assert not clear_of_ego_track(beside, _BAR, 0.0, 1.2, 25.0, on)
+    # Only a widening: a calm verdict stands even where the drift would leave the bar.
+    calm = CAL.lane_clear_max_drift_ms - 0.05
+    assert clear_of_ego_track(beside, _BAR, 0.7, calm, 25.0, on)
+    # The arrival room still binds: 0.7 m/s toward it for 1.5 s takes 1.05 m of the free room.
+    roomy = LaneSight(50.0, _BAR + 1.6, _BAR + 1.6, 1.0)
+    tight = LaneSight(50.0, _BAR + 1.4, _BAR + 1.4, 1.0)
+    assert clear_of_ego_track(roomy, _BAR, -0.3, 0.7, 25.0, on)
+    assert not clear_of_ego_track(tight, _BAR, -0.3, 0.7, 25.0, on)
+
+
 def test_lane_clear_preserves_latched_and_crash_confirmed_bodies():
     cal = replace(CAL, lane_clear_stationary=True)
     vehicle = SimpleNamespace(id=7, crash_confirmed=False)

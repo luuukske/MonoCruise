@@ -59,14 +59,19 @@ def clear_of_ego_track(
     ego_speed: float, cal: AEBCalibration,
 ) -> bool:
     """The body sits clear of ego's own track, ego centred and calm in its lane (README lane clear)."""
-    if (sight is None or abs(ego_right) > cal.lane_clear_max_offset_m
-            or abs(drift_right) > cal.lane_clear_max_drift_ms):
+    if sight is None or abs(ego_right) > cal.lane_clear_max_offset_m:
+        return False
+    t_reach = min(sight.ahead / max(ego_speed, 1.0), cal.lane_clear_drift_horizon_s)
+    # Faster drift counts as keeping the lane while it leaves ego in the offset bar (README).
+    if abs(drift_right) > cal.lane_clear_max_drift_ms and not (
+            cal.lane_clear_drift_to_arrival
+            and abs(ego_right + drift_right * cal.lane_clear_drift_horizon_s)
+            <= cal.lane_clear_max_offset_m):
         return False
     free = sight.reach - clear_bar
     if free < cal.lane_clear_min_free_m:
         return False
     toward = drift_right if sight.gap > 0.0 else -drift_right
-    t_reach = min(sight.ahead / max(ego_speed, 1.0), cal.lane_clear_drift_horizon_s)
     return free - max(toward, 0.0) * t_reach >= cal.lane_clear_arrival_free_m
 
 

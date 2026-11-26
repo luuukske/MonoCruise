@@ -31,7 +31,7 @@ from core.acc.trailer_lock import resolve_tractor
 from core.aeb.calibration import AEBCalibration, DEFAULT as _CAL_DEFAULT, ego_path_params
 from core.aeb.confirm import OccupancyConfirm
 from core.aeb.clearance import ClearanceResult, clearance_required, stop_buffer_m
-from core.aeb.lane_frame import project_to_ego_arc, classify, Lane, road_ahead_in_lane
+from core.aeb.lane_frame import project_to_ego_arc, classify, Lane, road_ahead_in_lane, shares_bend
 from core.aeb.capture import get_recorder, note_intervention
 from core.aeb.clip_schema import AEBTickRecord, AEBWarmState, ConsumedContext, LiveAEB
 from core.aeb.warning_player import WarningPlayer
@@ -517,6 +517,72 @@ def _los_predicted_miss(
     return abs(omega) * r_now * r_now / v_rel
 
 
+def _turn_offset(kappa: float, s: float, fx: float, fz: float) -> tuple[float, float]:
+    """Where a constant-curvature path sits after ``s`` metres, against its tangent line."""
+    ks = kappa * s
+    if abs(ks) < 1e-4:
+        along, side = 0.0, 0.5 * kappa * s * s
+    else:
+        along, side = math.sin(ks) / kappa - s, (1.0 - math.cos(ks)) / kappa
+    # Positive curvature turns toward (fz, -fx), as ArcPath places its centre.
+    return along * fx + side * fz, along * fz - side * fx
+
+
+def _los_bend_shift(
+    track, now_mono: float, cal: AEBCalibration, ego: tuple, target: tuple,
+) -> float | None:
+    """How far both vehicles' turns move the LOS track's closest approach (README, bend miss).
+
+    ``ego`` and ``target`` are (speed, curvature, travel fwd x, fwd z). None fails open.
+    """
+    cutoff = now_mono - cal.los_veto_window_s
+    pts = [(t_s, vx - ex, vz - ez) for t_s, vx, vz, ex, ez in track if t_s >= cutoff]
+    if len(pts) < cal.los_veto_min_samples:
+        return None
+    n = len(pts)
+    t_mean = sum(p[0] for p in pts) / n
+    denom = sum((p[0] - t_mean) ** 2 for p in pts)
+    if denom < 1e-9:
+        return None
+    x_mean = sum(p[1] for p in pts) / n
+    z_mean = sum(p[2] for p in pts) / n
+    vx = sum((p[0] - t_mean) * (p[1] - x_mean) for p in pts) / denom
+    vz = sum((p[0] - t_mean) * (p[2] - z_mean) for p in pts) / denom
+    e_v, e_k, e_fx, e_fz = ego
+    t_v, t_k, t_fx, t_fz = target
+    # The fit reads the velocity at the window's middle; turning moves it on to now.
+    lag = pts[-1][0] - t_mean
+    bx = vx + lag * (t_v * t_v * t_k * t_fz - e_v * e_v * e_k * e_fz)
+    bz = vz + lag * (-t_v * t_v * t_k * t_fx + e_v * e_v * e_k * e_fx)
+    v_rel = math.hypot(vx, vz)
+    if v_rel < 0.5 or math.hypot(bx, bz) < 0.5:
+        return None
+    rx, rz = pts[-1][1], pts[-1][2]
+    straight = bent = math.hypot(rx, rz)
+    horizon = min(cal.los_bend_horizon_s, 1.5 * straight / v_rel)
+    steps = max(int(horizon / 0.05), 1)
+    for i in range(1, steps + 1):
+        tau = horizon * i / steps
+        straight = min(straight, math.hypot(rx + vx * tau, rz + vz * tau))
+        tdx, tdz = _turn_offset(t_k, t_v * tau, t_fx, t_fz)
+        edx, edz = _turn_offset(e_k, e_v * tau, e_fx, e_fz)
+        bent = min(bent, math.hypot(rx + bx * tau + tdx - edx, rz + bz * tau + tdz - edz))
+    return bent - straight
+
+
+def _steady_kappa(hist: dict, key: int, now: float, kappa: float, cal: AEBCalibration) -> bool:
+    """Record ``kappa`` and say whether it held within ``los_bend_steady_kappa`` over the LOS window."""
+    h = hist.get(key)
+    if h is None:
+        h = hist[key] = deque()
+    h.append((now, kappa))
+    while h and h[0][0] < now - cal.los_veto_window_s:
+        h.popleft()
+    ks = [k for _, k in h]
+    return (now - h[0][0] >= 0.5 * cal.los_veto_window_s
+            and max(ks) - min(ks) <= cal.los_bend_steady_kappa)
+
+
 def _los_ground_speed(track) -> float | None:
     """Target ground speed from first and last raw position in the LOS window."""
     if len(track) < 2:
@@ -829,6 +895,8 @@ class AEBThread(BaseThread):
         self._los_tracks: dict[int, deque] = {}
         # Per-target (t, d_miss) for turn-into-path closing rate (README).
         self._d_miss_hist: dict[int, deque] = {}
+        # Ego's (t, curvature) over the LOS window under key -1, for the bend miss (README).
+        self._bend_kappa_hist: dict[int, deque] = {}
         # Follow-threat tracks + hold; see README follow-threat section.
         self._follow_tracks: dict[int, deque] = {}
         self._follow_hold_until: dict[int, float] = {}
@@ -1258,6 +1326,7 @@ class AEBThread(BaseThread):
         # measured to hold. See core/aeb/README.md §1. Never RadarData.ego_curvature.
         ego_path = self._step_ego_path(ego_t_kin, ego_yaw_rad, ego_speed, steer)
         ego_curvature = ego_path.kappa_path
+        ego_bend_steady = _steady_kappa(self._bend_kappa_hist, -1, now_mono, ego_curvature, cal)
         # Grip ceiling for the escape arcs, set only while saturation is
         # confirmed (README §1): unarmed it is the line ego is already on.
         ego_kappa_cap = ego_path.kappa_cap
@@ -1735,6 +1804,22 @@ class AEBThread(BaseThread):
                     follow_fn = partial(self._road_paths.follow_target, v.id, all_target_arcs, cal,
                                         (ego_x, ego_z))
 
+            # On a shared road bend the measured line is bent by both turns (README, bend miss).
+            d_miss_bend = None
+            v_sign = travel_sign(v.speed, cal)
+            if (cal.los_bend_miss_enabled and ego_speed > 1.0 and trk and ego_bend_steady
+                    and v_sign * (ego_fwd_x * veh_fwd_x + ego_fwd_z * veh_fwd_z)
+                    < cal.near_head_on_dot
+                    and cal.los_bend_min_kappa <= min(abs(ego_curvature), abs(v_curvature))
+                    and max(abs(ego_curvature), abs(v_curvature)) <= cal.los_bend_max_kappa
+                    and shares_bend(ego_curvature, v_curvature, cal)):
+                straight = los_miss(v)
+                shift = None if straight is None else _los_bend_shift(
+                    trk, now_mono, cal, (ego_speed, ego_curvature, ego_fwd_x, ego_fwd_z),
+                    (abs_v_speed, v_curvature, v_sign * veh_fwd_x, v_sign * veh_fwd_z))
+                if shift is not None:
+                    d_miss_bend = max(straight + shift, 0.0)
+
             # Build FilterContext and run pipeline
             ctx = FilterContext(
                 v=v,
@@ -1768,6 +1853,7 @@ class AEBThread(BaseThread):
                 off_surface_ids=off_surface_ids,
                 d_miss=los_miss(v),
                 d_miss_rate=los_miss_rate(v),
+                d_miss_bend=d_miss_bend,
                 v_ground_meas=_los_ground_speed(trk),
                 brake_deadline_ms2=brake_deadline_ms2,
                 clearance_fn=clearance_of,
@@ -2873,6 +2959,7 @@ class AEBThread(BaseThread):
         self._trailer_to_tractor.clear()
         self._los_tracks.clear()
         self._d_miss_hist.clear()
+        self._bend_kappa_hist.clear()
         with self.data._lock:
             self.data.AEB_warn = False
             self.data.AEB_brake = False
