@@ -364,6 +364,8 @@ class FilterContext:
     # (README target follow): a map-predicted body is judged against them too.
     ego_road_arc: object | None = None
     ego_follow_fn: object | None = None
+    # Seconds it (a TMP trailer: its tractor) could settle beside ego's lane (README lane join).
+    lane_join_s: float = 0.0
 
     @property
     def reversing(self) -> bool:
@@ -1171,8 +1173,7 @@ def build_pipeline(cal: AEBCalibration) -> list:
     from core.aeb.avoidability import AvoidabilityGate
     from core.aeb.bend_chain import BendChainFilter
     from core.aeb.bend_pose import BendPoseFilter
-    from core.aeb.lane_keep import LaneKeepFilter
-    from core.aeb.target_follow import TargetFollowFilter
+    from core.aeb.lane_join import map_lane_stages
     from core.aeb.turn_completion import TightTurnFilter, TurnCompletionFilter
 
     return [
@@ -1194,7 +1195,6 @@ def build_pipeline(cal: AEBCalibration) -> list:
         BendPoseFilter(cal),
         TightTurnFilter(cal),
         EgoEvasionFilter(cal),
-        LaneKeepFilter(cal),
-        TargetFollowFilter(cal),
+        *map_lane_stages(cal),
     ]
 

@@ -24,6 +24,7 @@ from core.radar.traffic import (
 from core.radar.elevation import MAX_EGO_GRADE
 from core.radar.ego_geometry import EgoGeometry, calibration_geometry
 from core.radar.ego_path_model import EgoPathModel, EgoPathState
+from core.aeb.lane_join import LaneJoinTracker, lane_join_frame, lane_join_sight
 from core.aeb.road_paths import RoadPaths
 from core.radar.bent_path import BentPath, bend_arc, offset_curvature
 from core.radar.tmp_state import ego_box
@@ -968,6 +969,8 @@ class AEBThread(BaseThread):
         self._lane_track = LaneTrackHold()
         self._lane_clear = LaneTrackHold()
         self._target_follow = LaneTrackHold()
+        self._lane_join = LaneJoinTracker()
+        self._lane_join_last: tuple[float, dict] = (-1e9, {})
         # Rate-limit for gap/collision box debug (Settings.debug only).
         self._gap_debug_last_mono: float = 0.0
         self._gap_debug_was_engaged: bool = False
@@ -1420,8 +1423,28 @@ class AEBThread(BaseThread):
         lane_bound = run_collision and self._road_paths.bind_ego_lane(
             ego_x, ego_z, cal, ego_speed * _ego_fwd_x, ego_speed * _ego_fwd_z, ego_curvature,
         )
-        lane_change = (lane_bound and cal.lane_change_clear
-                       and self._road_paths.bind_lane_change(ego_x, ego_z, cal))
+        # A lane change under way carries on while only the route lags ego onto its new lane (README).
+        lane_change = (cal.lane_change_clear
+                       and (lane_bound or (run_collision and self._road_paths.settling))
+                       and self._road_paths.bind_lane_change(ego_x, ego_z, cal, carry_only=not lane_bound))
+        # Movers heading for the lane beside ego's, by their own track against it (README lane join).
+        lane_join_s: dict[int, float] = {}
+        join = (lane_join_frame(self._road_paths, ego_x, ego_z, cal)
+                if cal.lane_join_enabled and run_collision else None)
+        for v in (vehicles_eff if join is not None else ()):
+            if getattr(v, "is_trailer", False):
+                continue
+            yaw = v._smooth_yaw if v._smooth_yaw is not None else math.radians(v.rotation.euler()[1])
+            tsign = travel_sign(v.speed, cal)
+            sight = lane_join_sight(self._road_paths, join, v, yaw, tsign, ego_hw, cal)
+            lane_join_s[v.id] = self._lane_join.step(v.id, sight, abs(v.speed), now_mono, cal,
+                                                     accel=tsign * getattr(v, "acceleration", 0.0))
+        # A lane frame lost for a few frames (ego's lane handing over, ffb1688a) keeps the verdicts.
+        if join is not None:
+            self._lane_join_last = (now_mono, lane_join_s)
+        elif (cal.lane_join_enabled and self._road_paths.keep_lane is None
+              and 0.0 <= now_mono - self._lane_join_last[0] <= cal.lane_join_gap_s):
+            lane_join_s = self._lane_join_last[1]
 
         ego_fwd_x = ego_arc.fwd_x
         ego_fwd_z = ego_arc.fwd_z
@@ -1865,12 +1888,13 @@ class AEBThread(BaseThread):
                 follow_s=follow_s,
                 ego_road_arc=road_arc,
                 ego_follow_fn=ego_follow_fn,
+                lane_join_s=lane_join_s.get(self._trailer_to_tractor.get(v.id, v.id), 0.0),
             )
             # A road-ahead target keeps today's evaluation whenever today, without the map lane
             # rules, would flag it; the road path only judges what today lets go (README).
             if v.id in road_ahead and not _plain_flags(
                     replace(ctx, lane_track_s=0.0, lane_clear_s=0.0, lane_keep_fn=None,
-                            follow_fn=None),
+                            follow_fn=None, lane_join_s=0.0),
                     self._pipeline, cal, plain_set[0]):
                 ego_arc, ego_braked_arc, ego_evasion_left, ego_evasion_right = road_set
                 all_target_arcs, precomputed_cross_arcs = road_ahead[v.id]
@@ -2209,6 +2233,7 @@ class AEBThread(BaseThread):
         self._lane_track.prune(_active_vids)
         self._lane_clear.prune(_active_vids)
         self._target_follow.prune(_active_vids)
+        self._lane_join.prune(_active_vids)
         for vid in list(self._los_tracks.keys()):
             if vid not in _active_vids:
                 del self._los_tracks[vid]
@@ -2957,6 +2982,8 @@ class AEBThread(BaseThread):
         self._brake_popup_fired = False
         self._curvature_blender.prune(set())
         self._trailer_to_tractor.clear()
+        self._lane_join.clear()
+        self._lane_join_last = (-1e9, {})
         self._los_tracks.clear()
         self._d_miss_hist.clear()
         self._bend_kappa_hist.clear()

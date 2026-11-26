@@ -456,6 +456,39 @@ class AEBCalibration:
     lane_change_min_free_m: float = 1.0
     lane_change_lane_min_m: float = 2.5
     lane_change_lane_max_m: float = 7.0
+    # Frame handover (README): settling in the lane ego moved onto needs no slowing yet.
+    lane_change_handover_carry: bool = True
+    # Lane join (README): a mover heading for the lane beside ego's, able to stop on its centre
+    # at this lateral decel and moving across slower than this, is not braked for.
+    lane_join_enabled: bool = True
+    lane_join_max_settle_ms2: float = 2.0
+    lane_join_max_rate_ms: float = 3.5
+    # Its body must be able to stop this far short of ego's (lane keep's calm room).
+    lane_join_clear_m: float = 1.0
+    lane_join_hold_s: float = 0.25
+    # Only a body whose centre sat beyond the next lane's far edge within this time.
+    lane_join_from_s: float = 3.0
+    # Ego keeps its own lane below this drift (m/s); above it, the lane its lane change settles in.
+    lane_join_change_drift_ms: float = 0.5
+    # A body still pushing toward ego is judged where that push leaves it this much later (s, 0 off).
+    lane_join_accel_lead_s: float = 0.0
+    # Rate and push now from a quadratic fit (True) or the window's mean rate and no push.
+    lane_join_rate_now: bool = True
+    # Ego's lane change must still settle at this lateral decel, this far past its lane's centre.
+    lane_join_ego_settle_ms2: float = 3.0
+    lane_join_ego_overshoot_m: float = 1.0
+    # Within this of that centre (m) and still pushing toward it past this (m/s^2), ego swerves on.
+    lane_join_ego_push_m: float = 1.0
+    lane_join_ego_push_ms2: float = 1.5
+    # A body crossing steeper than this (speed across over speed along) or braking harder (m/s^2).
+    lane_join_max_cross_ratio: float = 0.25
+    lane_join_max_brake_ms2: float = 3.0
+    # A lane join verdict rides through frames with no lane frame for up to this long (s).
+    lane_join_gap_s: float = 0.25
+    lane_join_fit_s: float = 0.4
+    lane_join_min_speed_ms: float = 5.0
+    lane_join_min_along: float = 0.9
+    lane_join_range_m: float = 150.0
     # A stopped body cuts nothing in: the map's lane clear outranks the follow-threat flag.
     lane_clear_over_follow: bool = True
     # Lane keep: a mover on its own map lane, clear of ego's track along it, is no threat (README).

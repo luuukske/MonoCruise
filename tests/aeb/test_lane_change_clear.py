@@ -98,6 +98,70 @@ def test_settling_back_in_its_own_lane_needs_ego_slowing_across():
     assert not _clear(drifting, _parked(9.0))
 
 
+def _tick(paths: RoadPaths, lane: int, offset: float, drift: float, accel: float, now: float,
+          cal=CAL, carry_only: bool = False) -> RoadPaths:
+    """One more AEB frame on the same ``RoadPaths``, ego's frame bound to ``lane``."""
+    window = _window()
+    x, z = _LANES_M[lane] + offset, -50.0
+    route = build_route(window.lanes, window.index, lane, x, z, 0.0, -1.0)
+    paths.frame(SimpleNamespace(route=route, window=window, target_routes={}), cal, now)
+    assert paths.bind_ego_lane(x, z, cal, drift, -_SPEED, -accel / (_SPEED * _SPEED))
+    paths.bind_lane_change(x, z, cal, carry_only=carry_only)
+    return paths
+
+
+def test_the_lane_ego_moves_onto_carries_over_the_frame_handover():
+    # 870f17e3: 2 m right of its lane heading for the next, then the frame hands over to that lane
+    # with ego 2.5 m short of its centre, not yet slowing across. Still the same lane change.
+    paths = _tick(RoadPaths(), 0, 2.0, 0.8, 0.0, 10.0)
+    assert _clear(paths, _parked(9.0))
+    _tick(paths, 1, -2.5, 0.8, 0.6, 10.05)
+    assert _clear(paths, _parked(9.0))
+    # It keeps carrying while ego stays on that lane, and the tipping point still binds.
+    _tick(paths, 1, -2.2, 0.8, 0.3, 10.10)
+    assert _clear(paths, _parked(9.0))
+    _tick(paths, 1, -0.6, 2.0, 0.0, 10.15)
+    assert not _clear(paths, _parked(9.0))
+    # Without the carry the frame alone reads ego heading on for the car's lane.
+    off = replace(CAL, lane_change_handover_carry=False)
+    paths = _tick(RoadPaths(), 0, 2.0, 0.8, 0.0, 10.0, off)
+    _tick(paths, 1, -2.5, 0.8, 0.6, 10.05, off)
+    assert not _clear(paths, _parked(9.0), off)
+
+
+def test_with_the_route_frame_lagging_only_the_lane_change_under_way_carries():
+    # 870f17e3 at 5.02 s: the route still holds ego on the old lane, 2.5 m off, so only the keep
+    # frame is bound. The lane change already bound carries on; nothing new binds.
+    paths = _tick(RoadPaths(), 0, 2.0, 0.8, 0.0, 10.0)
+    _tick(paths, 1, -2.5, 0.8, 0.6, 10.05)
+    assert paths.settling
+    _tick(paths, 1, -2.0, 1.2, 1.0, 10.10, carry_only=True)
+    assert _clear(paths, _parked(9.0))
+    # A lane change that was not under way does not start there.
+    fresh = _tick(RoadPaths(), 0, 2.0, 0.8, 0.0, 10.0, carry_only=True)
+    assert not fresh.settling and not _clear(fresh, _parked(9.0))
+    # Nor does the old lane's neighbour bind once ego is past settling in its new lane.
+    _tick(paths, 1, -0.6, 2.0, 0.0, 10.15, carry_only=True)
+    assert paths.lane_change_free(_parked(9.0), 0.0, _EGO_HW) is None
+
+
+def test_no_carry_from_a_stale_frame_another_lane_or_the_other_way():
+    # Late: the last lane change bound 0.5 s ago.
+    paths = _tick(RoadPaths(), 0, 2.0, 0.8, 0.0, 10.0)
+    _tick(paths, 1, -2.5, 0.8, 0.6, 10.5)
+    assert not _clear(paths, _parked(9.0))
+    # Ego's frame now on a lane other than the one it was settling in.
+    paths = _tick(RoadPaths(), 0, 2.0, 0.8, 0.0, 10.0)
+    _tick(paths, 2, -2.5, 0.8, 0.6, 10.05)
+    assert not _clear(paths, _parked(13.5))
+    # Ego turned back: moving the other way is a new lane change, never the old one carried.
+    paths = _tick(RoadPaths(), 0, 2.0, 0.8, 0.0, 10.0)
+    last = paths._settle
+    paths.frame(paths._snap, CAL, 10.05)
+    assert paths._same_settle_lane(last, 1.0, 2.0, -50.0, -2.5)
+    assert not paths._same_settle_lane(last, -1.0, 2.0, -50.0, -2.5)
+
+
 def test_a_swerve_back_toward_a_car_on_the_side_ego_leaves_counts():
     # Moving left away from a car parked in the right lane: clear, until ego swerves back (1d7eb731).
     leaving = _paths(1, 0.3, -0.9)

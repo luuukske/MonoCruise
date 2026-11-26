@@ -305,6 +305,7 @@ pass, the vehicle enters collision evaluation.
 | `EgoEvasionFilter` | Ego can steer around target within 0.08 g (runs for `Lane.EGO` too) |
 | `LaneKeepFilter` | Map only: a mover following its own map lane, whose lane stays clear of ego's track (Map lane rules) |
 | `TargetFollowFilter` | Map only: a mover following its own map lane, judged on its lane-following path against ego's corridor (Target follow) |
+| `LaneJoinFilter` | Map only: a mover heading for the lane beside ego's that can still stop on its centre (Lane join) |
 
 `OutOfLaneParallelFilter`, `SweepPassFilter`, both corner-entry stages and
 `BendChainFilter` run inside `AvoidabilityGate` (see "Avoidability gate" below).
@@ -1204,7 +1205,8 @@ where ego will settle:
 
 - back at its own lane centre, when ego is on the far side of it and already slowing
   its way across by at least half the decel that stopping there needs (`ac7bb3ab`
-  crossed its centre at 1 m/s toward cars parked on the shoulder, not slowing);
+  crossed its centre at 1 m/s toward cars parked on the shoulder, not slowing; it is
+  labelled fp since 2026-11-25);
 - else the neighbour lane on that side, found in the map window 2.5 to 7 m over
   (`lane_change_lane_min_m`, `lane_change_lane_max_m`). No such lane, no verdict.
 
@@ -1219,9 +1221,35 @@ It feeds the same hold and the same `OutOfLaneParallelFilter` drop as lane clear
 A body in the lane ego moves to is never clear, which is what the four true
 positives above need.
 
+**Frame handover** (`lane_change_handover_carry`, on since 2026-11-25). Partway
+through a lane change the keep frame moves onto the lane ego is moving to, with ego
+still short of its centre. The settle-back branch above then asks for ego already
+slowing its way across, which a lane change does only after the line, and ego's
+lateral accel (its steering against the lane) reads about ±0.6 m/s^2 round zero
+there: the binding flickered, the hold restarted and `870f17e3` braked at 4.50 s at
+138 km/h for a pair parked on the shoulder 103 to 114 m ahead. So the lane the last
+binding settled in carries over: bound within 0.3 s, on the same side, and the keep
+frame on it (ego's offset from that lane within 0.5 m of its offset in the frame),
+ego settles there without the slowing test while the tipping point holds. The route
+lags as well: at 5.02 s the router still had ego on the old lane, 2.5 m off, the lane
+frame was unbound and no lane change was read at all (brake at 5.08 s). While only
+the keep frame is bound, the lane change under way carries on (`carry_only`) and
+nothing new binds. A return to ego's own centre with no binding to that lane before
+it (`ac7bb3ab`) keeps the slowing test.
+
+Map replay of 3978 labelled clips (both stores, against the working tree with the
+bend miss): only `870f17e3` changes, fp to silent (25 brake and 10 warn ticks gone).
+`3f7615bf`, `03513a5e` and `b521845a` show the same handover but brake for another
+reason. Of 11405 unlabelled or ignore clips on the map two change: TMP `44938b4e`
+loses its brake at 4.48 s and its warning, and `d2aab867` its geometric engage moves
+3.88 to 4.27 s with no brake or warning moved. `44938b4e` is the other half alone
+(Lukas, 2026-11-25: it must not brake): the keep frame hands over without a flicker,
+but the route frame drops for 0.06 s, the hold restarts and AEB braked for a body
+parked beyond the destination lane 47 m ahead. Off, decisions are the old ones.
+
 The first trial used 0.5 m free (the corridor margin); a reviewer TP at 138 km/h
 (`870f17e3`) has its stopped pair 1.1 to 1.4 m beyond the target lane, so 1.0 is
-the floor. `2354647a`, the clip this rule began with, stays a brake: the angled
+the floor. Lukas relabelled `870f17e3` fp on 2026-11-25. `2354647a`, the clip this rule began with, stays a brake: the angled
 TruckersMP truck noses 0.44 m into the target lane, 0.57 m from ego's settled path,
 and later creeps toward it.
 
@@ -1494,6 +1522,72 @@ only when a body reaches the stage, each target branch skips ego paths whose box
 cannot reach it, and the following test reads other branches and the lane behind
 only when the vehicle's own lane falls short; the three cut the first measurement
 (+1.0 / +7.9 / +72 ms) with every decision unchanged on the 323 clips. Tests: `tests/aeb/test_target_follow.py`.
+
+### Lane join
+
+`LaneJoinFilter` (`core/aeb/lane_join.py`, `lane_join_enabled`, map only, the last stage)
+lets go of a mover that joins the lane beside ego's from further out while it can still stop
+there (Lukas, 2026-11-25). The case is `c01e50a2`: a TruckersMP truck two lanes over moving
+into the next lane at about 2 m/s, which its plain arc carried on into ego's lane because the
+arc held 3.7 m/s^2 of turn for 3 s, where a lane change turns back halfway.
+
+- **Ego's lane** is the one it keeps while it moves across it under `lane_join_change_drift_ms`
+  (0.5 m/s), within lane keep's 0.8 m and 20 degrees. Faster, it is the lane ego can still settle
+  in at `lane_join_ego_settle_ms2` (3 m/s^2) within `lane_join_ego_overshoot_m` (1 m) past its
+  centre: its own lane while short of that centre, else the next lane on that side. Lane join
+  makes this test itself and leaves lane change clear's 1 m/s^2 alone. Lane change clear's
+  0.2 m/s binding flipped ego's lane every few frames and restarted every body's hold
+  (`478d7717`); at 1 m/s^2 ego crossing at 3.5 m/s beside a truck that kept its lane had no lane
+  at all (`ffb1688a`). Within `lane_join_ego_push_m` (1 m) of the centre it settles in, ego still
+  pushing toward that side harder than `lane_join_ego_push_ms2` (1.5 m/s^2) has no lane either: a
+  lane change eases off there, a swerve does not (`7f002208`, 0.3 to 0.9 m short at 2 to
+  3.6 m/s^2, braked 0.14 s late without it; `ffb1688a` pushes as hard only 1.7 m or more short).
+  While ego changes lanes only bodies on the side it moves to are judged:
+  judging the lane ego leaves as "beside it" let go of its own lead (`b13f5c5c`) and cost 15
+  labelled positives.
+- **The next lane** is the map lane beside ego's on the body's side, searched from ego's foot.
+  No such lane, or a next lane under `lane_change_lane_min_m` (2.5 m) from ego's at the body,
+  is no verdict: where it has merged into ego's lane a car in ego's lane read 0.01 m beyond the
+  next lane's centre (`6457d079`). Only bodies strictly ahead, within `lane_join_range_m`.
+- **The body** is read by its distance beyond that centre (away from ego) and its rate toward
+  ego now, a quadratic fit over `lane_join_fit_s` (0.4 s) of its own positions, never its
+  curvature. The window's mean rate lagged a swerve by 0.2 s (`02e3a612`, 0 to 4 m/s across in
+  0.3 s, a reckless cut-off that should brake).
+- **Where it must stop.** Its body must stop `lane_join_clear_m` (1 m, lane keep's calm room)
+  short of ego's: past the next lane's centre by the lane spacing less both half widths, the
+  room and ego's own offset toward it (the overshoot while ego moves into its lane). With ego
+  centred in 4.5 m lanes that is 1 m past the centre. Stopping on the centre itself (the first
+  version) handed back trucks still crossing at 2.5 to 3 m/s 1 m short of it (`478d7717`,
+  `4426f36d`).
+- **It is let go** once all of these have held `lane_join_hold_s` (0.25 s): its centre sat
+  beyond the next lane's far edge (half the lane spacing) within `lane_join_from_s` (3 s), or ego
+  is moving into its lane, beside which any body beyond the next lane's centre is outside it; it
+  is still beyond the centre; it moves across slower than `lane_join_max_rate_ms` (3.5 m/s);
+  stopping where it must needs under `lane_join_max_settle_ms2` (2 m/s^2); it travels along the
+  lane at `lane_join_min_speed_ms` or more, crossing no steeper than `lane_join_max_cross_ratio`
+  (0.25: speed across over speed along, about 14 degrees; `39d96205` came 3.5 m/s across at
+  6 m/s along, every filtered false brake read 0.17 or less) and braking no harder than
+  `lane_join_max_brake_ms2` (3 m/s^2; `e0638fb2` braked at 7.6 beside ego's lane, the filtered
+  false brakes at 2.3 or less); and it is not latched, crash-confirmed or head-on. A
+  reading that jumps further than the body could move, across a gap too, or a change of side
+  forgets where it came from. A TruckersMP trailer takes its tractor's verdict, because the
+  tractor shows where the truck goes; trailers are not judged themselves. While the lane frame
+  itself is missing (ego's lane handing over mid lane change, `ffb1688a`) the last verdicts hold
+  for `lane_join_gap_s` (0.25 s); a frame that exists but fails ego's tests holds nothing.
+  `lane_join_accel_lead_s` (0, off) judges a body still pushing toward ego where that push leaves
+  it later: at 0.3 s it read `c01e50a2`'s own lane change push as a swerve and braked again.
+**Why the far edge.** Without it (the single rule) the stage also let go of cut-ins from the
+next lane that start on or beyond its centre: `e40cccb7` braked 0.8 s later, `6457d079` engaged
+1.3 s later, `bca96716` went from 0.44 s before its window to 0.33 s into it. With it a car
+already in the next lane is let go only beside a lane change of ego's into the lane between.
+
+**Measured** (2026-11-26, map replay, lane join on against off). Labelled (3993 clips on the
+map): only false brakes change. `478d7717`, `4426f36d`, `ffb1688a`, `fa55c804`, `1e13ace1` and
+`c6e84845` go silent, `99112930` keeps its brake with fewer warnings, and no labelled positive
+brakes, warns or engages later. Unlabelled (11408 on the map): 14 clips lose their brake
+(`c01e50a2` and `5cb35565` among them, both false by Lukas), two lose their first onset, and 11
+brake 0.06 to 0.31 s later. Without the three guards the tuned rule lost `39d96205` and
+`e0638fb2` and braked `7f002208` 0.14 s late.
 
 ### `BendChainFilter`
 

@@ -47,6 +47,9 @@ _CHANGE_PROBES_M = (3.5, 4.5, 5.5)
 _CHANGE_SNAP_M = 1.5
 # Settling back in its own lane needs ego already braking its way across by this share.
 _SETTLE_SHARE = 0.5
+# The lane ego was settling in carries over a frame handover within this time and offset.
+_SETTLE_CARRY_S = 0.3
+_SETTLE_SAME_LANE_M = 0.5
 
 
 def bend_params(cal: AEBCalibration) -> BendParams:
@@ -81,6 +84,8 @@ class RoadPaths:
         self.lane_drift_right = 0.0
         # (side, target curve or None to settle in ego's own lane) while ego changes lanes.
         self._change = None
+        # (side, curve, time) of the lane the last bound lane change settles in, across frames.
+        self._settle = None
         # (window, its lanes' points) for the neighbour-lane search.
         self._lane_pts = None
         # (id(route), x, z, dx, dz) -> (route, curve) of the lane behind a vehicle, this frame only.
@@ -398,6 +403,16 @@ class RoadPaths:
         return True
 
     @property
+    def keep_lane(self) -> tuple | None:
+        """The whole keep frame: ``(curve, ego s, right, reach, drift, heading, accel)``, or None."""
+        return self._keep
+
+    @property
+    def lane_change(self) -> tuple | None:
+        """``(side, lane it settles in or None for its own)`` of the last bound lane change."""
+        return self._change
+
+    @property
     def keep_frame(self) -> tuple[float, float, float, float] | None:
         """Ego on the lane it keeps: metres right of it, speed and accel across it, heading error."""
         if self._keep is None:
@@ -494,13 +509,16 @@ class RoadPaths:
                 best = min(best, abs(right - ego_right))
         return best
 
-    def bind_lane_change(self, x: float, z: float, cal: AEBCalibration) -> bool:
+    def bind_lane_change(self, x: float, z: float, cal: AEBCalibration,
+                         carry_only: bool = False) -> bool:
         """Ego moving across its lane toward one it can settle in (README lane change clear).
 
         The first half heads for the neighbour lane on that side, the second half settles in
         ego's own lane. False when ego is calm, heads off too steeply or could not settle.
+        ``carry_only`` binds nothing but the lane change already under way (route frame unbound).
         """
         self._change = None
+        last, self._settle = self._settle, None
         keep = self._keep
         if keep is None or self._snap is None:
             return False
@@ -509,6 +527,10 @@ class RoadPaths:
                 or abs(heading) > math.radians(cal.lane_change_max_heading_deg)):
             return False
         side = 1.0 if drift > 0.0 else -1.0
+        # Ego's frame moved onto the lane it was settling in: still the same lane change (870f17e3).
+        carried = cal.lane_change_handover_carry and self._same_settle_lane(last, side, x, z, ego_right)
+        if carry_only and not carried:
+            return False
 
         def settles(remaining: float) -> float | None:
             """Lateral decel that stops ego by ``remaining`` plus the overshoot, or None."""
@@ -520,23 +542,42 @@ class RoadPaths:
         # Back to its own lane centre only while ego already slows its way across (ac7bb3ab
         # crossed its centre toward parked cars at 1 m/s); else on into the next lane.
         need = settles(-side * ego_right) if side * ego_right < 0.0 else None
-        if need is not None and -side * accel >= _SETTLE_SHARE * need:
+        if need is not None and (carried or -side * accel >= _SETTLE_SHARE * need):
             self._change = (side, None)
+            if carried:
+                self._settle = (side, curve, self._now)
             return True
-        target = self._neighbour_lane(curve, ego_s, side, cal)
+        if carry_only:
+            return False
+        target = self.neighbour_lane(curve, ego_s, side, cal)
         if target is None or not settles(-side * fast_offset(target, x, z)[1]):
             return False
         self._change = (side, target)
+        self._settle = (side, target, self._now)
         return True
 
-    def _neighbour_lane(self, curve, ego_s: float, side: float, cal: AEBCalibration):
-        """The lane beside ego's on ``side``, as a road curve from just ahead of ego, or None."""
+    def _same_settle_lane(self, last, side: float, x: float, z: float, ego_right: float) -> bool:
+        """Ego's lane now is the one the last bound lane change, on this side, settles in."""
+        if last is None or last[0] != side or not 0.0 <= self._now - last[2] <= _SETTLE_CARRY_S:
+            return False
+        right = fast_offset(last[1], x, z)[1]
+        return math.isfinite(right) and abs(right - ego_right) <= _SETTLE_SAME_LANE_M
+
+    @property
+    def settling(self) -> bool:
+        """A lane change bound within the carry time, whose lane the keep frame may still be on."""
+        return (self._settle is not None and self._keep is not None
+                and 0.0 <= self._now - self._settle[2] <= _SETTLE_CARRY_S)
+
+    def neighbour_lane(self, curve, ego_s: float, side: float, cal: AEBCalibration,
+                        ahead: float = _CHANGE_AHEAD_M):
+        """The lane beside ego's on ``side``, as a road curve from ``ahead`` of ego, or None."""
         window = getattr(self._snap, "window", None)
         lanes = getattr(window, "lanes", ())
         near = getattr(window, "index", None)
         if not lanes or near is None:
             return None
-        s = min(ego_s + _CHANGE_AHEAD_M, curve.length - 1.0)
+        s = min(max(ego_s + ahead, 0.0), curve.length - 1.0)
         p, h = _curve_point(curve, s), _curve_heading(curve, s)
         if p is None or h is None:
             return None
