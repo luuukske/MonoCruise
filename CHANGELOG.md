@@ -11,35 +11,49 @@ The `[Unreleased]` block accumulates changes between releases. `tools/release.py
 renames it to the released version and starts a fresh `[Unreleased]` above it.
 
 ## [Unreleased]
+
+**HIGHLY EXPEREMENTAL**: expect hard braking from both ACC and AEB when not seeing any danger. **USE V1.2 EARLY PREVIEWS WITH CARE!**
+
 ### Added
 - **Lane departure warning (beta)**: a new Lane departure option under Emergency Braking rumbles a force feedback wheel when you drift over a lane line, and MonoCruise installs its game plugin for it when you turn it on. With ACC on, the cruise control panel shows lane lines beside the distance lines (white when watching, dimmed while paused, red on the side it just acted on), and the live bottom bar turns that bottom corner of the screen red.
 - **Map data for ACC, AEB and lane departure**: MonoCruise now reads the lane layout from the map files already in your ETS2, ATS or TruckersMP install. it reads this data in real time, and does not impact the FPS that much, because of the real time map extraction. that way the whole map doesn't need to be read first.
 - **Close-follow warning on the cruise control panel**: with ACC on, the vehicle on the panel moves to the closest position and an orange warning triangle appears in front of it when you follow the vehicle ahead very closely for a few seconds, whether cruise control is engaged or not. It goes back to normal once you leave more room.
 
 ### Fixed
-- **Gas stuck and no brake when the PC hung for a moment**: if the disk or Windows stalled for a few seconds, MonoCruise could keep your last gas pressed and ignore your brake, and after a few stalls stop passing your pedals at all. It no longer waits on the disk while driving, and if pedal output ever stalls anyway, the gas is released and your brake still gets through.
-- **Lane sat off to the side where the centre gap changes**: centred in the right lane, the lane line could sit about a lane toward the middle or the shoulder, then line up again just ahead. It now follows the lane through that change, including where both stretches carry on as themselves.
-- **Lane lines were the stock map on modded maps**: on ProMods and other map mods the lanes could be the stock roads, or missing where the mod adds land. MonoCruise now follows the map packages the game loaded. A clip reviewed with the game closed uses them when the stock map does not fit that drive.
-- **Number row and numpad were the same button**: assigning 1 also reacted to the numpad, and the other way around. They are separate keys now, so a numpad number has to be assigned again. Num Lock does not change which key it is.
-- **AEB could treat a stopped or crashing TruckersMP trailer as moving**: when another truck passed beside a stopped trailer, AEB could give the trailer that truck's speed, parked trailers could pick up a passing truck's speed too, and a crash seen on the truck was not applied to its trailer. Trailers are now matched to the truck actually pulling them, using TruckersMP's own trailer link where available, and a crash on either part counts for the whole rig.
-- **AEB braked for traffic merging or turning beside you**: a car joining the next lane from a slip road, or turning into a road at a junction, could look like it was heading into your lane, also with TruckersMP players. With map data AEB now follows each vehicle along its own lane and only brakes once it actually leaves it toward you.
-- **AEB braked for cars turning out of a side road**: a car pulling out and turning into the oncoming lane looked like it would swing into your lane, so AEB could brake hard as it straightened out beside you. AEB now expects the turn to finish and stays quiet unless that path actually reaches your lane.
-- **AEB braked when a TruckersMP player's speed glitched**: a brief dip in a player's reported speed could make AEB think they were stopping dead in front of you. It now assumes no harder braking than a vehicle can really do.
-- **AEB braked for stopped traffic around a bend**: a queue standing on a bend ahead, including one waiting in the oncoming lane, could look like it was in your lane. AEB now reads the bend from the way the stopped vehicles face and from the line the queue forms.
-- **AEB braked while you steered past something at walking pace**: in yards, junctions and tight turns AEB assumed the truck could barely steer at low speed, or that the turn would wrap on into parked vehicles beside it, so it braked for things you were clearly turning around. It now allows for the steering a slow truck really has and ignores vehicles you are pulling away from.
-- **AEB missed some vehicles heading straight for you**: a TruckersMP car crossing or slowly turning across your path, an oncoming car drifting into your lane, or a vehicle beside you veering in could be written off as passing clear. AEB now also checks the line each vehicle is really closing on and brakes when it is coming at you up close.
-- **AEB stopped too far back at low speed**: closing in slowly on a stopped vehicle, AEB stopped half a metre short, as it does at motorway speed. Slow approaches now stop closer, fast ones keep the same room.
-- **AEB braked late in the Volvo 9700 coach**: AEB thought the coach's nose ended over a metre short of the real bumper, so it braked late and ACC followed closer than set. It now knows where the coach's bumper is.
-- **AEB was late for a stopped car round a bend**: AEB only saw a stopped or crashed vehicle in your lane once your truck had turned into the bend. With the map files it now looks ahead along your lane while you follow it and brakes earlier; everything else it brakes for is unchanged.
-- **AEB braked for traffic keeping to its own lane or parked beside the road**: a truck joining the next lane from a slip road, oncoming traffic on a bend or a truck parked on the shoulder of a bend could trigger a brake or a warning even though it never came into your lane. AEB now knows where the lanes run, from the map files or, on a bend without them, from the way parked vehicles and the traffic around them are turned: it stays quiet for vehicles that keep to their own lane or stand clear of yours, also while you change lanes past stopped traffic or take a sharp bend, and brakes sooner for one that is in your lane.
-- **ACC pulled away too hard in low gears**: on a gearbox with few gears, or right after changing gearbox, MonoCruise thought the low gears pulled far weaker than they do, so ACC overshot when pulling away. It now uses your truck's own gear ratios, so it knows each gear's pull from the start.
-- **ACC accelerated in steps when pulling away**: at every gear change, the truck ahead's or your own, ACC eased off or kicked back in, so pulling away in a jam felt wobbly. ACC now rides through gear changes smoothly, and still reacts straight away when the truck ahead brakes.
-- **ACC braked too long for a quick brake tap ahead in TruckersMP**: when the truck ahead touched its brakes for a moment, ACC kept braking for about a second after the tap was over. It now sees the tap end sooner and brakes less for it.
-- **ACC stayed closer than your following distance after a slowdown**: when the vehicle ahead braked briefly while you were catching up, ACC let go of its own brake too soon and then sat well inside the distance you set. It now settles back at your following distance.
-- **ACC braked for traffic further ahead**: when a slower vehicle was ahead of the truck you follow, ACC could brake well before that truck did, often for traffic it then simply passed or eased past. ACC now only eases off the gas for traffic further ahead, and brakes once it is really slowing.
-- **ACC pulsed the gas and brake while following**: following steadily, or as the vehicle ahead eased onto or off its brake, ACC kept letting off and pressing again, and a slightly harder slowdown ahead could get less braking than a softer one. It now holds a steady pedal, and braking builds and fades in one go.
-- **Cruise control switched off after ACC or AEB braked**: when ACC or AEB let go of a firm brake quickly, MonoCruise mistook its own braking for you braking in game and turned cruise control off. It now only switches off for your own brake.
-- **Cruise control panel and live bar stuttered in towns**: driving through busy junctions, the panel and the bottom bar could freeze for up to a second, and again whenever ACC picked up or switched the vehicle ahead. Following the lanes through junctions now takes a fraction of the work, so the display stays smooth.
+
+#### Pedals
+- **Gas stuck and brake ignored during a PC stall**: if Windows or the disk stalled, MonoCruise could hold the gas, ignore your brake and, after repeated stalls, stop passing pedal input altogether. Driving no longer waits on the disk; if pedal output stalls, gas is released and your brake still gets through. (relevant for testers, regular users not applicable really...)
+
+#### Adaptive Cruise Control (ACC)
+- **Pulling away too hard in low gears**: ACC could overshoot with a gearbox with few gears or just after changing gearbox. It now uses your truck's gear ratios to estimate its pulling power from the start.
+- **Jerky acceleration during gear changes**: ACC could ease off or kick back in when you or the vehicle ahead changed gear. Pulling away is smoother, while ACC still reacts immediately to braking ahead.
+- **Braking too long after a quick brake tap in TruckersMP**: ACC could keep braking for about a second after the vehicle ahead released its brake. It now detects the end of the tap sooner.
+- **Following too closely after a slowdown**: ACC could release its brake too early when a vehicle ahead briefly slowed down, then stay inside your chosen following distance. It now settles back at the set distance.
+- **Braking for traffic further ahead**: ACC could brake for a slower vehicle in front of the truck you were following, even if that truck passed it. ACC now eases off the gas for traffic further ahead and brakes once it is really slowing.
+- **Gas or brake pulsing while following**: ACC could repeatedly press and release the pedals during steady following or as the vehicle ahead eased onto or off its brake. A slightly harder slowdown could also get less braking than a softer one. Pedal input is now steadier, and braking builds and fades smoothly.
+
+#### Automatic Emergency Braking (AEB)
+- **Braking for vehicles merging or turning beside you**: traffic joining the next lane from a slip road or turning at a junction, including TruckersMP players, could appear to be entering your lane. With map data, AEB follows vehicles along their lanes and brakes when they leave them toward you.
+- **Braking for cars turning out of a side road**: a car turning into the oncoming lane could appear to swing into yours as it straightened out. AEB now accounts for the turn finishing and stays quiet unless the predicted path reaches your lane.
+- **Braking for traffic in another lane or on the shoulder**: vehicles in the next or oncoming lane, stopped queues on a bend, and vehicles parked beside the road could cause unnecessary warnings or braking. AEB uses map lanes, or the direction and formation of traffic on bends when map data is unavailable, to judge where they are. This also improves passing stopped traffic and taking sharp bends, while helping AEB brake sooner for a vehicle in your lane.
+- **Braking while steering around vehicles at low speed**: in yards, junctions and tight turns, AEB could brake for parked vehicles you were driving around. It now better accounts for low-speed steering and vehicles you are moving away from.
+- **Braking for a TruckersMP speed glitch**: a brief drop in another player's reported speed could look like an instant stop. AEB now limits its estimate to realistic braking.
+- **Stopped or crashed TruckersMP trailers mistaken for moving traffic**: a trailer could pick up the speed of a passing truck, or fail to reflect a crash involving its own truck. Trailers are now matched to the truck pulling them, using TruckersMP's trailer link where available, and a crash on either part counts for the whole rig.
+- **Missing vehicles crossing or moving into your path**: AEB could treat a TruckersMP car crossing or slowly turning across your path, an oncoming car drifting into your lane, or a vehicle beside you veering in as passing clear. It now checks how those vehicles are closing in and reacts when they approach you up close.
+- **Braking late for a stopped vehicle around a bend**: AEB could miss a stopped or crashed vehicle in your lane until your truck entered the bend. With map data, it now looks further along your lane and brakes earlier.
+- **Stopping too far behind a vehicle at low speed**: AEB used the same half-metre stopping gap for a slow approach as at motorway speed. It now stops closer at low speed while keeping the same gap at higher speeds.
+
+#### Cruise control and vehicle geometry
+- **Cruise control switched off after ACC or AEB braked**: releasing a firm automatic brake could be mistaken for you pressing the brake in game. Cruise control now disengages for your own braking rather than its own.
+- **Volvo 9700 coach braked late or followed too closely**: MonoCruise placed the front of the coach over a metre behind its actual bumper. The corrected position improves AEB braking and ACC following distance.
+
+#### Map and lane display
+- **Lane lines shifted to the side where the centre gap changes**: the displayed lane could jump toward the middle or shoulder before lining up again. It now follows the lane through these changes, including where both road stretches continue.
+- **Wrong or missing lane lines on ProMods and other map mods**: MonoCruise could show stock roads or miss roads added by a mod. It now follows the map packages loaded by the game. When reviewing a clip with the game closed, it uses those packages if the stock map does not fit the drive.
+- **Cruise control panel and live bar stuttered in towns**: the displays could freeze for up to a second at busy junctions or when ACC acquired or switched the vehicle ahead. Lane processing through junctions now takes less work, keeping the displays smoother.
+
+#### Keyboard bindings
+- **Number row and numpad treated as the same keys**: assigning a number also triggered it from the other location. They are now separate, so numpad numbers need to be assigned again. Num Lock does not change which key is detected.
 
 ## [1.1.4-preview.1] - 2026-11-04
 ### Added
