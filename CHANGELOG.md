@@ -12,6 +12,7 @@ renames it to the released version and starts a fresh `[Unreleased]` above it.
 
 ## [Unreleased]
 
+## [1.2.0-preview.1] - 2026-11-26
 **HIGHLY EXPERIMENTAL**: expect hard braking from both ACC and AEB when not seeing any danger. **USE V1.2 EARLY PREVIEWS WITH CARE!**
 
 ### Added
