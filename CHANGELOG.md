@@ -12,17 +12,17 @@ renames it to the released version and starts a fresh `[Unreleased]` above it.
 
 ## [Unreleased]
 
-**HIGHLY EXPEREMENTAL**: expect hard braking from both ACC and AEB when not seeing any danger. **USE V1.2 EARLY PREVIEWS WITH CARE!**
+**HIGHLY EXPERIMENTAL**: expect hard braking from both ACC and AEB when not seeing any danger. **USE V1.2 EARLY PREVIEWS WITH CARE!**
 
 ### Added
 - **Lane departure warning (beta)**: a new Lane departure option under Emergency Braking rumbles a force feedback wheel when you drift over a lane line, and MonoCruise installs its game plugin for it when you turn it on. With ACC on, the cruise control panel shows lane lines beside the distance lines (white when watching, dimmed while paused, red on the side it just acted on), and the live bottom bar turns that bottom corner of the screen red.
-- **Map data for ACC, AEB and lane departure**: MonoCruise now reads the lane layout from the map files already in your ETS2, ATS or TruckersMP install. it reads this data in real time, and does not impact the FPS that much, because of the real time map extraction. that way the whole map doesn't need to be read first.
+- **Map data for ACC, AEB and lane departure**: MonoCruise now reads the lane layout from the map files already in your ETS2, ATS or TruckersMP install. It reads the data as you drive, so the whole map never has to be loaded first and FPS is barely affected.
 - **Close-follow warning on the cruise control panel**: with ACC on, the vehicle on the panel moves to the closest position and an orange warning triangle appears in front of it when you follow the vehicle ahead very closely for a few seconds, whether cruise control is engaged or not. It goes back to normal once you leave more room.
 
 ### Fixed
 
 #### Pedals
-- **Gas stuck and brake ignored during a PC stall**: if Windows or the disk stalled, MonoCruise could hold the gas, ignore your brake and, after repeated stalls, stop passing pedal input altogether. Driving no longer waits on the disk; if pedal output stalls, gas is released and your brake still gets through. (relevant for testers, regular users not applicable really...)
+- **Gas stuck and brake ignored during a PC stall**: if Windows or the disk stalled, MonoCruise could hold the gas, ignore your brake and, after repeated stalls, stop passing pedal input altogether. Driving no longer waits on the disk; if pedal output stalls, gas is released and your brake still gets through.
 
 #### Adaptive Cruise Control (ACC)
 - **Pulling away too hard in low gears**: ACC could overshoot with a gearbox with few gears or just after changing gearbox. It now uses your truck's gear ratios to estimate its pulling power from the start.
